@@ -1,0 +1,8 @@
+service : {
+  hello       : ()      -> (text)  query;
+  count       : ()      -> (nat64) query;
+  increment   : ()      -> ();
+  write_blob  : (blob)  -> ();
+  read_blob   : ()      -> (blob)  query;
+  stable_size : ()      -> (nat64) query;
+}

@@ -1,0 +1,12 @@
+{
+  "name": "hellochat-test-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node test.mjs" },
+  "dependencies": {
+    "@dfinity/agent": "^2.4.1",
+    "@dfinity/principal": "^2.4.1",
+    "ic-websocket-js": "^0.5.0"
+  }
+}

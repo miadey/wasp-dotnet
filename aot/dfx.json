@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "canisters": {
+    "hello": {
+      "type": "custom",
+      "wasm": "samples/HelloWorld/HelloWorld.canister.wasm",
+      "candid": "samples/HelloWorld/hello.did",
+      "build": []
+    },
+    "counter": {
+      "type": "custom",
+      "wasm": "samples/Counter/Counter.canister.wasm",
+      "candid": "samples/Counter/counter.did",
+      "build": []
+    },
+    "helloweb": {
+      "type": "custom",
+      "wasm": "samples/HelloWeb/HelloWeb.canister.wasm",
+      "candid": "samples/HelloWeb/helloweb.did",
+      "build": []
+    },
+    "hellofetch": {
+      "type": "custom",
+      "wasm": "samples/HelloFetch/HelloFetch.canister.wasm",
+      "candid": "samples/HelloFetch/hellofetch.did",
+      "build": []
+    },
+    "hellochat": {
+      "type": "custom",
+      "wasm": "samples/HelloChat/HelloChat.canister.wasm",
+      "candid": "samples/HelloChat/hellochat.did",
+      "build": []
+    },
+    "blazorchat": {
+      "type": "assets",
+      "source": ["samples/BlazorChat/bin/Release/net10.0/publish/wwwroot"]
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  }
+}

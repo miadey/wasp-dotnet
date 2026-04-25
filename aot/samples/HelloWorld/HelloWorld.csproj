@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <NativeLib>Shared</NativeLib>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <RootNamespace>WaspSample.HelloWorld</RootNamespace>
+    <AssemblyName>HelloWorld</AssemblyName>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <SelfContained>true</SelfContained>
+    <NoWarn>$(NoWarn);IL2026;IL3050</NoWarn>
+    <!-- Override componentize-dotnet defaults: target plain wasi preview 1
+         (core module) instead of wasip2 (component model). -->
+    <IlcLlvmTarget>wasm32-wasip1</IlcLlvmTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.7.0-preview00010" />
+    <PackageReference Include="runtime.linux-x64.Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-alpha.1.25162.1" />
+    <TrimmerRootAssembly Include="HelloWorld" />
+    <!-- Tell ILCompiler to scan our assembly for [UnmanagedCallersOnly]
+         entry points and emit them to the exports file so the linker
+         turns them into wasm exports. -->
+    <UnmanagedEntryPointsAssembly Include="HelloWorld" />
+  </ItemGroup>
+
+  <!-- Strip the component-type WIT files added by the ILCompiler.LLVM
+       targets so we get a plain core wasm module, not a WASI component. -->
+  <Target Name="StripWasmComponentTypeWit" BeforeTargets="LinkNativeLlvm">
+    <ItemGroup>
+      <WasmComponentTypeWit Remove="@(WasmComponentTypeWit)" />
+    </ItemGroup>
+  </Target>
+
+</Project>

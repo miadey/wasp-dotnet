@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Wasp.Outcalls</RootNamespace>
+    <AssemblyName>Wasp.Outcalls</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>Wasp.Outcalls</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Description>Outbound HTTPS calls from a canister via the IC management canister's http_request endpoint.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+  </ItemGroup>
+
+</Project>

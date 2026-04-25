@@ -1,0 +1,39 @@
+# dotnet build artifacts
+**/bin/
+**/obj/
+
+# rust build artifacts
+**/target/
+
+# node
+**/node_modules/
+
+# dfx local state
+.dfx/
+**/data/
+**/.cache/dfinity/
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# build outputs we don't track
+*.canister.wasm
+**/wwwroot/_framework/
+
+# generated did from source generator (built per-deploy)
+samples/*/Generated/
+
+# logs
+*.log
+/tmp/
+
+# nuget
+**/.nuget/
+*.nupkg
+
+# misc
+.env
+.env.local

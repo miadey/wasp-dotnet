@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Wasp.WebSockets</RootNamespace>
+    <AssemblyName>Wasp.WebSockets</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>Wasp.WebSockets</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Description>C# port of Omnia's ic-websocket protocol for Internet Computer canisters. Speaks the on-wire format the official ic-websocket-gateway and ic-websocket-js SDK use.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+  </ItemGroup>
+
+</Project>

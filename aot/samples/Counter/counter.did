@@ -1,0 +1,7 @@
+service : {
+  greet     : (text)  -> (text)  query;
+  count     : ()      -> (nat64) query;
+  increment : ()      -> (nat64);
+  add       : (nat64) -> (nat64);
+  reset     : ()      -> ();
+}

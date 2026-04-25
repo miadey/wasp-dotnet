@@ -1,0 +1,127 @@
+@page "/"
+@using Microsoft.JSInterop
+@inject IJSRuntime JS
+
+<PageTitle>Wasp.Chat</PageTitle>
+
+<div class="container py-4">
+    <h1 class="mb-1">Wasp.Chat</h1>
+    <p class="text-muted">
+        Blazor WebAssembly running from an ICP asset canister, talking to a
+        C# canister over <code>ic-websocket</code>.
+    </p>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="row g-2 align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label small text-muted">HelloChat canister id</label>
+                    <input class="form-control" @bind="CanisterId" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small text-muted">Gateway URL</label>
+                    <input class="form-control" @bind="GatewayUrl" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small text-muted">Network URL</label>
+                    <input class="form-control" @bind="NetworkUrl" />
+                </div>
+                <div class="col-md-1">
+                    <button class="btn btn-primary w-100" @onclick="Connect" disabled="@(IsConnected || IsConnecting)">
+                        @(IsConnecting ? "…" : IsConnected ? "✓" : "Go")
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header">Messages</div>
+        <ul class="list-group list-group-flush" style="max-height: 50vh; overflow-y: auto;">
+            @foreach (var (kind, text, ts) in Log)
+            {
+                <li class="list-group-item d-flex">
+                    <span class="badge bg-@(kind switch
+                    {
+                        "out" => "secondary",
+                        "in" => "success",
+                        "sys" => "info",
+                        _ => "danger",
+                    }) me-2">@kind</span>
+                    <span class="flex-grow-1">@text</span>
+                    <span class="text-muted small ms-2">@ts</span>
+                </li>
+            }
+            @if (Log.Count == 0)
+            {
+                <li class="list-group-item text-muted">No messages yet.</li>
+            }
+        </ul>
+    </div>
+
+    <form @onsubmit="Send" @onsubmit:preventDefault="true" class="d-flex gap-2">
+        <input class="form-control" placeholder="Type a message…" @bind="Draft" disabled="@(!IsConnected)" />
+        <button class="btn btn-primary" type="submit" disabled="@(!IsConnected || string.IsNullOrWhiteSpace(Draft))">
+            Send
+        </button>
+    </form>
+</div>
+
+@code {
+    string CanisterId = "";
+    string GatewayUrl = "ws://127.0.0.1:8080";
+    string NetworkUrl = "http://127.0.0.1:4943";
+    string Draft = "";
+
+    bool IsConnected;
+    bool IsConnecting;
+    List<(string kind, string text, string ts)> Log = new();
+
+    DotNetObjectReference<Home>? _selfRef;
+
+    async Task Connect()
+    {
+        if (string.IsNullOrWhiteSpace(CanisterId)) return;
+        IsConnecting = true;
+        StateHasChanged();
+        try
+        {
+            _selfRef = DotNetObjectReference.Create(this);
+            await JS.InvokeAsync<bool>("waspChat.connect", CanisterId, GatewayUrl, NetworkUrl, _selfRef);
+        }
+        catch (Exception ex)
+        {
+            Log.Add(("err", "connect failed: " + ex.Message, Now()));
+        }
+        finally
+        {
+            IsConnecting = false;
+            StateHasChanged();
+        }
+    }
+
+    async Task Send()
+    {
+        if (!IsConnected || string.IsNullOrWhiteSpace(Draft)) return;
+        var text = Draft.Trim();
+        Draft = "";
+        Log.Add(("out", text, Now()));
+        StateHasChanged();
+        try
+        {
+            await JS.InvokeVoidAsync("waspChat.send", text);
+        }
+        catch (Exception ex)
+        {
+            Log.Add(("err", "send failed: " + ex.Message, Now()));
+            StateHasChanged();
+        }
+    }
+
+    [JSInvokable] public Task OnOpened() { IsConnected = true; Log.Add(("sys", "connected", Now())); StateHasChanged(); return Task.CompletedTask; }
+    [JSInvokable] public Task OnClosed() { IsConnected = false; Log.Add(("sys", "closed", Now())); StateHasChanged(); return Task.CompletedTask; }
+    [JSInvokable] public Task OnError(string msg) { Log.Add(("err", msg, Now())); StateHasChanged(); return Task.CompletedTask; }
+    [JSInvokable] public Task OnMessageReceived(string text) { Log.Add(("in", text, Now())); StateHasChanged(); return Task.CompletedTask; }
+
+    static string Now() => DateTime.Now.ToString("HH:mm:ss");
+}
