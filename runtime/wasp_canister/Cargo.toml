@@ -1,0 +1,15 @@
+[package]
+name = "wasp_canister"
+version = "0.1.0-alpha"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ic-cdk = "0.19"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

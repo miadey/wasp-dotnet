@@ -1,0 +1,194 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref so PR pushes don't queue forever.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WASM_TOOLS_VERSION: "1.220.0"
+  IC_WASM_VERSION: "0.9.1"
+  # 10 MiB per-canister code-section budget. See SIZE_BUDGET.md for
+  # rationale and how to investigate a regression.
+  SIZE_BUDGET_BYTES: "10485760"
+
+jobs:
+  # =========================================================================
+  # AOT canister build pipeline
+  # =========================================================================
+  aot-canisters:
+    name: AOT canisters (build + validate + size)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- Rust toolchain for shared/tools/wasi-stub ------------------------
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + wasi-stub target dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            shared/tools/wasi-stub/target
+          key: cargo-${{ runner.os }}-wasi-stub-${{ hashFiles('shared/tools/wasi-stub/Cargo.lock', 'shared/tools/wasi-stub/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-wasi-stub-
+
+      - name: Build wasi-stub (release)
+        run: cargo build --release --manifest-path shared/tools/wasi-stub/Cargo.toml
+
+      # ---- wasm-tools + ic-wasm (host tooling for icp-publish + validate) ---
+      - name: Cache wasm-tools / ic-wasm binaries
+        id: cache-wasm-bins
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin
+          key: wasm-bins-${{ runner.os }}-wasm-tools-${{ env.WASM_TOOLS_VERSION }}-ic-wasm-${{ env.IC_WASM_VERSION }}
+
+      - name: Install wasm-tools + ic-wasm
+        if: steps.cache-wasm-bins.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.local/bin
+          # wasm-tools (prebuilt release tarball)
+          curl -sSL "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux.tar.gz" \
+            | tar -xz --strip-components=1 -C ~/.local/bin "wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux/wasm-tools"
+          # ic-wasm (single static binary)
+          curl -sSL -o ~/.local/bin/ic-wasm \
+            "https://github.com/dfinity/ic-wasm/releases/download/${IC_WASM_VERSION}/ic-wasm-linux64"
+          chmod +x ~/.local/bin/ic-wasm
+
+      - name: Add ~/.local/bin to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify host tooling
+        run: |
+          wasm-tools --version
+          ic-wasm --version
+
+      # ---- Docker buildx + cached image ------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache docker build layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: buildx-${{ runner.os }}-${{ hashFiles('aot/docker/Dockerfile.build') }}
+          restore-keys: |
+            buildx-${{ runner.os }}-
+
+      - name: Build wasp-dotnet-build:latest image
+        uses: docker/build-push-action@v6
+        with:
+          context: aot/docker
+          file: aot/docker/Dockerfile.build
+          tags: wasp-dotnet-build:latest
+          load: true
+          platforms: linux/amd64
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Rotate buildx cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      # ---- NuGet cache (mounted into the docker container as a volume) -----
+      #
+      # The build script mounts a docker volume named `wasp-nuget` at
+      # /nuget inside the container; the Dockerfile sets NUGET_PACKAGES=/nuget
+      # so dotnet restore writes there. We persist the volume's contents
+      # across CI runs by tar-ing a host directory in/out of the volume.
+      - name: Restore NuGet cache
+        id: nuget-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wasp-nuget
+          key: nuget-${{ runner.os }}-${{ hashFiles('aot/**/*.csproj', 'aot/NuGet.config') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Seed docker volume from NuGet cache
+        run: |
+          set -euo pipefail
+          docker volume create wasp-nuget >/dev/null
+          if [[ -d ~/.cache/wasp-nuget ]] && [[ -n "$(ls -A ~/.cache/wasp-nuget 2>/dev/null || true)" ]]; then
+            docker run --rm -v wasp-nuget:/nuget -v "$HOME/.cache/wasp-nuget:/seed:ro" \
+              alpine sh -c 'cp -a /seed/. /nuget/ 2>/dev/null || true'
+          fi
+
+      # ---- Build all AOT canister samples ----------------------------------
+      - name: Build + validate + size-check all canister samples
+        run: bash .github/workflows/build-canisters.sh
+
+      # ---- Blazor WebAssembly static-site sample ---------------------------
+      #
+      # BlazorChat is not a canister — it's published as static files and
+      # served via an asset canister. We just check `dotnet publish` succeeds
+      # so a regression in that sample fails CI too.
+      - name: Publish BlazorChat (Blazor WASM static site)
+        run: |
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/aot:/work" \
+            -v wasp-nuget:/nuget \
+            wasp-dotnet-build:latest \
+            bash -c "cd samples/BlazorChat && dotnet publish -c Release"
+
+      # ---- Persist NuGet cache for the next run ----------------------------
+      - name: Snapshot docker volume back to NuGet cache
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.cache/wasp-nuget
+          docker run --rm -v wasp-nuget:/nuget -v "$HOME/.cache/wasp-nuget:/seed" \
+            alpine sh -c 'cp -a /nuget/. /seed/ 2>/dev/null || true'
+
+      # ---- Upload built canister wasms as artifacts ------------------------
+      - name: Upload canister wasms
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canister-wasms
+          path: aot/samples/*/*.canister.wasm
+          if-no-files-found: warn
+          retention-days: 14
+
+  # =========================================================================
+  # PocketIC integration tests (TODO — Phase B)
+  # =========================================================================
+  #
+  # Once the AOT samples have a candid interface and a smoke-test harness,
+  # add a pocket-ic-based job that downloads the artifacts produced by the
+  # `aot-canisters` job, installs each canister into a PocketIC instance,
+  # and runs basic update/query calls against them.
+  #
+  # pocket-ic-tests:
+  #   name: PocketIC integration tests
+  #   needs: aot-canisters
+  #   runs-on: ubuntu-24.04
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: canister-wasms
+  #         path: aot/samples
+  #     - name: Install PocketIC
+  #       run: |
+  #         curl -sSL -o pocket-ic.gz \
+  #           https://github.com/dfinity/pocketic/releases/latest/download/pocket-ic-x86_64-linux.gz
+  #         gunzip pocket-ic.gz && chmod +x pocket-ic
+  #     - name: Run integration tests
+  #       run: ./tests/pocket-ic/run.sh
