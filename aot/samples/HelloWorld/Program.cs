@@ -217,7 +217,7 @@ public static unsafe class HelloCanister
     public static void Hello()
     {
         Print(HelloLog);
-        Reply(Candid.EncodeText("Hello from .NET 10 on ICP (UPGRADED v2)"));
+        Reply(Candid.EncodeText("Hello from C# compiled to wasm by .NET 10"));
     }
 
     [UnmanagedCallersOnly(EntryPoint = "canister_update__increment")]

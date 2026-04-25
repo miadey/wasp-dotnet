@@ -14,7 +14,7 @@ public static partial class CounterCanister
     public static string greet(string who)
     {
         Reply.Print($"[counter] greet({who})");
-        return $"Hello, {who}, from .NET 10 on ICP (UPGRADED) — counter is at {_counter.Value}";
+        return $"Hello, {who}, from C# (compiled-to-wasm) on ICP — counter is at {_counter.Value}";
     }
 
     [CanisterQuery]

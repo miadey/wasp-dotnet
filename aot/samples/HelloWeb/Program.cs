@@ -19,12 +19,12 @@ public static class HelloWebCanister
 
         WaspHttp.Get("/", _ => HttpResponse.Html(
             "<!doctype html><meta charset=utf-8><title>wasp-dotnet</title>" +
-            "<h1>.NET 10 on ICP</h1>" +
+            "<h1>C# compiled to wasm on ICP</h1>" +
             "<p>Try <a href=/hello>/hello</a>, <a href=/count>/count</a>, " +
             "or <a href=/bump>/bump</a>.</p>"));
 
         WaspHttp.Get("/hello", _ => HttpResponse.Text(
-            "Hello from .NET 10 running inside an Internet Computer canister!"));
+            "Hello from C# (NativeAOT-compiled to wasm) inside an ICP canister!"));
 
         WaspHttp.Get("/count", _ => HttpResponse.Json(
             $"{{\"count\":{_counter.Value}}}"));

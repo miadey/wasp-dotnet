@@ -63,10 +63,10 @@ dfx canister create hello
 ./samples/HelloWorld/build-and-deploy.sh
 
 # call the canister
-dfx canister call hello greet '("world")'
+dfx canister call hello hello
 ```
 
-You should see `("Hello, world, from .NET 10 on ICP")`.
+You should see `("Hello from C# compiled to wasm by .NET 10")`.
 
 ---
 

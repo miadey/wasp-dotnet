@@ -2,32 +2,21 @@
 # 30_merge.sh — combine wasp_canister.wasm + dotnet.native.wasm into a
 # single canister wasm.
 #
-# Pipeline (Phase A v0.3 — what the e2e attempts have validated):
-#   1. wasm-merge --skip-export-conflicts
-#        — name wasp_canister "env" so dotnet.native's env imports
-#          resolve against our exports (else they stay unresolved)
-#        — --skip-export-conflicts drops dotnet.native's "memory"
-#          export, keeping wasp_canister's
-#        — --all-features so dotnet's bulk-memory / sign-ext / etc.
-#          pass binaryen's validator
+# Pipeline (Phase A complete, all 6 stages green):
+#   1. wasm-merge          — name wasp_canister "env" so dotnet's env
+#                             imports resolve; --skip-export-conflicts
+#                             keeps one "memory" export
 #   2. wasm-opt --multi-memory-lowering
-#        — fuses wasp_canister's memory(0) + dotnet's memory(1) into
-#          a single memory ICP's wasmtime accepts
-#   3. wasm-const-lower
-#        — replaces extended-const data/element offsets like
-#          (offset global.get $g i32.const N i32.add) with literal
-#          (offset i32.const initial[$g]+N). ICP wasmtime doesn't
-#          accept the wasm extended-const proposal yet.
-#   4. icp-publish.sh
-#        — rename `canister_<kind>__<name>` → "canister_<kind> <name>"
-#   5. wasi-stub
-#        — replace the 10 leftover wasi_snapshot_preview1 imports with
-#          no-ops / debug_print routes
+#                          — fuse wasp_canister's memory + dotnet's
+#                             memory into a single memory
+#   3. wasm-const-lower    — inline extended-const data/element offsets
+#   4. wasm-table-merge    — drop wasp_canister's unused table so ICP
+#                             accepts the single-table requirement
+#   5. icp-publish.sh      — rename `canister_<kind>__<name>` exports
+#   6. wasi-stub           — no-op stubs for leftover wasi imports
 #
-# CURRENT BLOCKER (issue #34): even after all 5 stages above, ICP
-# rejects the canister with "table count too high at 2" — wasm-merge
-# can't combine the two function tables and binaryen has no
-# multi-table-lowering pass. Solving that closes #11.
+# Output passes wasm-tools validate, dfx canister install succeeds,
+# and the canister_init runs (Phase A v1.0 GREEN).
 
 set -euo pipefail
 
@@ -76,13 +65,19 @@ wasm-opt "$OUT_MERGED" -o "$OUT_LOWERED" \
     --multi-memory-lowering \
     --all-features
 
-echo "[3/5] wasm-const-lower (inline extended-const data/element offsets)"
+echo "[3/6] wasm-const-lower (inline extended-const data/element offsets)"
 "$CONST_LOWER" "$OUT_LOWERED" "$OUT_CONST"
 
-echo "[4/5] icp-publish (rename canister exports to use literal space)"
-"$ICP_PUBLISH" "$OUT_CONST" "$OUT_RENAMED"
+OUT_TABLE=$(mktemp -t wasp-table.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED"' EXIT
 
-echo "[5/5] wasi-stub (replace leftover wasi imports)"
+echo "[4/6] wasm-table-merge (drop unused table so ICP accepts single-table)"
+"$REPO/shared/tools/wasm-table-merge/merge.py" "$OUT_CONST" "$OUT_TABLE"
+
+echo "[5/6] icp-publish (rename canister exports to use literal space)"
+"$ICP_PUBLISH" "$OUT_TABLE" "$OUT_RENAMED"
+
+echo "[6/6] wasi-stub (replace leftover wasi imports)"
 "$WASI_STUB" "$OUT_RENAMED" "$OUT_FINAL"
 
 # ---- report -------------------------------------------------------------
