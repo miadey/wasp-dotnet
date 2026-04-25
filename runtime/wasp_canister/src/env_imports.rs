@@ -473,7 +473,10 @@ pub extern "C" fn emscripten_resize_heap(requested_size: i32) -> i32 {
 /// claim 4 GiB so Mono's GC config uses generous thresholds.
 #[no_mangle]
 pub extern "C" fn emscripten_get_heap_max() -> i32 {
-    MAX_HEAP_PAGES_REPORTED * WASM_PAGE_SIZE
+    // 4 GiB exceeds i32::MAX so saturate at i32::MAX (≈ 2 GiB). The Mono
+    // runtime treats this as "headroom is plentiful" — actual growth is
+    // gated by ic0 / wasm32 limits separately.
+    i32::MAX
 }
 
 // ===========================================================================

@@ -1,0 +1,5 @@
+service : {
+  hello           : ()                       -> (text) query;
+  list_assemblies : ()                       -> (vec record { text; nat64 }) query;
+  upload_chunk    : (text, nat64, blob)      -> (nat64);
+}

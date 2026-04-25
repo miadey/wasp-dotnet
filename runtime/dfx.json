@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "canisters": {
+    "wasp_runtime": {
+      "type": "custom",
+      "wasm": "wasp_canister/canister.wasm",
+      "candid": "wasp_canister/wasp_runtime.did",
+      "build": []
+    }
+  }
+}
