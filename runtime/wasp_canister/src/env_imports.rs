@@ -144,8 +144,32 @@ pub extern "C" fn __syscall_fcntl64(_fd: i32, _cmd: i32, _arg: i32) -> i32 {
 
 /// Browser: open a file at directory. Canister: -ENOENT (no FS).
 #[no_mangle]
-pub extern "C" fn __syscall_openat(_dirfd: i32, _path: i32, _flags: i32, _mode: i32) -> i32 {
-    ENOENT
+pub extern "C" fn __syscall_openat(_dirfd: i32, path: i32, _flags: i32, _mode: i32) -> i32 {
+    // Phase B: route to in-memory VFS. Returns a wasi fd or -ENOENT.
+    if path == 0 {
+        ic_debug_print_bytes(b"[openat] <null>");
+    } else {
+        unsafe {
+            let mut len = 0usize;
+            let p = path as *const u8;
+            while *p.add(len) != 0 && len < 256 { len += 1; }
+            if len == 0 {
+                ic_debug_print_bytes(b"[openat] <empty>");
+            } else {
+                // Print prefix + path in a single debug_print call so dfx
+                // shows them on one log line.
+                let mut buf = [0u8; 280];
+                let prefix = b"[openat] ";
+                let mut i = 0;
+                for &b in prefix { buf[i] = b; i += 1; }
+                let slice = core::slice::from_raw_parts(p, len);
+                for &b in slice { if i < buf.len() { buf[i] = b; i += 1; } }
+                ic_debug_print_bytes(&buf[..i]);
+            }
+        }
+    }
+    let fd = super::vfs::open_path(path as *const u8);
+    if fd < 0 { -2 /* -ENOENT */ } else { fd }
 }
 
 /// Browser: device-specific control. Canister: -ENOSYS.
@@ -498,8 +522,8 @@ pub extern "C" fn emscripten_get_heap_max() -> i32 {
 
 /// Browser: assertion failure or unrecoverable runtime error. Canister: trap.
 #[no_mangle]
-pub extern "C" fn abort() {
-    ic_trap("wasp: dotnet.native.wasm called abort()");
+pub extern "C" fn abort() -> ! {
+    ic_trap("wasp: dotnet.native.wasm called abort()")
 }
 
 /// Browser: `process.exit(code)`. Canister: trap with the exit code.

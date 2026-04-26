@@ -41,19 +41,33 @@ const STDERR: i32 = 2;
 // environ_*
 // ---------------------------------------------------------------------------
 
-/// Tell the caller there are zero environment variables and they take
-/// zero bytes. Mono calls this during runtime init and accepts an empty
-/// environ.
+// Mono looks up these env vars during runtime init. Issue #37: provide
+// sane defaults so the runtime doesn't fall over searching for assemblies
+// or interpreting timezone data.
+//
+// WASI environ encoding: env_buf is a contiguous run of NUL-terminated
+// "KEY=VALUE\0" strings; envc is a parallel array of pointers into
+// env_buf, one per variable.
+const ENV_BUF: &[u8] = b"MONO_PATH=/\0MONO_ROOT=/usr/share/dotnet\0TZ=UTC\0";
+const ENV_OFFSETS: [u32; 3] = [0, 12, 40]; // byte offsets of each entry start within ENV_BUF
+
 #[no_mangle]
 pub unsafe extern "C" fn environ_sizes_get(envc_out: i32, env_buf_size_out: i32) -> i32 {
-    write_i32(envc_out, 0);
-    write_i32(env_buf_size_out, 0);
+    write_i32(envc_out, ENV_OFFSETS.len() as i32);
+    write_i32(env_buf_size_out, ENV_BUF.len() as i32);
     ESUCCESS
 }
 
-/// Nothing to copy because `environ_sizes_get` reported zero envs.
 #[no_mangle]
-pub unsafe extern "C" fn environ_get(_environ_out: i32, _environ_buf_out: i32) -> i32 {
+pub unsafe extern "C" fn environ_get(environ_out: i32, environ_buf_out: i32) -> i32 {
+    // Copy the env buffer verbatim.
+    let dst = environ_buf_out as *mut u8;
+    core::ptr::copy_nonoverlapping(ENV_BUF.as_ptr(), dst, ENV_BUF.len());
+    // Then write each pointer (env_buf_out + offset) into environ_out.
+    let ptrs = environ_out as *mut u32;
+    for (i, off) in ENV_OFFSETS.iter().enumerate() {
+        *ptrs.add(i) = (environ_buf_out as u32) + off;
+    }
     ESUCCESS
 }
 
@@ -117,16 +131,35 @@ pub unsafe extern "C" fn fd_write(
     ESUCCESS
 }
 
-/// `fd_read` — no readable fds yet.
+/// `fd_read(fd, iovs, iovs_len, nread_out) -> errno` — route through
+/// the in-memory VFS for fds we own (FD_BASE..FD_BASE+MAX_FDS).
 #[no_mangle]
 pub unsafe extern "C" fn fd_read(
-    _fd: i32,
-    _iovs_ptr: i32,
-    _iovs_len: i32,
+    fd: i32,
+    iovs_ptr: i32,
+    iovs_len: i32,
     nread_out: i32,
 ) -> i32 {
-    write_i32(nread_out, 0);
-    EBADF
+    let mut total: i32 = 0;
+    for i in 0..iovs_len {
+        let iov_addr = (iovs_ptr as usize) + (i as usize) * 8;
+        let p = read_i32(iov_addr as i32) as *mut u8;
+        let n = read_i32((iov_addr + 4) as i32) as usize;
+        if n == 0 {
+            continue;
+        }
+        let got = super::vfs::read(fd, p, n);
+        if got < 0 {
+            write_i32(nread_out, total);
+            return EBADF;
+        }
+        total = total.saturating_add(got);
+        if (got as usize) < n {
+            break; // EOF
+        }
+    }
+    write_i32(nread_out, total);
+    ESUCCESS
 }
 
 /// `fd_pwrite(fd, iovs, iovs_len, offset: i64, nwritten_out) -> errno`
@@ -145,14 +178,34 @@ pub unsafe extern "C" fn fd_pwrite(
 /// `fd_pread(fd, iovs, iovs_len, offset: i64, nread_out) -> errno`
 #[no_mangle]
 pub unsafe extern "C" fn fd_pread(
-    _fd: i32,
-    _iovs_ptr: i32,
-    _iovs_len: i32,
-    _offset: i64,
+    fd: i32,
+    iovs_ptr: i32,
+    iovs_len: i32,
+    offset: i64,
     nread_out: i32,
 ) -> i32 {
-    write_i32(nread_out, 0);
-    EBADF
+    let mut total: i32 = 0;
+    let mut off = offset as u64;
+    for i in 0..iovs_len {
+        let iov_addr = (iovs_ptr as usize) + (i as usize) * 8;
+        let p = read_i32(iov_addr as i32) as *mut u8;
+        let n = read_i32((iov_addr + 4) as i32) as usize;
+        if n == 0 {
+            continue;
+        }
+        let got = super::vfs::pread(fd, p, n, off);
+        if got < 0 {
+            write_i32(nread_out, total);
+            return EBADF;
+        }
+        total = total.saturating_add(got);
+        off += got as u64;
+        if (got as usize) < n {
+            break;
+        }
+    }
+    write_i32(nread_out, total);
+    ESUCCESS
 }
 
 // ---------------------------------------------------------------------------
@@ -160,9 +213,11 @@ pub unsafe extern "C" fn fd_pread(
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn fd_close(_fd: i32) -> i32 {
-    // Closing stdout/stderr is a no-op; closing anything else is an
-    // unsupported fd because we don't track them yet.
+pub unsafe extern "C" fn fd_close(fd: i32) -> i32 {
+    if fd == STDOUT || fd == STDERR {
+        return ESUCCESS;
+    }
+    let _ = super::vfs::close(fd);
     ESUCCESS
 }
 
@@ -174,15 +229,18 @@ pub unsafe extern "C" fn fd_sync(_fd: i32) -> i32 {
 /// `fd_seek(fd, offset: i64, whence: i32, newoffset_out: i32) -> errno`
 #[no_mangle]
 pub unsafe extern "C" fn fd_seek(
-    _fd: i32,
-    _offset: i64,
-    _whence: i32,
+    fd: i32,
+    offset: i64,
+    whence: i32,
     newoffset_out: i32,
 ) -> i32 {
-    // Write 0 into the result slot so callers that ignore the errno see
-    // a deterministic position rather than uninitialised memory.
-    write_i64(newoffset_out, 0);
-    EBADF
+    let pos = super::vfs::seek(fd, offset, whence);
+    if pos < 0 {
+        write_i64(newoffset_out, 0);
+        return EBADF;
+    }
+    write_i64(newoffset_out, pos);
+    ESUCCESS
 }
 
 /// `fd_fdstat_get(fd, stat_out: i32) -> errno`
@@ -192,9 +250,18 @@ pub unsafe extern "C" fn fd_seek(
 /// We zero the whole struct and return ENOSYS so Mono treats the fd as
 /// closed/unknown without trapping.
 #[no_mangle]
-pub unsafe extern "C" fn fd_fdstat_get(_fd: i32, stat_out: i32) -> i32 {
+pub unsafe extern "C" fn fd_fdstat_get(fd: i32, stat_out: i32) -> i32 {
     let p = stat_out as usize as *mut u8;
     core::ptr::write_bytes(p, 0u8, 24);
+    if fd == STDOUT || fd == STDERR {
+        // Character device, append-only-ish.
+        *p = 2; // FILETYPE_CHARACTER_DEVICE
+        return ESUCCESS;
+    }
+    if super::vfs::fd_to_slot(fd).is_some() {
+        *p = 4; // FILETYPE_REGULAR_FILE
+        return ESUCCESS;
+    }
     ENOSYS
 }
 

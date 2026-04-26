@@ -48,7 +48,54 @@ signature".
 calls only. No format!, no println!. Everything is `&[u8]` literals.
 Pattern documented in `env_imports.rs::ic_debug_print_bytes`.
 
-## What's needed next (concrete, not vague)
+## Session 2 update — VFS + argv + environ + Mono now calls syscalls
+
+After landing #35 (real argv) + #37 (env vars MONO_PATH/MONO_ROOT/TZ) +
+#36 (in-memory VFS embedding corelib + WaspHost.dll via include_bytes!),
+the canister wasm grew from 3.85 MB → 5.35 MB and Mono progressed
+further:
+
+```
+[wasp-dotnet] canister_init: pre-Mono
+[wasp-dotnet] canister_init: about to call mono_wasm_load_runtime
+wasp: mono_wasm_debugger_log
+[openat] <empty>
+[openat] <empty>
+[openat] <empty>
+[mono]
+(blank)
+[TRAP]: wasp: dotnet.native.wasm called exit(1)
+```
+
+Mono now actually calls `__syscall_openat` three times — but always with
+**empty paths**. Probably `openat(dirfd, "", O_RDONLY)` style probes for
+runtime config that Mono falls back from when not present. Our VFS
+returns -ENOENT for unknown (and empty) paths, Mono gives up after the
+3rd attempt and exit(1)s.
+
+**Real diagnosis requires Mono source:** the WASI bootstrap path lives
+in `dotnet/runtime/src/mono/wasi/runtime/` (or similar). Empirically
+guessing args / config formats won't get past this. The next iteration
+needs to either:
+  1. Read the actual Mono WASI bootstrap source to understand what
+     mono_wasm_load_runtime expects (the 4 args, the file system layout
+     it probes, the env vars it requires)
+  2. OR run `dotnet.native.wasm` under wasmtime locally with an strace-
+     style trap on every wasi call to capture the canonical bootstrap
+     sequence, then mirror it in our shim
+
+That's **days of focused engineering** — not session-scale work.
+
+## What's complete in this session ✅
+
+| | |
+|---|---|
+| Issue #35 | Real argv passed to mono_wasm_load_runtime |
+| Issue #37 | MONO_PATH=/, MONO_ROOT=/usr/share/dotnet, TZ=UTC via environ_get |
+| Issue #36 | runtime/wasp_canister/src/vfs.rs — corelib + WaspHost.dll embedded via include_bytes!; openat/fd_read/fd_seek/fd_close/fd_fdstat_get routed through it |
+| Mono progresses past initial null-arg trap; now calls openat | |
+
+## Session 1 next steps (the ones still open)
 
 These map to filed issues + new ones we should file:
 

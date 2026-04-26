@@ -20,6 +20,7 @@
 
 pub mod env_imports;
 pub mod mono_embed;
+pub mod vfs;
 pub mod wasi_imports;
 pub mod wasp_stable_abi;
 
@@ -29,29 +30,31 @@ use ic_cdk::{init, query, update};
 // canister entry points
 // ---------------------------------------------------------------------------
 
-/// Phase B spike: actually call into `mono_wasm_load_runtime` from the
-/// canister and surface whatever happens via `ic_cdk::println!` so we
-/// can read it back from `dfx canister logs`. We DO NOT trap on
-/// failure — wrap each step so the canister still installs and the
-/// query endpoints stay reachable even if Mono boot fails.
+/// Phase B v0.2: pass a real argv[0] (the assembly name) to
+/// `mono_wasm_load_runtime`. Issue #35.
 #[init]
 fn canister_init() {
     ic_cdk::println!("[wasp-dotnet] canister_init: pre-Mono");
 
-    // Most minimal possible call: pass NULL/0 for everything and see
-    // what happens. The runtime will probably try to read corelib,
-    // hit our wasi stubs (which return EBADF), and either trap or
-    // bail — either outcome is informative.
+    // Hypothesis from dotnet.runtime.js callsites: first arg is a
+    // single NUL-terminated UTF-8 string pointer (the "app" name), not
+    // a **argv array. Try that interpretation.
+    static APP_NAME: &[u8] = b"WaspHost\0";
+
     unsafe {
-        ic_cdk::println!("[wasp-dotnet] canister_init: about to call mono_wasm_load_runtime(0,0,0,0)");
-        // mono_wasm_load_runtime signature: (i32, i32, i32, i32) -> ()
-        mono_embed::mono_wasm_load_runtime(
-            core::ptr::null(), // argv
-            0,                 // argc
-            0,                 // debug_level
-            0,                 // mono_log_mask
+        ic_cdk::println!(
+            "[wasp-dotnet] canister_init: about to call mono_wasm_load_runtime"
         );
-        ic_cdk::println!("[wasp-dotnet] canister_init: returned from mono_wasm_load_runtime");
+        // Re-cast the function pointer via raw signature since the
+        // declared signature in mono_embed.rs uses **; here we want *.
+        type LoadRuntimeFn = unsafe extern "C" fn(*const u8, i32, i32, i32);
+        let load: LoadRuntimeFn = core::mem::transmute(
+            mono_embed::mono_wasm_load_runtime as *const ()
+        );
+        load(APP_NAME.as_ptr(), 0, 0, 0);
+        ic_cdk::println!(
+            "[wasp-dotnet] canister_init: returned from mono_wasm_load_runtime"
+        );
     }
 }
 
