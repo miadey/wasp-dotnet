@@ -60,12 +60,12 @@ pub struct MonoObject {
 // Mono embedding ABI — exported by dotnet.native.wasm, imported here
 // ---------------------------------------------------------------------------
 //
-// We intentionally use `wasm_import_module = "env"` so the wasm32 LLD
-// emits `(import "env" "<name>")`. wasm-merge resolves these against
-// dotnet.native.wasm's matching exports. (If a future Mono build puts
-// these on a different module name, switch the attribute here only.)
+// In 30_merge.sh's wasm-merge invocation we name dotnet.native.wasm
+// "dotnet". So our import-side declaration must use the matching module
+// name "dotnet" — wasm-merge then resolves these against dotnet's
+// exports of the same names.
 
-#[link(wasm_import_module = "env")]
+#[link(wasm_import_module = "dotnet")]
 extern "C" {
     // ----- runtime lifecycle -----
 

@@ -28,22 +28,37 @@ use ic_cdk::{init, query, update};
 // canister entry points
 // ---------------------------------------------------------------------------
 
-/// Phase A v0.1: just log. Issue #11 wires this to
-/// `mono_embed::mono_wasm_load_runtime` and assembly registration.
+/// Phase B spike: actually call into `mono_wasm_load_runtime` from the
+/// canister and surface whatever happens via `ic_cdk::println!` so we
+/// can read it back from `dfx canister logs`. We DO NOT trap on
+/// failure — wrap each step so the canister still installs and the
+/// query endpoints stay reachable even if Mono boot fails.
 #[init]
 fn canister_init() {
-    ic_cdk::println!(
-        "[wasp-dotnet] canister_init (Phase A v0.1, managed runtime not yet booted)"
-    );
+    ic_cdk::println!("[wasp-dotnet] canister_init: pre-Mono");
+
+    // Most minimal possible call: pass NULL/0 for everything and see
+    // what happens. The runtime will probably try to read corelib,
+    // hit our wasi stubs (which return EBADF), and either trap or
+    // bail — either outcome is informative.
+    unsafe {
+        ic_cdk::println!("[wasp-dotnet] canister_init: about to call mono_wasm_load_runtime(0,0,0,0)");
+        // mono_wasm_load_runtime signature: (i32, i32, i32, i32) -> ()
+        mono_embed::mono_wasm_load_runtime(
+            core::ptr::null(), // argv
+            0,                 // argc
+            0,                 // debug_level
+            0,                 // mono_log_mask
+        );
+        ic_cdk::println!("[wasp-dotnet] canister_init: returned from mono_wasm_load_runtime");
+    }
 }
 
-/// Phase A v0.1 stub query. Returns a fixed string so we can prove the
-/// wasm-merge + ic-cdk dispatcher pipeline lands a working canister on
-/// dfx before tackling Mono boot. Issue #11 will replace the body with
-/// a `mono_wasm_invoke_jsexport` call into `WaspHost.Bridge.Hello()`.
+/// Phase B v0.1: report Mono boot status via debug_print. The body
+/// returns a string so we can also see it via `dfx canister call`.
 #[query(name = "hello")]
 fn hello() -> String {
-    "hello from wasp-dotnet runtime canister (managed code not yet wired)".to_string()
+    "hello from wasp-dotnet runtime canister (Phase B spike — see logs)".to_string()
 }
 
 // ---------------------------------------------------------------------------
