@@ -96,13 +96,21 @@ pub unsafe extern "C" fn fd_write(
         total = total.saturating_add(n as i32);
     }
 
+    // Prefix with [stdX] so we can distinguish from canister-side
+    // println! and from [mono] trace_logger output. Use raw debug_print
+    // calls (no format!/println!) to avoid pulling format machinery
+    // into the wasm — that introduces indirect-call sites that the
+    // table-merge pass can't safely lower.
+    let prefix: &[u8] = if fd == STDERR { b"[stderr] " } else { b"[stdout] " };
+    extern "C" {
+        #[link_name = "debug_print"]
+        fn ic0_debug_print(src: u32, size: u32);
+    }
+    // Inline call to ic0::debug_print since the local one isn't in scope here.
+    // Actually the wasi_imports module has its own ic0 import — use it via super:
+    super::env_imports::ic_debug_print_bytes(prefix);
     if !buf.is_empty() {
-        // Strip a single trailing newline so debug_print lines stay tidy.
-        if buf.last() == Some(&b'\n') {
-            buf.pop();
-        }
-        let s = String::from_utf8_lossy(&buf);
-        ic_cdk::println!("{s}");
+        super::env_imports::ic_debug_print_bytes(&buf);
     }
 
     write_i32(nwritten_out, total);

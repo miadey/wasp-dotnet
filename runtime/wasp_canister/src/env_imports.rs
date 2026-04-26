@@ -79,6 +79,15 @@ fn ic_debug_print(msg: &str) {
 /// Try to forward an arbitrary (ptr, len) buffer that Mono hands us to
 /// `ic0.debug_print`. Caller swears the buffer is valid for `len` bytes.
 #[inline(never)]
+/// Slice-friendly version of `ic_debug_print_buf` callable from sibling
+/// modules without raw pointer arithmetic. Avoids the format machinery
+/// (println!) which the table-merge pass can't lower.
+pub fn ic_debug_print_bytes(bytes: &[u8]) {
+    if !bytes.is_empty() {
+        unsafe { debug_print(bytes.as_ptr() as u32, bytes.len() as u32) }
+    }
+}
+
 unsafe fn ic_debug_print_buf(ptr: u32, len: u32) {
     if ptr != 0 && len != 0 {
         debug_print(ptr, len);
@@ -495,8 +504,53 @@ pub extern "C" fn abort() {
 
 /// Browser: `process.exit(code)`. Canister: trap with the exit code.
 #[no_mangle]
-pub extern "C" fn exit(_code: i32) {
-    ic_trap("wasp: dotnet.native.wasm called exit()");
+pub extern "C" fn exit(code: i32) -> ! {
+    // Phase B debugging: include the exit code in the trap message so
+    // `dfx canister logs` tells us which Mono failure path we hit.
+    let mut buf = [0u8; 64];
+    let n = format_exit_message(&mut buf, code);
+    unsafe { trap(buf.as_ptr() as u32, n as u32) }
+}
+
+#[inline(never)]
+fn format_exit_message(buf: &mut [u8], code: i32) -> usize {
+    // Manual int→ASCII to avoid pulling format machinery (which may not
+    // work in early canister_init context).
+    let prefix = b"wasp: dotnet.native.wasm called exit(";
+    let mut i = 0;
+    for &b in prefix {
+        buf[i] = b;
+        i += 1;
+    }
+    // Write the integer (handle negative).
+    let mut n = code as i64;
+    if n < 0 {
+        buf[i] = b'-';
+        i += 1;
+        n = -n;
+    }
+    let start = i;
+    if n == 0 {
+        buf[i] = b'0';
+        i += 1;
+    } else {
+        let mut tmp = [0u8; 20];
+        let mut t = 0;
+        while n > 0 {
+            tmp[t] = b'0' + (n % 10) as u8;
+            t += 1;
+            n /= 10;
+        }
+        while t > 0 {
+            t -= 1;
+            buf[i] = tmp[t];
+            i += 1;
+        }
+    }
+    let _ = start;
+    buf[i] = b')';
+    i += 1;
+    i
 }
 
 /// Browser: same as `exit` but skip atexit handlers. Canister: trap.
@@ -653,7 +707,24 @@ pub extern "C" fn mono_wasm_trace_logger(
     message_length: i32,
     _fatal: i32,
 ) {
-    unsafe { ic_debug_print_buf(message as u32, message_length as u32) }
+    // Concatenate prefix + message bytes via raw debug_print calls.
+    // Avoids println!/format! to keep the shim free of indirect-call
+    // sites that the table-merge pass can't lower.
+    ic_debug_print_bytes(b"[mono] ");
+    if message_length > 0 {
+        unsafe { ic_debug_print_buf(message as u32, message_length as u32) }
+    } else if message != 0 {
+        // Mono may pass a NUL-terminated string with length=0 in some
+        // code paths.
+        unsafe {
+            let mut len = 0;
+            let p = message as *const u8;
+            while *p.add(len) != 0 && len < 4096 { len += 1; }
+            if len > 0 {
+                ic_debug_print_buf(message as u32, len as u32);
+            }
+        }
+    }
 }
 
 /// Browser: free a Mono-owned method-data block. Canister: no-op (Rust
