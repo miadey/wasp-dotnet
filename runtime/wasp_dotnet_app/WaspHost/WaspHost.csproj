@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Wasp</RootNamespace>
+    <AssemblyName>WaspHost</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <!-- explicitly NO AOT - this is loaded by Mono at canister runtime -->
+    <PublishAot>false</PublishAot>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+</Project>
