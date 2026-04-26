@@ -211,10 +211,16 @@ unsafe fn reply_blob(payload: &[u8]) {
 pub extern "C" fn canister_init() {
     print(b"[wasp-dotnet] canister_init: pre-ctors");
     unsafe {
-        // No pre-grow this run: see if global 7 stays at the wasm-merge'd
-        // initial value of 2,752,512 (= dotnet's __memory_base), or
-        // tracks current memory size (= __heap_end).
         mono_embed::__wasm_call_ctors();
+        // Pre-fill Mono's dlmalloc pool with one large allocation. Forces
+        // ONE memory.grow → shift cycle here at init (before any Rust
+        // pointer values are stored long-term). Subsequent allocations
+        // reuse the freed pool without growing → no further shifts → all
+        // long-lived Rust pointers stay valid.
+        let p = mono_embed::malloc(20 * 1024 * 1024);
+        if !p.is_null() {
+            mono_embed::free(p);
+        }
     }
     print(b"[wasp-dotnet] canister_init: __wasm_call_ctors done");
 }
@@ -407,7 +413,11 @@ pub extern "C" fn canister_update_synth_add() {
         i = format_decimal(&mut buf, i, data as u64);
         print(&buf[..i]);
 
-        let _rc = mono_embed::mono_wasm_add_assembly(name, data, data_size as i32);
+        let _rc = mono_embed::mono_wasm_add_assembly(
+            dotnet_offset(name),
+            dotnet_offset(data),
+            data_size as i32,
+        );
 
         let mut buf2 = [0u8; 64];
         let pre = b"synth_add returned ";
@@ -454,13 +464,21 @@ pub extern "C" fn canister_update_register_one() {
         i = format_decimal(&mut buf, i, bytes.len() as u64);
         print(&buf[..i]);
 
-        let mut name_z: Vec<u8> = Vec::with_capacity(name.len() + 1);
-        name_z.extend_from_slice(name);
-        name_z.push(0);
+        // Mono stores the name POINTER (not a copy) in its
+        // bundled-resources simdhash. The buffer must outlive every
+        // future lookup, so allocate via mono_embed::malloc directly
+        // and intentionally leak it for the canister's lifetime.
+        let name_z = mono_embed::malloc(name.len() + 1);
+        let mut k = 0;
+        while k < name.len() {
+            *name_z.add(k) = name[k];
+            k += 1;
+        }
+        *name_z.add(name.len()) = 0;
 
         let _rc = mono_embed::mono_wasm_add_assembly(
-            name_z.as_ptr(),
-            bytes.as_ptr(),
+            dotnet_offset(name_z),
+            dotnet_offset(bytes.as_ptr()),
             bytes.len() as i32,
         );
 
