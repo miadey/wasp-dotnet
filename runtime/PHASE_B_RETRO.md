@@ -948,6 +948,94 @@ NOT a wasm-merge or pointer-convention issue.
 
 All three are ~1-2 day session-scale tasks.
 
+## Session 9 BREAKTHROUGH — pinpointed to dn_simdhash function pointers
+
+Wrote `runtime/scripts/inject_call_trace.py` — instruments any wasm
+function with `debug_print` calls before each internal `call N`. Runs
+in 2 layers: instrumented `mono_wasm_add_assembly` (fn 1273) AND
+`bundled_resources_get_assembly_resource` (fn 5663).
+
+### Trace of synth_add #1 (succeeds)
+
+```
+fn 1273 site 0: call 3427  ;; strlen(name)
+fn 1273 site 1: call 3574  ;; strncasecmp(".pdb", name+len-4, 4)
+fn 1273 site 2: call 6515  ;; strdup(name)
+fn 1273 site 9: call 5663  ;; bundled_resources_get_assembly_resource(name)
+  fn 5663 site 0: call 5311  ;; bundled_resources_get(name) — returns NULL
+fn 1273 site 10: call 8299 ;; g_new0(MonoBundledAssemblyResource, 1)
+fn 1273 site 11: call 2401
+fn 1273 site 12: call 796
+fn 1273 site 15: call 900  ;; mono_has_pdb_checksum
+;; success
+```
+
+### Trace of synth_add #2 (TRAPS)
+
+```
+fn 1273 site 0: call 3427  ;; strlen
+fn 1273 site 1: call 3574  ;; strncasecmp
+fn 1273 site 2: call 6515  ;; strdup
+fn 1273 site 9: call 5663  ;; lookup
+  fn 5663 site 0: call 5311  ;; bundled_resources_get — RETURNS NON-NULL (BUG!)
+;; fn 5663 returns the entry (type check passed)
+;; back in fn 1273: load entry.assembly.name (offset 28) → non-zero
+fn 1273 site 14: call 5646  ;; g_assertion_message
+;; TRAP inside g_assertion_message string formatting
+```
+
+The `bundled_resources_get` returning non-NULL for a brand-new key
+("Asm1") when only "Asm0" was inserted is the bug. Both names
+normalize to different keys via `key_from_id` (verified by reading
+fn 2862 source), so the bug is downstream in the hash table itself.
+
+### Inside fn 1019 (`dn_simdhash_ght_get_value_or_default`)
+
+Disassembling reveals **a `call_indirect (type 6)` reading the hash
+function pointer from offset 44 of the simdhash struct**:
+
+```wat
+local.get 1                         ;; key
+global.get 7
+local.get 0                         ;; simdhash struct ptr
+i32.add
+i32.load offset=44 align=1          ;; load hash function pointer
+call_indirect (type 6)              ;; INDIRECT CALL
+local.set 4                         ;; store hash result
+```
+
+The hash function pointer in the simdhash struct was stored at
+construction time when `dn_simdhash_ght_new_full(hash_fn, equal_fn,
+...)` ran in `mono_bundled_resources_add`. The `hash_fn` argument
+came from a STATIC pointer in dotnet's data
+(`&bundled_resources_resource_id_hash`).
+
+### Strong hypothesis
+
+**wasm-merge did NOT relocate function pointers stored in dotnet's
+static data section**. The simdhash struct contains stale function
+indices that don't match the merged module's table layout. When
+fn 1019 does `call_indirect (type 6)`, it calls the WRONG function —
+gets a garbage hash. Every lookup hits the same bucket. The second
+lookup finds the first entry's bucket, returns it.
+
+This is consistent with:
+- 1st add_assembly works (no lookup needed — hash table empty)
+- 2nd lookup returns "wrong but type-correct" entry (all hashes the same)
+- 3rd would too, but we never get there
+
+### Concrete next step
+
+1. Find where dotnet's data section stores the static function pointers
+   for `bundled_resources_resource_id_hash` and
+   `bundled_resources_resource_id_equal`.
+2. Compare the byte values at those offsets pre-merge vs post-merge.
+3. If they're stale, write a wasm pass that scans dotnet's data
+   section for pointer-to-function values and rewrites them to the
+   merged-module indices.
+
+This is the actual fix. ~1-2 day session.
+
 **Pipeline now is 7-stage**:
 1. wasm-merge wasp_canister + dotnet
 2. wasm-opt --multi-memory-lowering
