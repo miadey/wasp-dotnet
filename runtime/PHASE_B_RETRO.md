@@ -829,6 +829,60 @@ This is **invasive but feasible** with our existing pipeline. Likely
 specific bug — but the rest of the pipeline (build, deploy, upload,
 multi-message orchestration, Mono first-stage init) all works.
 
+## Session 9 wat-IR forensics: STRONG hypothesis on global_7
+
+Disassembling `mono_wasm_add_assembly` (function 1273) and its
+trailing call to function 900 (almost certainly `mono_has_pdb_checksum`)
+reveals a critical pattern:
+
+```wat
+;; Inside fn 900, at the very start:
+global.get 7        ;; load `global 7`'s value (= 2,752,512)
+local.get 0         ;; load arg `data`
+i32.add             ;; sum = 2,752,512 + data
+i32.load8_u         ;; read byte at sum
+;; Compare with 'M' (0x4D), then check next byte for 'Z'.
+```
+
+Inspection shows global 7 has 122,148 reads + 1 write across the
+entire merged wasm. The only writer is fn 5238 (= `__wasm_memory_grow`
+helper) which does `global_7 += pages * 65536`.
+
+Initial value of global 7: `2,752,512` (= 42 wasm pages). This is
+almost certainly **dotnet's `__memory_base`**, set by wasm-merge
+during the data-section relocation that put dotnet's data at offset
+2,752,512 in the merged module (wasp_canister occupies the first 42
+pages).
+
+The `global.get 7 + ptr_arg + load` pattern in dotnet's exported
+functions (verified in fn 900, fn 3427 (strlen), fn 6516 (strdup))
+suggests **all dotnet API arguments are RELATIVE-TO-global-7
+offsets**, NOT absolute addresses.
+
+### Tested candidate fixes
+
+| Approach | Result |
+|---|---|
+| Pass `ptr - 2,752,512` (relative offset) | same trap on 2nd call |
+| Write MZ at both `ptr` AND `ptr + 2,752,512` | first call works, dual writes don't change trap pattern |
+
+Neither immediate fix resolved the trap. So either:
+- The convention is more nuanced than "always subtract global_7"
+- Mono malloc returns absolute (so internal usage is mixed)
+- Some functions take relative, others absolute
+- global 7 has a different runtime semantic than we modeled
+
+### Next experiment for issue #56
+
+Either:
+A. Add a query export `dump_global_7()` that uses inline wasm to
+   read global 7's runtime value. Confirms what we measured statically.
+B. Write a synthetic fn that compiles to wat, allocates via dotnet
+   malloc, prints both ptr AND `*ptr` AND `*(ptr + global_7)` — proves
+   which side has our written bytes.
+C. Read dotnet/runtime build flags to see if dotnet.native.wasm uses
+   `-fPIC` or shared-library mode (dynamic relocation).
+
 **Pipeline now is 7-stage**:
 1. wasm-merge wasp_canister + dotnet
 2. wasm-opt --multi-memory-lowering

@@ -353,13 +353,27 @@ pub extern "C" fn canister_update_static_add() {
         print(&buf[..i]);
 
         let _rc = mono_embed::mono_wasm_add_assembly(
-            name.as_ptr(),
-            data.as_ptr(),
+            dotnet_offset(name.as_ptr()),
+            dotnet_offset(data.as_ptr()),
             data.len() as i32,
         );
 
         reply_blob(b"static_add returned");
     }
+}
+
+/// `__memory_base` of the merged dotnet.native.wasm module — the
+/// wasm-merge relocated dotnet's data to start at this absolute byte
+/// offset. Any pointer passed THROUGH dotnet's exported ABI (such as
+/// `mono_wasm_add_assembly`) is expected to be RELATIVE to this base
+/// (dotnet's code does `global.get 7 + arg_ptr` to compute the
+/// effective address). Our shim's absolute addresses must be translated
+/// by subtracting this constant before crossing the dotnet boundary.
+const DOTNET_MEMORY_BASE: u32 = 2_752_512;
+
+#[inline]
+fn dotnet_offset(p: *const u8) -> *const u8 {
+    ((p as u32).wrapping_sub(DOTNET_MEMORY_BASE)) as *const u8
 }
 
 /// Pure synthetic add_assembly (no upload required). Lets us reproduce
