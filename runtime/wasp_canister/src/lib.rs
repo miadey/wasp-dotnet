@@ -21,6 +21,7 @@
 pub mod env_imports;
 pub mod mono_embed;
 pub mod wasi_imports;
+pub mod wasp_stable_abi;
 
 use ic_cdk::{init, query, update};
 
