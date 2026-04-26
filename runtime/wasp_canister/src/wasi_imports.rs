@@ -30,6 +30,8 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+use alloc::vec::Vec;
+
 const ESUCCESS: i32 = 0;
 const EBADF: i32 = 8;
 const ENOSYS: i32 = 52;
@@ -48,8 +50,8 @@ const STDERR: i32 = 2;
 // WASI environ encoding: env_buf is a contiguous run of NUL-terminated
 // "KEY=VALUE\0" strings; envc is a parallel array of pointers into
 // env_buf, one per variable.
-const ENV_BUF: &[u8] = b"MONO_PATH=/\0MONO_ROOT=/usr/share/dotnet\0TZ=UTC\0";
-const ENV_OFFSETS: [u32; 3] = [0, 12, 40]; // byte offsets of each entry start within ENV_BUF
+const ENV_BUF: &[u8] = b"";
+const ENV_OFFSETS: [u32; 0] = []; // no env vars exposed via WASI
 
 #[no_mangle]
 pub unsafe extern "C" fn environ_sizes_get(envc_out: i32, env_buf_size_out: i32) -> i32 {

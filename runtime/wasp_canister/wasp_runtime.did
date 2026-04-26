@@ -1,5 +1,12 @@
+// All endpoints use a custom binary protocol (raw bytes), bypassing
+// candid serde to avoid call_indirect sites the wasm-table-merge pass
+// can't lower. See lib.rs for the binary format.
 service : {
-  hello           : ()                       -> (text) query;
-  list_assemblies : ()                       -> (vec record { text; nat64 }) query;
-  upload_chunk    : (text, nat64, blob)      -> (nat64);
+  ping          : ()     -> (blob) query;
+  hello         : ()     -> (blob) query;
+  upload_chunk  : (blob) -> (blob);
+  register_one  : ()     -> (blob);
+  synth_add     : ()     -> (blob);
+  static_add    : ()     -> (blob);
+  boot          : ()     -> (blob);
 }

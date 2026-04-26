@@ -77,8 +77,14 @@ echo "[4/6] wasm-table-merge (drop unused table so ICP accepts single-table)"
 echo "[5/6] icp-publish (rename canister exports to use literal space)"
 "$ICP_PUBLISH" "$OUT_TABLE" "$OUT_RENAMED"
 
-echo "[6/6] wasi-stub (replace leftover wasi imports)"
-"$WASI_STUB" "$OUT_RENAMED" "$OUT_FINAL"
+OUT_STUBBED=$(mktemp -t wasp-stubbed.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED"' EXIT
+
+echo "[6/7] wasi-stub (replace leftover wasi imports)"
+"$WASI_STUB" "$OUT_RENAMED" "$OUT_STUBBED"
+
+echo "[7/7] wasm-relax-simd (force align=0 on every memarg via direct binary patch)"
+"$REPO/shared/tools/wasm-relax-simd/relax_binary.py" "$OUT_STUBBED" "$OUT_FINAL"
 
 # ---- report -------------------------------------------------------------
 

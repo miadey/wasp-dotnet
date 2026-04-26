@@ -145,25 +145,29 @@ pub extern "C" fn __syscall_fcntl64(_fd: i32, _cmd: i32, _arg: i32) -> i32 {
 /// Browser: open a file at directory. Canister: -ENOENT (no FS).
 #[no_mangle]
 pub extern "C" fn __syscall_openat(_dirfd: i32, path: i32, _flags: i32, _mode: i32) -> i32 {
-    // Phase B: route to in-memory VFS. Returns a wasi fd or -ENOENT.
-    if path == 0 {
-        ic_debug_print_bytes(b"[openat] <null>");
-    } else {
+    // Trace only if path is a sane non-empty UTF-8-looking C string in
+    // user memory. Skips the noise we previously hit when path pointed
+    // at low memory or non-printable garbage.
+    if path > 0x100000 {
         unsafe {
-            let mut len = 0usize;
             let p = path as *const u8;
-            while *p.add(len) != 0 && len < 256 { len += 1; }
-            if len == 0 {
-                ic_debug_print_bytes(b"[openat] <empty>");
-            } else {
-                // Print prefix + path in a single debug_print call so dfx
-                // shows them on one log line.
+            let mut len = 0usize;
+            let mut all_printable = true;
+            while *p.add(len) != 0 && len < 256 {
+                let b = *p.add(len);
+                if !(0x20..0x7f).contains(&b) { all_printable = false; }
+                len += 1;
+            }
+            if len > 0 && all_printable {
                 let mut buf = [0u8; 280];
                 let prefix = b"[openat] ";
                 let mut i = 0;
                 for &b in prefix { buf[i] = b; i += 1; }
-                let slice = core::slice::from_raw_parts(p, len);
-                for &b in slice { if i < buf.len() { buf[i] = b; i += 1; } }
+                for &b in core::slice::from_raw_parts(p, len) {
+                    if i >= buf.len() { break; }
+                    buf[i] = b;
+                    i += 1;
+                }
                 ic_debug_print_bytes(&buf[..i]);
             }
         }
@@ -488,6 +492,7 @@ const MAX_HEAP_PAGES_REPORTED: i32 = 65_536; // 4 GiB / 64 KiB = 65536 pages
 /// convention).
 #[no_mangle]
 pub extern "C" fn emscripten_resize_heap(requested_size: i32) -> i32 {
+    ic_debug_print_bytes(b"[emscripten_resize_heap] called");
     let req = requested_size as u32;
     let page = WASM_PAGE_SIZE as u32;
     // current size in bytes
@@ -728,26 +733,34 @@ pub extern "C" fn mono_wasm_trace_logger(
     _log_domain: i32,
     _log_level: i32,
     message: i32,
-    message_length: i32,
     _fatal: i32,
+    _user_data: i32,
 ) {
-    // Concatenate prefix + message bytes via raw debug_print calls.
-    // Avoids println!/format! to keep the shim free of indirect-call
-    // sites that the table-merge pass can't lower.
-    ic_debug_print_bytes(b"[mono] ");
-    if message_length > 0 {
-        unsafe { ic_debug_print_buf(message as u32, message_length as u32) }
-    } else if message != 0 {
-        // Mono may pass a NUL-terminated string with length=0 in some
-        // code paths.
-        unsafe {
-            let mut len = 0;
+    // Mono ABI: `void wasm_trace_logger(char *log_domain, char *log_level,
+    //                                    char *message, mono_bool fatal,
+    //                                    void *user_data)` (5 args).
+    // `message` is a NUL-terminated C string.
+    //
+    // Note: empirically `fatal` is observed as 4 (not 0/1) at runtime
+    // — the argument may be a packed level enum; treat as opaque.
+    unsafe {
+        let mut buf = [0u8; 4200];
+        let prefix = b"[mono] ";
+        let mut i = 0;
+        for &b in prefix { buf[i] = b; i += 1; }
+
+        if message != 0 {
             let p = message as *const u8;
+            let mut len = 0;
             while *p.add(len) != 0 && len < 4096 { len += 1; }
-            if len > 0 {
-                ic_debug_print_buf(message as u32, len as u32);
+            let src = core::slice::from_raw_parts(p, len);
+            for &b in src {
+                if i >= buf.len() { break; }
+                buf[i] = b;
+                i += 1;
             }
         }
+        ic_debug_print_bytes(&buf[..i]);
     }
 }
 
