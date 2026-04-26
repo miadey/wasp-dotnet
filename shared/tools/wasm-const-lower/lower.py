@@ -130,6 +130,55 @@ def main() -> int:
             file=sys.stderr,
         )
 
+        # Fix __heap_base / __data_end: after multi-memory-lowering they
+        # often point inside the merged static-data region rather than
+        # past it. Find the highest data-segment OFFSET (regardless of
+        # byte length, which is hard to count exactly in wat escape
+        # syntax) and add a generous 4 MiB safety margin so malloc
+        # always allocates past static data.
+        offset_re = re.compile(
+            r"^\s*\(data (?:\$[A-Za-z0-9_.]+ )?\(;\d+;\) \(i32\.const (?P<off>\d+)\)",
+            re.MULTILINE,
+        )
+        max_offset = 0
+        for m in offset_re.finditer(wat_new):
+            off = int(m.group("off"))
+            if off > max_offset:
+                max_offset = off
+
+        page = 65536
+        safety_margin = 4 * 1024 * 1024  # 4 MiB
+        new_heap_base = ((max_offset + safety_margin + page - 1) // page) * page
+        max_data_end = max_offset + safety_margin  # for the print below
+        print(
+            f"  max data offset+len = {max_data_end}, "
+            f"setting __heap_base/__data_end → {new_heap_base}",
+            file=sys.stderr,
+        )
+
+        # Find global indices of __heap_base / __data_end via exports.
+        export_re = re.compile(
+            r'\(export "(?P<name>__heap_base|__data_end)" \(global (?P<idx>\d+)\)\)'
+        )
+        heap_globals: set[int] = {
+            int(m.group("idx")) for m in export_re.finditer(wat_new)
+        }
+
+        # Rewrite their initialisers.
+        for idx in heap_globals:
+            pat = re.compile(
+                rf"^(\s*)\(global \(;{idx};\)( (?:\(mut i32\)|i32)) i32\.const (-?\d+)\)",
+                re.MULTILINE,
+            )
+            wat_new, n_fix = pat.subn(
+                rf"\1(global (;{idx};)\2 i32.const {new_heap_base})",
+                wat_new,
+            )
+            print(
+                f"  rewrote global {idx} (__heap_base/__data_end): {n_fix} match",
+                file=sys.stderr,
+            )
+
         out_wat_path.write_text(wat_new)
 
         subprocess.run(

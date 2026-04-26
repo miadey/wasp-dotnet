@@ -95,7 +95,76 @@ That's **days of focused engineering** — not session-scale work.
 | Issue #36 | runtime/wasp_canister/src/vfs.rs — corelib + WaspHost.dll embedded via include_bytes!; openat/fd_read/fd_seek/fd_close/fd_fdstat_get routed through it |
 | Mono progresses past initial null-arg trap; now calls openat | |
 
-## Session 1 next steps (the ones still open)
+## Session 3 — Mono API correctly understood, hit a memory-layout wall
+
+After research agent #38 read `dotnet/runtime/src/mono/browser/runtime/driver.c`
+line 185, we learned:
+
+- `mono_wasm_load_runtime` signature is **`(debug_level, propertyCount, propertyKeys, propertyValues)`** — NOT `(argv, argc, debug, log_mask)` as initially assumed
+- Mono needs `DOTNET_SYSTEM_TIMEZONE_INVARIANT` set or it segfaults
+- Mono needs `mono_wasm_add_assembly("System.Private.CoreLib.dll", ptr, len)` called BEFORE `mono_wasm_load_runtime` so `mono_assembly_load_corlib` uses the bundled-resources fast path instead of probing the FS
+- The 3 empty-path opens we saw were corlib search attempts; the ensuing `[mono]` trace + exit(1) was `g_assert(corlib)` failing
+- Properties to pass: `APP_CONTEXT_BASE_DIRECTORY=/`, `RUNTIME_IDENTIFIER=browser-wasm`, `System.Globalization.Invariant=true`
+
+We applied all four fixes. New empirical state:
+
+```
+[wasp-dotnet] canister_init: pre-Mono
+[wasp-dotnet] canister_init: __wasm_call_ctors done
+[wasp-dotnet] canister_init: registering corelib + wasphost
+[TRAP]: heap out of bounds
+```
+
+`__wasm_call_ctors` runs cleanly. `mono_wasm_setenv` x3 completes without trap.
+`mono_wasm_add_assembly` traps with **"heap out of bounds"**.
+
+Diagnosis: heap_base globals were lower than the actual end of static
+data after `wasm-opt --multi-memory-lowering` shifted dotnet's data
+segments around. `wasm-const-lower` now also rewrites `__heap_base` /
+`__data_end` past the highest data offset + 4 MiB safety margin
+(currently 6.9 MB). But `mono_wasm_add_assembly` STILL traps.
+
+Likely root cause (not yet fixed): the `CORELIB` byte slice in our
+Rust crate gets compile-time addresses relative to wasp_canister's
+standalone memory layout. After `wasm-merge` + `multi-memory-lowering`,
+those data bytes live at different absolute offsets. When
+`mono_wasm_add_assembly` does `memcpy(dst, src=CORELIB.as_ptr(), len)`,
+either the source pointer or the destination is now outside valid
+memory range.
+
+**Three concrete options for the next iteration:**
+
+1. **Upload corelib via stable memory at deploy time** instead of
+   `include_bytes!`. Read it into a heap-allocated buffer (using
+   ic-cdk's allocator) at canister_init, then pass that pointer to
+   `mono_wasm_add_assembly`. Sidesteps the wasm-merge memory-layout
+   problem entirely. ~60 lines.
+
+2. **Verify the CORELIB pointer's value at runtime** by printing it in
+   canister_init and checking it points to bytes that match the
+   expected dll file header (MZ + PE). If wrong, we know the merge
+   broke pointer relocation; if right, the trap is on the dst side
+   (Mono's malloc result).
+
+3. **Skip multi-memory-lowering entirely** by removing wasp_canister's
+   memory section pre-merge so dotnet's memory becomes the only memory.
+   Pro: no shift, all original offsets stay valid. Con: requires
+   pre-merge wasm rewrite that we don't have a tool for yet.
+
+Recommend #1 (stable memory upload) as the cleanest fix. Filed as new
+issue.
+
+## What's complete in this session ✅
+
+| | |
+|---|---|
+| Issue #38 | Mono WASI bootstrap research; full runtime API documented in commit |
+| `__wasm_call_ctors` wired into canister_init | |
+| Correct `mono_wasm_load_runtime` signature applied | |
+| `mono_wasm_setenv` x3 (DOTNET_SYSTEM_TIMEZONE_INVARIANT + MONO_LOG_*) | working |
+| `wasm-const-lower` now also fixes `__heap_base` / `__data_end` | |
+
+## Session 2 next steps (the ones still open)
 
 These map to filed issues + new ones we should file:
 

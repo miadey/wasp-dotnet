@@ -67,18 +67,33 @@ pub struct MonoObject {
 
 #[link(wasm_import_module = "dotnet")]
 extern "C" {
+    // ----- C/C++ static initialisation -----
+
+    /// Run all C/C++ static initialisers. **Must be called once before
+    /// any other dotnet.native.wasm export.** The Emscripten heap,
+    /// `errno` slot, malloc tables, and Mono's static state are all
+    /// set up here. Skipping this leads to "heap out of bounds" traps
+    /// the moment Mono touches its heap.
+    pub fn __wasm_call_ctors();
+
     // ----- runtime lifecycle -----
 
-    /// `mono_wasm_load_runtime(argv: *const *const u8, argc: i32,
-    ///                         debug_level: i32, mono_log_mask: i32)`
-    /// Implementation func sig: (i32 i32 i32 i32) -> ()
-    /// Boots the embedded Mono runtime. Must be called once before any
-    /// other Mono API.
+    /// `mono_wasm_load_runtime(debug_level, propertyCount, propertyKeys,
+    ///                          propertyValues)`
+    /// Verified against dotnet/runtime release/10.0
+    /// `src/mono/browser/runtime/driver.c:185`. The 4 i32 args are:
+    ///   debug_level    = 0 disables debugger; >0 enables w/ that log level
+    ///   propertyCount  = number of monovm_initialize properties
+    ///   propertyKeys   = const char **  (UTF-8 NUL-terminated)
+    ///   propertyValues = const char **
+    /// Microsoft's host always passes at minimum:
+    ///   APP_CONTEXT_BASE_DIRECTORY = "/"
+    ///   RUNTIME_IDENTIFIER = "browser-wasm"
     pub fn mono_wasm_load_runtime(
-        argv: *const *const u8,
-        argc: i32,
         debug_level: i32,
-        mono_log_mask: i32,
+        property_count: i32,
+        property_keys: *const *const u8,
+        property_values: *const *const u8,
     );
 
     /// `mono_wasm_init_finalizer_thread()` — start the GC finalizer
