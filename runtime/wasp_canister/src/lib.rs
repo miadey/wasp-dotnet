@@ -14,7 +14,9 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 pub mod env_imports;
 pub mod mono_embed;
@@ -223,6 +225,196 @@ pub extern "C" fn canister_init() {
         }
     }
     print(b"[wasp-dotnet] canister_init: __wasm_call_ctors done");
+}
+
+// ---------------------------------------------------------------------------
+// Bundled resources bypass — replaces dn_simdhash entirely.
+//
+// Mono's `dn_simdhash` (the SIMD-accelerated hashtable used by
+// `mono_bundled_resources_*`) deterministically corrupts on the 3rd
+// distinct-pointer insert, regardless of content / allocator / name
+// location. Tested across .NET 9.0.15, 10.0.6, 10.0.7, and 11.0
+// preview — bug present in every version with dn_simdhash.
+//
+// Strategy: keep our own table here in Rust, then patch
+// `mono_wasm_add_assembly` (fn 1274) and
+// `mono_bundled_resources_get_assembly_resource` (fn 5662) in the
+// merged canister wasm to call into these Rust functions instead of
+// going through Mono's bundled-resources path.
+//
+// Resource struct layout (matches what fn 1274 builds via g_new0):
+//   offset  0: type   = MONO_BUNDLED_ASSEMBLY = 1
+//   offset  4: id     = name pointer (relative)
+//   offset  8: hash   = constant 458 in mono's build
+//   offset 12: free_data
+//   offset 16: name   = name pointer (relative)
+//   offset 20: data   = bytes pointer (relative)
+//   offset 24: size   = i32
+//   offset 28: pdb1   = 0 (no PDB)
+//   offset 32: pdb2   = 0 (no PDB)
+// ---------------------------------------------------------------------------
+
+struct AsmMap(UnsafeCell<Option<BTreeMap<Vec<u8>, u32>>>);
+unsafe impl Sync for AsmMap {}
+static ASM_MAP: AsmMap = AsmMap(UnsafeCell::new(None));
+
+unsafe fn asm_map_mut() -> &'static mut BTreeMap<Vec<u8>, u32> {
+    let slot = &mut *ASM_MAP.0.get();
+    if slot.is_none() {
+        *slot = Some(BTreeMap::new());
+    }
+    slot.as_mut().unwrap_unchecked()
+}
+
+/// Read a NUL-terminated string starting at dotnet-relative `rel_ptr`.
+unsafe fn read_cstr_rel(rel_ptr: u32) -> Vec<u8> {
+    let abs = rel_ptr.wrapping_add(DOTNET_MEMORY_BASE) as *const u8;
+    let mut v = Vec::new();
+    let mut i = 0;
+    loop {
+        let b = *abs.add(i);
+        if b == 0 {
+            break;
+        }
+        v.push(b);
+        i += 1;
+    }
+    v
+}
+
+/// Replacement for `mono_wasm_add_assembly` (fn 1274 in merged wasm).
+/// Builds a MonoBundledResource struct in Mono's malloc heap and
+/// stores it in our own map keyed on the assembly name.
+///
+/// Args mirror Mono's: name and data are dotnet-relative pointers,
+/// size is the assembly byte length.
+#[no_mangle]
+pub unsafe extern "C" fn wasp_add_assembly(name_rel: u32, data_rel: u32, size: u32) -> u32 {
+    let name = read_cstr_rel(name_rel);
+    let res = mono_embed::malloc(36);
+    if res.is_null() {
+        let m = b"wasp_add_assembly: malloc NULL";
+        trap(m.as_ptr() as u32, m.len() as u32);
+    }
+    let p = res as *mut u32;
+    *p.add(0) = 1;            // type = MONO_BUNDLED_ASSEMBLY
+    *p.add(1) = name_rel;     // id (offset 4)
+    *p.add(2) = 458;           // (offset 8) — match what fn 1274 stores
+    *p.add(3) = 0;             // free_data (offset 12)
+    *p.add(4) = name_rel;     // name (offset 16)
+    *p.add(5) = data_rel;     // data (offset 20)
+    *p.add(6) = size;          // size (offset 24)
+    *p.add(7) = 0;             // (offset 28) PDB
+    *p.add(8) = 0;             // (offset 32) PDB
+
+    let res_rel = (res as u32).wrapping_sub(DOTNET_MEMORY_BASE);
+    asm_map_mut().insert(name, res_rel);
+    REGISTERED_COUNT += 1;
+    1  // Mono returns 1 from mono_wasm_add_assembly on success
+}
+
+/// Replacement for `mono_bundled_resources_get_assembly_resource`
+/// (fn 5662 in merged wasm). Returns the resource struct ptr (relative)
+/// or 0 if not found.
+#[no_mangle]
+pub unsafe extern "C" fn wasp_get_assembly(name_rel: u32) -> u32 {
+    let name = read_cstr_rel(name_rel);
+    let slot = &*ASM_MAP.0.get();
+    match slot.as_ref().and_then(|m| m.get(&name)) {
+        Some(&res_rel) => res_rel,
+        None => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// init-time test harness: register ALL 35 BCL dlls + boot Mono
+// ---------------------------------------------------------------------------
+
+static BUILTIN_BCL: [(&[u8], &[u8]); 34] = [
+    (b"System.Private.CoreLib.dll\0", include_bytes!("../../inputs/System.Private.CoreLib.dll")),
+    (b"Microsoft.AspNetCore.Components.Web.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.AspNetCore.Components.Web.dll")),
+    (b"Microsoft.AspNetCore.Components.WebAssembly.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.AspNetCore.Components.WebAssembly.dll")),
+    (b"Microsoft.AspNetCore.Components.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.AspNetCore.Components.dll")),
+    (b"Microsoft.Extensions.Configuration.Abstractions.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.Configuration.Abstractions.dll")),
+    (b"Microsoft.Extensions.Configuration.Json.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.Configuration.Json.dll")),
+    (b"Microsoft.Extensions.Configuration.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.Configuration.dll")),
+    (b"Microsoft.Extensions.DependencyInjection.Abstractions.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.DependencyInjection.Abstractions.dll")),
+    (b"Microsoft.Extensions.DependencyInjection.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.DependencyInjection.dll")),
+    (b"Microsoft.Extensions.Logging.Abstractions.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.Logging.Abstractions.dll")),
+    (b"Microsoft.Extensions.Logging.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.Logging.dll")),
+    (b"Microsoft.Extensions.Options.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.Options.dll")),
+    (b"Microsoft.Extensions.Primitives.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.Extensions.Primitives.dll")),
+    (b"Microsoft.JSInterop.WebAssembly.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.JSInterop.WebAssembly.dll")),
+    (b"Microsoft.JSInterop.dll\0", include_bytes!("../../inputs/bcl_extracted/Microsoft.JSInterop.dll")),
+    (b"System.Collections.Concurrent.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Collections.Concurrent.dll")),
+    (b"System.Collections.Immutable.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Collections.Immutable.dll")),
+    (b"System.Collections.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Collections.dll")),
+    (b"System.ComponentModel.dll\0", include_bytes!("../../inputs/bcl_extracted/System.ComponentModel.dll")),
+    (b"System.Console.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Console.dll")),
+    (b"System.Diagnostics.DiagnosticSource.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Diagnostics.DiagnosticSource.dll")),
+    (b"System.IO.Pipelines.dll\0", include_bytes!("../../inputs/bcl_extracted/System.IO.Pipelines.dll")),
+    (b"System.Linq.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Linq.dll")),
+    (b"System.Memory.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Memory.dll")),
+    (b"System.Net.Http.Json.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Net.Http.Json.dll")),
+    (b"System.Net.Http.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Net.Http.dll")),
+    (b"System.Net.Primitives.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Net.Primitives.dll")),
+    (b"System.Private.Uri.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Private.Uri.dll")),
+    (b"System.Runtime.InteropServices.JavaScript.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Runtime.InteropServices.JavaScript.dll")),
+    (b"System.Runtime.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Runtime.dll")),
+    (b"System.Security.Cryptography.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Security.Cryptography.dll")),
+    (b"System.Text.Encodings.Web.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Text.Encodings.Web.dll")),
+    (b"System.Text.Json.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Text.Json.dll")),
+    (b"System.Text.RegularExpressions.dll\0", include_bytes!("../../inputs/bcl_extracted/System.Text.RegularExpressions.dll")),
+];
+
+unsafe fn cmh(src: &[u8], pad: usize) -> *mut u8 {
+    let dst = mono_embed::malloc(src.len() + pad);
+    if dst.is_null() { let m = b"NULL"; trap(m.as_ptr() as u32, m.len() as u32); }
+    let mut i = 0;
+    while i < src.len() { *dst.add(i) = src[i]; i += 1; }
+    let mut j = 0;
+    while j < pad { *dst.add(src.len() + j) = 0; j += 1; }
+    dst
+}
+
+unsafe fn add1(name_src: &[u8], bytes_src: &[u8]) {
+    let name = cmh(name_src, 0);
+    let bytes = cmh(bytes_src, 4096);
+    mono_embed::mono_wasm_add_assembly(
+        dotnet_offset(name), dotnet_offset(bytes), bytes_src.len() as i32);
+}
+
+#[export_name = "canister_update register_all"]
+pub extern "C" fn canister_update_register_all() {
+    unsafe {
+        let mut i = 0;
+        while i < BUILTIN_BCL.len() {
+            let (n, b) = BUILTIN_BCL[i];
+            add1(n, b);
+            i += 1;
+        }
+        let mut buf = [0u8; 64];
+        let mut bi = 0;
+        for &c in b"all registered: " { buf[bi] = c; bi += 1; }
+        bi = format_decimal(&mut buf, bi, BUILTIN_BCL.len() as u64);
+        reply_blob(&buf[..bi]);
+    }
+}
+
+#[export_name = "canister_update boot_mono"]
+pub extern "C" fn canister_update_boot_mono() {
+    unsafe {
+        if MONO_BOOTED { reply_blob(b"already booted"); return; }
+        print(b"[wasp-boot] setenv");
+        mono_embed::mono_wasm_setenv(TZ_INV_NAME.as_ptr(), TZ_INV_VAL.as_ptr());
+        mono_embed::mono_wasm_setenv(MONO_DEBUG_KEY.as_ptr(), MONO_DEBUG_VAL.as_ptr());
+        print(b"[wasp-boot] load_runtime");
+        let keys: [*const u8; 3] = [APP_BASE_KEY.as_ptr(), RID_KEY.as_ptr(), INV_KEY.as_ptr()];
+        let vals: [*const u8; 3] = [APP_BASE_VAL.as_ptr(), RID_VAL.as_ptr(), INV_VAL.as_ptr()];
+        mono_embed::mono_wasm_load_runtime(0, 3, keys.as_ptr(), vals.as_ptr());
+        MONO_BOOTED = true;
+        reply_blob(b"booted!");
+    }
 }
 
 // ---------------------------------------------------------------------------
