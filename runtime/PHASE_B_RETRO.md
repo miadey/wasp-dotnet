@@ -883,6 +883,71 @@ B. Write a synthetic fn that compiles to wat, allocates via dotnet
 C. Read dotnet/runtime build flags to see if dotnet.native.wasm uses
    `-fPIC` or shared-library mode (dynamic relocation).
 
+### Session 9 update — runtime probe DONE
+
+Wrote `runtime/scripts/inject_dump_global_7.py` that hijacks the
+`canister_query ping` export to inject inline wasm reading `global.get 7`
+and replying with hex-formatted bytes.
+
+**Runtime measurements**:
+
+| Configuration | global 7 runtime value |
+|---|---|
+| canister_init with NO pre-grow | `0x002a0000` = 2,752,512 (matches static initial) |
+| canister_init with 256 MiB pre-grow | `0x10000000` = 268,435,456 |
+| After 1 successful synth_add (no pre-grow) | `0x002a0000` (unchanged) |
+
+So global 7 is **initialized to 2,752,512 by wasm-merge** (= dotnet's
+data offset in unified memory) AND **gets incremented when fn 5238
+(memory.grow shim) runs**. Pre-grow via wasp_canister's
+`core::arch::wasm32::memory_grow` does NOT update global 7 — only
+calls through fn 5238 do.
+
+Disassembling fn 5238 shows the multi-memory-lowering pattern:
+
+```wat
+;; arg = pages_to_add
+memory.grow              ;; standard wasm growth
+;; if grow succeeded:
+memory.copy(
+    dst = global_7 + pages*65536,   ;; new dotnet data location
+    src = global_7,                  ;; old dotnet data location
+    size = old_pages*65536 - global_7  ;; how many bytes to relocate
+)
+global_7 += pages*65536            ;; track new offset
+```
+
+So `wasm-opt --multi-memory-lowering` chose to **keep dotnet's data
+near the current end of memory**, shifting it up whenever memory
+grows. global 7 = "where dotnet's data currently lives".
+
+**This means dotnet's static-data references go through `global_7 + offset`
+which is correct — global 7 always points to dotnet's data start.**
+
+### What this rules in/out for the trap
+
+Pre-grow via Rust (which doesn't go through fn 5238) leaves dotnet's
+data still at offset 2,752,512 — but the post-grow MEMORY ABOVE 2.7 MiB
+isn't relocated to follow it. So our pre-grow effectively does nothing
+for the multi-memory layout. Dotnet's internal pointers + global_7
+arithmetic stays correct.
+
+The 2nd-add_assembly trap remains a bug INTERNAL to Mono's
+`mono_bundled_resources_add_assembly_resource` / `dn_simdhash` path,
+NOT a wasm-merge or pointer-convention issue.
+
+### What's left to try
+
+1. Inject prints inside `mono_bundled_resources_add_assembly_resource`
+   itself (issue #56) — needs binary patching of dotnet.native.wasm.
+2. Try a non-multi-memory build path: don't use `--multi-memory-lowering`,
+   instead use `wasm-merge` with single-memory mode (if it supports
+   that). May avoid the relocation arithmetic entirely.
+3. Replace `dn_simdhash` with a simpler hashtable by patching
+   dotnet.native.wasm to call our Rust shim instead.
+
+All three are ~1-2 day session-scale tasks.
+
 **Pipeline now is 7-stage**:
 1. wasm-merge wasp_canister + dotnet
 2. wasm-opt --multi-memory-lowering

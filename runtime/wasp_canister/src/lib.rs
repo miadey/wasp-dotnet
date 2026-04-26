@@ -211,14 +211,9 @@ unsafe fn reply_blob(payload: &[u8]) {
 pub extern "C" fn canister_init() {
     print(b"[wasp-dotnet] canister_init: pre-ctors");
     unsafe {
-        // Pre-grow memory to ~256 MiB so mono malloc has plenty of
-        // contiguous heap before mono's emscripten malloc captures
-        // memory size at __wasm_call_ctors time.
-        let current_pages = core::arch::wasm32::memory_size(0);
-        let target_pages = 4096;
-        if current_pages < target_pages {
-            let _ = core::arch::wasm32::memory_grow(0, target_pages - current_pages);
-        }
+        // No pre-grow this run: see if global 7 stays at the wasm-merge'd
+        // initial value of 2,752,512 (= dotnet's __memory_base), or
+        // tracks current memory size (= __heap_end).
         mono_embed::__wasm_call_ctors();
     }
     print(b"[wasp-dotnet] canister_init: __wasm_call_ctors done");
