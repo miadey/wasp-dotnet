@@ -694,6 +694,34 @@ pub extern "C" fn canister_update_register_all() {
     }
 }
 
+// Stateful counter for register_next — each call registers ONE BCL
+// from BUILTIN_BCL, advancing the counter. Lets client split the
+// work across IC messages (scalar dn_simdhash is slow — 34-in-one
+// blows past the 50B insn cap).
+static mut BUILTIN_REG_IDX: usize = 0;
+
+/// Register the NEXT BUILTIN_BCL entry via mono. Reply: "<idx>/<total>"
+/// or "all-registered" when done. Call repeatedly until the latter.
+#[export_name = "canister_update register_next"]
+pub extern "C" fn canister_update_register_next() {
+    unsafe {
+        let total = BUILTIN_BCL.len();
+        if BUILTIN_REG_IDX >= total {
+            reply_blob(b"all-registered");
+            return;
+        }
+        let (n, b) = BUILTIN_BCL[BUILTIN_REG_IDX];
+        add1(n, b);
+        BUILTIN_REG_IDX += 1;
+        let mut buf = [0u8; 64];
+        let mut bi = 0;
+        bi = format_decimal(&mut buf, bi, BUILTIN_REG_IDX as u64);
+        for &c in b"/" { buf[bi] = c; bi += 1; }
+        bi = format_decimal(&mut buf, bi, total as u64);
+        reply_blob(&buf[..bi]);
+    }
+}
+
 #[export_name = "canister_update boot_mono"]
 pub extern "C" fn canister_update_boot_mono() {
     unsafe {
