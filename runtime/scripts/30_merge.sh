@@ -96,16 +96,20 @@ wasm-tools print "$OUT_RELAXED" -o "$WAT"
 G7_FN=$(grep -E '\(export "wasp_get_g7"'           "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
 GET_FN=$(grep -E '\(export "wasp_simdhash_get"'    "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
 INS_FN=$(grep -E '\(export "wasp_simdhash_insert"' "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
+
+# Locate the dn_simdhash leaves by body fingerprint so the patches
+# stay correct even when wasp_canister adds new exports (which
+# otherwise shift every fn index in the merged output).
+DN_LEAVES=$(python3 "$RUNTIME/scripts/find_dn_simdhash_leaves.py" "$WAT")
+DN_GET=$(echo "$DN_LEAVES" | grep -oE '^get=[0-9]+' | grep -oE '[0-9]+')
+DN_INS=$(echo "$DN_LEAVES" | grep -oE '^insert=[0-9]+' | grep -oE '[0-9]+')
+
 rm -f "$WAT"
-[ -n "$G7_FN" ] && [ -n "$GET_FN" ] && [ -n "$INS_FN" ] || {
-    echo "  could not resolve wasp shim fn indices (g7=$G7_FN get=$GET_FN ins=$INS_FN)"
+[ -n "$G7_FN" ] && [ -n "$GET_FN" ] && [ -n "$INS_FN" ] && [ -n "$DN_GET" ] && [ -n "$DN_INS" ] || {
+    echo "  could not resolve fn indices (g7=$G7_FN get=$GET_FN ins=$INS_FN dn_get=$DN_GET dn_ins=$DN_INS)"
     exit 1
 }
-# Hardcoded dn_simdhash leaves, valid as long as wasp_canister's export
-# count and ordering match the c2e5f83 baseline. Adding/removing wasp
-# exports can shift these — re-derive via patterns if needed (TODO #41).
-DN_INS=559
-DN_GET=1024
+echo "  dn_simdhash leaves: get=$DN_GET, insert=$DN_INS"
 
 OUT_P1=$(mktemp -t wasp-p1.XXXXXX).wasm
 OUT_P2=$(mktemp -t wasp-p2.XXXXXX).wasm

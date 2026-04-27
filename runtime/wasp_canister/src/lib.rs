@@ -685,6 +685,34 @@ pub extern "C" fn canister_update_boot_mono() {
     }
 }
 
+/// After boot_mono, try to obtain a MonoAssembly* for
+/// "System.Private.CoreLib" via the runtime's exported lookup. Returns
+/// the pointer value as a hex string so we can see if mono knows
+/// about corelib at all (NULL means no — confirms issue #42).
+#[export_name = "canister_update probe_corlib"]
+pub extern "C" fn canister_update_probe_corlib() {
+    unsafe {
+        if !MONO_BOOTED { reply_blob(b"not booted yet"); return; }
+        // The string "System.Private.CoreLib" must live in dotnet's
+        // memory space (mono_wasm_assembly_load adds g7 to deref).
+        let name = b"System.Private.CoreLib\0";
+        let dst = mono_embed::malloc(name.len()) as *mut u8;
+        let mut i = 0;
+        while i < name.len() { *dst.add(i) = name[i]; i += 1; }
+        let asm = mono_embed::mono_wasm_assembly_load(dotnet_offset(dst));
+        let mut buf = [0u8; 64];
+        let mut bi = 0;
+        for &c in b"corelib_assembly=0x" { buf[bi] = c; bi += 1; }
+        let v = asm as u32;
+        for s in (0..32).step_by(4).rev() {
+            let n = (v >> s) & 0xF;
+            buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            bi += 1;
+        }
+        reply_blob(&buf[..bi]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // upload_chunk — raw binary protocol
 //
