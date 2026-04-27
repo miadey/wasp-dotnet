@@ -259,6 +259,24 @@ pub extern "C" fn canister_init() {
 //   offset 32: pdb2   = 0 (no PDB)
 // ---------------------------------------------------------------------------
 
+// Shadow map for dn_simdhash. Keyed on (simdhash_struct_ptr, key_string)
+// so multiple distinct simdhash tables (bundled_resources, env vars,
+// internal Mono caches, ...) can coexist transparently.
+struct SimdMap(UnsafeCell<Option<BTreeMap<(u32, Vec<u8>), u32>>>);
+unsafe impl Sync for SimdMap {}
+static SIMD_MAP: SimdMap = SimdMap(UnsafeCell::new(None));
+
+unsafe fn simd_map_mut() -> &'static mut BTreeMap<(u32, Vec<u8>), u32> {
+    let slot = &mut *SIMD_MAP.0.get();
+    if slot.is_none() {
+        *slot = Some(BTreeMap::new());
+    }
+    slot.as_mut().unwrap_unchecked()
+}
+
+// Legacy assembly map kept for back-compat with previous patches; the
+// universal simdhash bypass below makes wasp_add_assembly / wasp_get_assembly
+// no longer strictly necessary.
 struct AsmMap(UnsafeCell<Option<BTreeMap<Vec<u8>, u32>>>);
 unsafe impl Sync for AsmMap {}
 static ASM_MAP: AsmMap = AsmMap(UnsafeCell::new(None));
@@ -314,6 +332,71 @@ pub unsafe extern "C" fn wasp_add_assembly(name_rel: u32, data_rel: u32, size: u
     asm_map_mut().insert(name, res_rel);
     REGISTERED_COUNT += 1;
     1
+}
+
+/// Replacement for `dn_simdhash_ght_get_value_or_default` (fn 1020 in
+/// merged wasm). Looks up the value in SIMD_MAP keyed on
+/// (simdhash struct ptr, key string content). Falls back to ASM_MAP
+/// (which only knows the bundled-resources assembly entries) so the
+/// `mono_bundled_resources_get_assembly_resource_values` path — which
+/// goes through fn 1024 directly without our higher-level fn 5671
+/// patch — still finds the entries inserted via `wasp_add_assembly`.
+static mut SIMDHASH_GET_COUNT: u32 = 0;
+
+#[no_mangle]
+pub unsafe extern "C" fn wasp_simdhash_get(table_ptr: u32, key_ptr: u32) -> u32 {
+    SIMDHASH_GET_COUNT += 1;
+    let key = read_cstr_rel(key_ptr);
+    let simd_slot = &*SIMD_MAP.0.get();
+    if let Some(&v) = simd_slot.as_ref().and_then(|m| m.get(&(table_ptr, key.clone()))) {
+        // log first 3 hits to avoid log spam
+        if SIMDHASH_GET_COUNT <= 5 {
+            let mut buf = [0u8; 96];
+            let mut i = 0;
+            for &b in b"[wasp-sh-get] " { buf[i] = b; i += 1; }
+            let nm = if key.len() < 50 { key.len() } else { 50 };
+            let mut j = 0;
+            while j < nm { buf[i] = key[j]; i += 1; j += 1; }
+            for &b in b" SIMD-HIT" { buf[i] = b; i += 1; }
+            debug_print(buf.as_ptr() as u32, i as u32);
+        }
+        return v;
+    }
+    let asm_slot = &*ASM_MAP.0.get();
+    let result = asm_slot.as_ref().and_then(|m| m.get(&key)).copied().unwrap_or(0);
+    if SIMDHASH_GET_COUNT <= 5 {
+        let mut buf = [0u8; 96];
+        let mut i = 0;
+        for &b in b"[wasp-sh-get] " { buf[i] = b; i += 1; }
+        let nm = if key.len() < 50 { key.len() } else { 50 };
+        let mut j = 0;
+        while j < nm { buf[i] = key[j]; i += 1; j += 1; }
+        if result != 0 {
+            for &b in b" ASM-HIT" { buf[i] = b; i += 1; }
+        } else {
+            for &b in b" MISS" { buf[i] = b; i += 1; }
+        }
+        debug_print(buf.as_ptr() as u32, i as u32);
+    }
+    result
+}
+
+/// Replacement for `dn_simdhash_ght_insert_replace` (fn 555 in merged
+/// wasm). Stores (table_ptr, key_string) → value in our shadow map.
+/// Returns 0 = DN_SIMDHASH_INSERT_OK_ADDED_NEW.
+///
+/// Mono's signature: (struct, key, suffix_byte, value, mode) → status
+#[no_mangle]
+pub unsafe extern "C" fn wasp_simdhash_insert(
+    table_ptr: u32,
+    key_ptr: u32,
+    _suffix: u32,
+    value_ptr: u32,
+    _mode: u32,
+) -> u32 {
+    let key = read_cstr_rel(key_ptr);
+    simd_map_mut().insert((table_ptr, key), value_ptr);
+    0  // OK_ADDED_NEW
 }
 
 /// Replacement for `mono_bundled_resources_get_assembly_resource`
