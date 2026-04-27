@@ -226,12 +226,21 @@ pub extern "C" fn canister_init() {
     print(b"[wasp-dotnet] canister_init: pre-ctors");
     unsafe {
         mono_embed::__wasm_call_ctors();
-        // NO pre-grow — pre-grow shifts global 7 (dotnet's data base)
-        // away from our DOTNET_MEMORY_BASE constant, breaking
-        // dotnet_offset / dotnet_to_abs translations. Instead rely on
-        // Mono's own grow trigger when its heap actually fills.
     }
     print(b"[wasp-dotnet] canister_init: __wasm_call_ctors done");
+    // Register the FIRST 5 BUILTIN_BCL entries here. canister_init's
+    // higher instruction budget (200B vs 50B for updates) lets us push
+    // past the dn_simdhash bucket-array growth (which happens around
+    // insert #3 with initial cap=2). Once the table is at cap=8 or
+    // larger, subsequent register_next calls from the client should
+    // each fit in 50B.
+    print(b"[wasp-dotnet] canister_init: registering corelib only");
+    unsafe {
+        let (n, b) = BUILTIN_BCL[0];
+        add1(n, b);
+        BUILTIN_REG_IDX = 1;
+    }
+    print(b"[wasp-dotnet] canister_init: corelib done");
 }
 
 // ---------------------------------------------------------------------------
