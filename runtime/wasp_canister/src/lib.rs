@@ -103,6 +103,10 @@ extern "C" {
     fn msg_reply_data_append(src: u32, size: u32);
     fn msg_reply();
     fn trap(src: u32, size: u32) -> !;
+    /// IC instruction counter. counter_type=0 = current message budget
+    /// consumed so far (not remaining). Used to chunk long operations
+    /// before hitting the 50B-per-update-message cap.
+    fn performance_counter(counter_type: u32) -> u64;
 }
 
 /// Raw `ic0::debug_print` from a byte slice. No format machinery.
@@ -724,6 +728,50 @@ pub extern "C" fn canister_update_register_next() {
         for &c in b"/" { buf[bi] = c; bi += 1; }
         bi = format_decimal(&mut buf, bi, total as u64);
         reply_blob(&buf[..bi]);
+    }
+}
+
+/// Chunked register: keeps adding BUILTIN_BCL entries until either
+/// finished OR the IC instruction counter approaches the 50B cap. Lets
+/// the client make ONE call which processes as many entries as fit,
+/// then ~17 polls instead of 34. Reply format:
+///   "progress N/M @ <insns>"   — partial; call again
+///   "all-registered @ <insns>" — done
+#[export_name = "canister_update register_chunk"]
+pub extern "C" fn canister_update_register_chunk() {
+    unsafe {
+        // IC's per-update-message limit is 50_000_000_000 instructions.
+        // Reserve ~10 billion of headroom for the LAST insert (which
+        // may be expensive if dn_simdhash rehashes).
+        const BUDGET_CAP: u64 = 40_000_000_000;
+        let total = BUILTIN_BCL.len();
+        loop {
+            if BUILTIN_REG_IDX >= total {
+                let mut buf = [0u8; 64];
+                let mut bi = 0;
+                for &c in b"all-registered @ " { buf[bi] = c; bi += 1; }
+                let used = performance_counter(0);
+                bi = format_decimal(&mut buf, bi, used);
+                reply_blob(&buf[..bi]);
+                return;
+            }
+            let used = performance_counter(0);
+            if used >= BUDGET_CAP {
+                let mut buf = [0u8; 96];
+                let mut bi = 0;
+                for &c in b"progress " { buf[bi] = c; bi += 1; }
+                bi = format_decimal(&mut buf, bi, BUILTIN_REG_IDX as u64);
+                for &c in b"/" { buf[bi] = c; bi += 1; }
+                bi = format_decimal(&mut buf, bi, total as u64);
+                for &c in b" @ " { buf[bi] = c; bi += 1; }
+                bi = format_decimal(&mut buf, bi, used);
+                reply_blob(&buf[..bi]);
+                return;
+            }
+            let (n, b) = BUILTIN_BCL[BUILTIN_REG_IDX];
+            add1(n, b);
+            BUILTIN_REG_IDX += 1;
+        }
     }
 }
 
