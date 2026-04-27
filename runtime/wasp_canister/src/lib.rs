@@ -685,28 +685,95 @@ pub extern "C" fn canister_update_boot_mono() {
     }
 }
 
-/// After boot_mono, dump the cached corelib_assembly slot at
-/// dotnet-relative offset 0x885508 (where `mono_assembly_load_corlib`
-/// stores its result). Non-zero means mono successfully loaded
-/// corelib during load_runtime; zero means the assert at
-/// assembly.c:2718 was reached and our defang let it return NULL.
-/// This probe avoids invoking mono APIs that would themselves trip
-/// on the NULL corelib.
+/// Force-write a value into the corelib cache slot. Demo/diagnostic:
+/// passes a malloc'd zeroed buffer ptr to see what mono does when it
+/// thinks corelib is loaded but the struct is empty. Exits with
+/// whatever new failure mode this exposes — useful to map the
+/// downstream MonoAssembly fields mono accesses on the corlib pointer.
+#[export_name = "canister_update force_corlib"]
+pub extern "C" fn canister_update_force_corlib() {
+    unsafe {
+        if !MONO_BOOTED { reply_blob(b"not booted yet"); return; }
+        let g7 = wasp_get_g7();
+        // Allocate a zeroed 4KB buffer in mono's heap. Use that as
+        // a fake MonoAssembly pointer.
+        let fake = mono_embed::malloc(4096) as *mut u8;
+        if fake.is_null() { reply_blob(b"malloc null"); return; }
+        let mut i = 0;
+        while i < 4096 { *fake.add(i) = 0; i += 1; }
+        // Convert abs ptr to dotnet-relative for mono's convention.
+        let fake_rel = (fake as u32).wrapping_sub(g7);
+        // Write dotnet-relative ptr to the cache slot.
+        let slot = (g7.wrapping_add(0x885508)) as *mut u32;
+        *slot = fake_rel;
+        let mut buf = [0u8; 64];
+        let mut bi = 0;
+        for &c in b"force_corlib slot=0x" { buf[bi] = c; bi += 1; }
+        for s in (0..32).step_by(4).rev() {
+            let n = (fake_rel >> s) & 0xF;
+            buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            bi += 1;
+        }
+        reply_blob(&buf[..bi]);
+    }
+}
+
+/// After force_corlib, ask mono to load a tiny assembly to see what
+/// fields of the (fake) corlib pointer mono actually dereferences.
+/// Will trap somewhere; the trap location maps the next field we'd
+/// need to populate in the fake struct.
+#[export_name = "canister_update probe_load"]
+pub extern "C" fn canister_update_probe_load() {
+    unsafe {
+        if !MONO_BOOTED { reply_blob(b"not booted yet"); return; }
+        // Try loading an arbitrary assembly. The internal class
+        // resolution will deref the corlib pointer.
+        let name = b"System.Runtime.dll\0";
+        let dst = mono_embed::malloc(name.len()) as *mut u8;
+        let mut i = 0;
+        while i < name.len() { *dst.add(i) = name[i]; i += 1; }
+        let asm = mono_embed::mono_wasm_assembly_load(dotnet_offset(dst));
+        let mut buf = [0u8; 64];
+        let mut bi = 0;
+        for &c in b"asm=0x" { buf[bi] = c; bi += 1; }
+        let v = asm as u32;
+        for s in (0..32).step_by(4).rev() {
+            let n = (v >> s) & 0xF;
+            buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            bi += 1;
+        }
+        reply_blob(&buf[..bi]);
+    }
+}
+
+/// Dump the corelib cache slot AND the preload-hook list head AND
+/// the bundled_assemblies count flag region — all the pieces of
+/// state mono's `mono_assembly_load_corlib` consults.
 #[export_name = "canister_update probe_corlib"]
 pub extern "C" fn canister_update_probe_corlib() {
     unsafe {
         if !MONO_BOOTED { reply_blob(b"not booted yet"); return; }
-        // Address is dotnet-relative: read at g7 + 0x885508.
-        let slot_addr = wasp_get_g7().wrapping_add(0x885508u32);
-        let cached_corlib = *(slot_addr as *const u32);
-        // Also read mono_bundled_resources count (typically a global
-        // near other bundled-resources data; offset known from
-        // upstream traces). Skip if not at a known-good offset.
-        let mut buf = [0u8; 96];
+        let g7 = wasp_get_g7();
+        let corlib_slot = *((g7.wrapping_add(0x885508)) as *const u32);
+        let hook_head = *((g7.wrapping_add(0x885496)) as *const u32);
+        let g_885484 = *((g7.wrapping_add(0x885484)) as *const u32);
+        let mut buf = [0u8; 200];
         let mut bi = 0;
-        for &c in b"corelib_slot[0x885508]=0x" { buf[bi] = c; bi += 1; }
+        for &c in b"corelib=0x" { buf[bi] = c; bi += 1; }
         for s in (0..32).step_by(4).rev() {
-            let n = (cached_corlib >> s) & 0xF;
+            let n = (corlib_slot >> s) & 0xF;
+            buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            bi += 1;
+        }
+        for &c in b" hook_head[0x885496]=0x" { buf[bi] = c; bi += 1; }
+        for s in (0..32).step_by(4).rev() {
+            let n = (hook_head >> s) & 0xF;
+            buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            bi += 1;
+        }
+        for &c in b" [0x885484]=0x" { buf[bi] = c; bi += 1; }
+        for s in (0..32).step_by(4).rev() {
+            let n = (g_885484 >> s) & 0xF;
             buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
             bi += 1;
         }
