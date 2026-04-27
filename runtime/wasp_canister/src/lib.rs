@@ -746,6 +746,49 @@ pub extern "C" fn canister_update_probe_load() {
     }
 }
 
+/// Sweep a window of dotnet's static data section looking for any
+/// non-zero global. Helps locate `bundled_assembly_count`,
+/// `bundled_resources` table head, and other mono globals whose
+/// addresses we don't know upfront. Reports first 32 non-zero u32s
+/// in the window.
+#[export_name = "canister_update probe_globals"]
+pub extern "C" fn canister_update_probe_globals() {
+    unsafe {
+        if !MONO_BOOTED { reply_blob(b"not booted yet"); return; }
+        let g7 = wasp_get_g7();
+        let mut buf = [0u8; 1024];
+        let mut bi = 0;
+        for &c in b"non-zero @ 0x800000..0x900000:" { buf[bi] = c; bi += 1; }
+        let mut found = 0;
+        // Scan a 1MB window stepping by 256 bytes (sparse).
+        let mut off = 0x800000u32;
+        while off < 0x900000 && found < 24 {
+            let v = *((g7.wrapping_add(off)) as *const u32);
+            if v != 0 {
+                buf[bi] = b' '; bi += 1;
+                buf[bi] = b'0'; bi += 1; buf[bi] = b'x'; bi += 1;
+                for s in (0..32).step_by(4).rev() {
+                    let n = (off >> s) & 0xF;
+                    buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+                    bi += 1;
+                }
+                buf[bi] = b'='; bi += 1;
+                for s in (0..32).step_by(4).rev() {
+                    let n = (v >> s) & 0xF;
+                    buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+                    bi += 1;
+                }
+                found += 1;
+            }
+            off = off.wrapping_add(256);
+        }
+        if found == 0 {
+            for &c in b" (all zero)" { buf[bi] = c; bi += 1; }
+        }
+        reply_blob(&buf[..bi]);
+    }
+}
+
 /// Dump the corelib cache slot AND the preload-hook list head AND
 /// the bundled_assemblies count flag region — all the pieces of
 /// state mono's `mono_assembly_load_corlib` consults.
