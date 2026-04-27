@@ -505,6 +505,32 @@ pub unsafe extern "C" fn wasp_simdhash_insert(
     if !key_str.is_empty() {
         simd_map_by_str_mut().insert((table_ptr, key_str), value_ptr);
     }
+    // If the value is a MonoBundledResource of type=ASSEMBLY (1), pull
+    // the name string from the resource struct itself and also index
+    // the entry in ASM_MAP under that name. This handles the common
+    // case where mono passes a different key pointer on get() than on
+    // insert() (e.g. via key_from_id() which returns a malloc'd
+    // normalized copy) — the value's embedded name is a stable
+    // identifier we can look up by.
+    let abs_value = dotnet_to_abs(value_ptr) as *const u32;
+    let res_type = *abs_value.add(0);
+    if res_type == 1 {
+        // MonoBundledAssemblyResource layout: type@0, id@4, hash@8,
+        // free@12, name@16, data@20, size@24, ... — both id and name
+        // are dotnet-relative pointers to the assembly name string.
+        let name_rel = *abs_value.add(1);
+        if name_rel != 0 {
+            let name = read_cstr_rel(name_rel);
+            if !name.is_empty() {
+                asm_map_mut().insert(name.clone(), value_ptr);
+                // Also register the no-suffix form (mono's
+                // key_from_id strips .dll/.pdb).
+                if let Some(base) = name.strip_suffix(b".dll") {
+                    asm_map_mut().insert(base.to_vec(), value_ptr);
+                }
+            }
+        }
+    }
     0  // OK_ADDED_NEW
 }
 
