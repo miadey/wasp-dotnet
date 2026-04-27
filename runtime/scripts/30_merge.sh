@@ -55,7 +55,11 @@ CONST_LOWER=$REPO/shared/tools/wasm-const-lower/lower.py
 DOTNET_PRE=$(mktemp -t wasp-dotnet-pre.XXXXXX).wasm
 trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_RENAMED" "$DOTNET_PRE"' EXIT
 
-if wasm-tools print "$DOTNET_WASM" 2>/dev/null | grep -q '\bv128\.\|i8x16\|f32x4'; then
+# Disable pipefail just for this detection — grep -q SIGPIPEs
+# wasm-tools print after first match, which pipefail interprets as
+# failure (and inverts the detection).
+SIMD_DETECTED=$(wasm-tools print "$DOTNET_WASM" 2>/dev/null | { grep -q '\bv128\.\|i8x16\|f32x4' && echo 1 || echo 0; } || true)
+if [ "$SIMD_DETECTED" = "1" ]; then
     echo "[0/8] preserve dn_simdhash insert leaf (SIMD build)"
     python3 "$RUNTIME/scripts/inject_dn_simdhash_passthrough.py" "$DOTNET_WASM" "$DOTNET_PRE"
 else

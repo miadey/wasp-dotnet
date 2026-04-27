@@ -234,13 +234,9 @@ pub extern "C" fn canister_init() {
     // insert #3 with initial cap=2). Once the table is at cap=8 or
     // larger, subsequent register_next calls from the client should
     // each fit in 50B.
-    print(b"[wasp-dotnet] canister_init: registering corelib only");
-    unsafe {
-        let (n, b) = BUILTIN_BCL[0];
-        add1(n, b);
-        BUILTIN_REG_IDX = 1;
-    }
-    print(b"[wasp-dotnet] canister_init: corelib done");
+    // Don't register here — leave it to register_all (works via the
+    // dn_simdhash bypass in SIMD builds, where the first 2 inserts
+    // pass through to mono's real hash and the rest use shadow map).
 }
 
 // ---------------------------------------------------------------------------
