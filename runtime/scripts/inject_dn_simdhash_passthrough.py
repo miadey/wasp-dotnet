@@ -41,14 +41,10 @@ from pathlib import Path
 
 
 def find_insert_leaf(text):
-    """Locate the dn_simdhash insert leaf. Handles BOTH:
-    - pristine dotnet.native.wasm (pre-multi-memory-lowering): bodies
-      are 7-9K chars, accesses use bare `i32.load offset=N` (no g7).
-    - post-merge canister.wasm (post-lowering): bodies are 10-12K chars,
-      accesses are `global.get 7; ...; i32.add; i32.load offset=N`.
-    Pick the LARGEST 5-arg → i32 candidate that has all of: offset=20
-    load, offset=8 load, i32.rem_u, AND no call_indirect type 6
-    (insert receives precomputed hash as arg 2)."""
+    """Locate the str_ptr-style dn_simdhash insert leaf — empirically
+    THIS is what gets called by register_all (despite upstream src
+    suggesting bundled_resources uses GHT). Body 7-9K chars in pristine,
+    10-12K in merged. No h44, no call_indirect type 6 (hash precomputed)."""
     hdr_re = re.compile(
         r'^  \(func \(;(\d+);\) \(type \d+\) \(param i32 i32 i32 i32 i32\) \(result i32\)\s*$',
         re.MULTILINE,
@@ -59,7 +55,6 @@ def find_insert_leaf(text):
         end = text.find('\n  )\n', m.end())
         body = text[m.end():end]
         sz = len(body)
-        # Wide band covering both pristine (7-9K) and post-merge (10-12K).
         if not (5000 <= sz <= 13000):
             continue
         if (

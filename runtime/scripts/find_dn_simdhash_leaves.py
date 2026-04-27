@@ -88,9 +88,12 @@ def main():
     #   5. probes the bucket.
     get_fn = find_leaf(text, "i32 i32", 3000, 8000)
 
-    # `dn_simdhash_insert_with_hash(t, key, hash, val, mode)` — the
-    # INSERT leaf takes the hash precomputed (NOT via call_indirect),
-    # so it has h20 + h8 + i32.rem_u but no h44/cind6. Body is ~10K.
+    # str_ptr-style INSERT leaf (no h44, no cind6 — hash is precomputed
+    # and passed as arg 2). Body ~10-11K chars in merged. This is what
+    # mono actually invokes during register_all from inside the
+    # mono_wasm_add_assembly path (despite agent research suggesting
+    # GHT — empirically only the str_ptr bypass keeps register_all
+    # from trapping).
     def find_insert(text):
         hdr_re = re.compile(
             r'^  \(func \(;(\d+);\) \(type \d+\) \(param i32 i32 i32 i32 i32\) \(result i32\)\s*$',
@@ -108,17 +111,11 @@ def main():
                 'i32.load offset=20 align=1' in body
                 and 'i32.load offset=8 align=1' in body
                 and 'i32.rem_u' in body
-                # The insert leaf does NOT use call_indirect type 6
-                # (the hash is passed in as arg 2). Reject candidates
-                # that do use it (those are bigger helpers like
-                # `dn_simdhash_grow_buckets` that share many idioms).
                 and 'call_indirect (type 6)' not in body
             ):
                 matches.append((fn, sz))
         if not matches:
             return None
-        # Pick the LARGEST in the band (the str_ptr insert leaf is
-        # ~10647 chars; ptr_ptr variants are smaller).
         matches.sort(key=lambda x: -x[1])
         return matches[0][0]
     ins_fn = find_insert(text)

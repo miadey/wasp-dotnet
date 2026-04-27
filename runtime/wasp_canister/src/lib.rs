@@ -730,6 +730,43 @@ pub extern "C" fn canister_update_boot_mono() {
     }
 }
 
+/// Probe the ACTUAL bundled_resources globals at 0x885528 and
+/// 0x885532 (discovered by inspecting pristine mono_wasm_add_assembly
+/// → fn 1129 → which reads/stores tables there). If non-zero, our
+/// passthrough successfully populated the real bundled_resources
+/// tables.
+#[export_name = "canister_update probe_bundled"]
+pub extern "C" fn canister_update_probe_bundled() {
+    unsafe {
+        if !MONO_BOOTED { reply_blob(b"not booted yet"); return; }
+        let g7 = wasp_get_g7();
+        let mut buf = [0u8; 200];
+        let mut bi = 0;
+        for &c in b"bundled@0x885528=0x" { buf[bi] = c; bi += 1; }
+        let v = *((g7.wrapping_add(0x885528)) as *const u32);
+        for s in (0..32).step_by(4).rev() {
+            let n = (v >> s) & 0xF;
+            buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            bi += 1;
+        }
+        for &c in b" @0x885532=0x" { buf[bi] = c; bi += 1; }
+        let v = *((g7.wrapping_add(0x885532)) as *const u32);
+        for s in (0..32).step_by(4).rev() {
+            let n = (v >> s) & 0xF;
+            buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            bi += 1;
+        }
+        for &c in b" cache@0x885508=0x" { buf[bi] = c; bi += 1; }
+        let v = *((g7.wrapping_add(0x885508)) as *const u32);
+        for s in (0..32).step_by(4).rev() {
+            let n = (v >> s) & 0xF;
+            buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            bi += 1;
+        }
+        reply_blob(&buf[..bi]);
+    }
+}
+
 /// Force-write a value into the corelib cache slot. Demo/diagnostic:
 /// passes a malloc'd zeroed buffer ptr to see what mono does when it
 /// thinks corelib is loaded but the struct is empty. Exits with
