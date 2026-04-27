@@ -698,6 +698,15 @@ pub extern "C" fn canister_update_register_all() {
 pub extern "C" fn canister_update_boot_mono() {
     unsafe {
         if MONO_BOOTED { reply_blob(b"already booted"); return; }
+        // Pre-grow linear memory by 32 MiB (512 wasm pages) BEFORE
+        // touching mono. The agent's diagnosis of the dn_simdhash bug
+        // was: a stale base pointer after the table grows past its
+        // initial bucket count on the 3rd insert (a memory.grow
+        // triggers but cached HEAPU8 views are not updated). By
+        // pre-growing, we hope to keep the dn_simdhash rehash from
+        // triggering memory.grow during table init.
+        print(b"[wasp-boot] pre-grow heap by 32MiB");
+        let _ = core::arch::wasm32::memory_grow(0, 512);
         print(b"[wasp-boot] setenv");
         // Mono code does `global.get 7 + arg` to dereference; pointers
         // must be dotnet-relative (caller subtracts DOTNET_MEMORY_BASE).
