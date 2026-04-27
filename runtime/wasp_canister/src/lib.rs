@@ -254,15 +254,40 @@ pub extern "C" fn canister_init() {
 //   offset 32: pdb2   = 0 (no PDB)
 // ---------------------------------------------------------------------------
 
-// Shadow map for dn_simdhash. Keyed on (simdhash_struct_ptr, key_string)
+// Shadow map for dn_simdhash. Keyed on (simdhash_struct_ptr, key_ptr)
 // so multiple distinct simdhash tables (bundled_resources, env vars,
 // internal Mono caches, ...) can coexist transparently.
-struct SimdMap(UnsafeCell<Option<BTreeMap<(u32, Vec<u8>), u32>>>);
+//
+// We use the raw `key_ptr` value rather than the dereferenced string
+// content because:
+//   1. Some dn_simdhash tables are gpointer-keyed (key is not a string).
+//   2. Even for str_ptr tables, mono usually passes the SAME pointer
+//      back on get() that it passed on insert() (e.g. via mono_image_strdup
+//      which keeps a stable copy in mono's heap).
+//   3. Keying on dereferenced bytes was causing false matches when two
+//      distinct gpointer keys both happened to deref to empty/zero memory.
+struct SimdMap(UnsafeCell<Option<BTreeMap<(u32, u32), u32>>>);
 unsafe impl Sync for SimdMap {}
 static SIMD_MAP: SimdMap = SimdMap(UnsafeCell::new(None));
 
-unsafe fn simd_map_mut() -> &'static mut BTreeMap<(u32, Vec<u8>), u32> {
+unsafe fn simd_map_mut() -> &'static mut BTreeMap<(u32, u32), u32> {
     let slot = &mut *SIMD_MAP.0.get();
+    if slot.is_none() {
+        *slot = Some(BTreeMap::new());
+    }
+    slot.as_mut().unwrap_unchecked()
+}
+
+// String-content fallback. For str_ptr tables, mono may pass a NEW
+// pointer on get() that has the same string content as the one used
+// on insert(). Storing (table_ptr, string_bytes) → value lets us still
+// hit on content even when the pointer differs.
+struct SimdMapByStr(UnsafeCell<Option<BTreeMap<(u32, Vec<u8>), u32>>>);
+unsafe impl Sync for SimdMapByStr {}
+static SIMD_MAP_BY_STR: SimdMapByStr = SimdMapByStr(UnsafeCell::new(None));
+
+unsafe fn simd_map_by_str_mut() -> &'static mut BTreeMap<(u32, Vec<u8>), u32> {
+    let slot = &mut *SIMD_MAP_BY_STR.0.get();
     if slot.is_none() {
         *slot = Some(BTreeMap::new());
     }
@@ -286,7 +311,7 @@ unsafe fn asm_map_mut() -> &'static mut BTreeMap<Vec<u8>, u32> {
 
 /// Read a NUL-terminated string starting at dotnet-relative `rel_ptr`.
 unsafe fn read_cstr_rel(rel_ptr: u32) -> Vec<u8> {
-    let abs = rel_ptr.wrapping_add(DOTNET_MEMORY_BASE) as *const u8;
+    let abs = rel_ptr.wrapping_add(wasp_get_g7()) as *const u8;
     let mut v = Vec::new();
     let mut i = 0;
     loop {
@@ -323,7 +348,7 @@ pub unsafe extern "C" fn wasp_add_assembly(name_rel: u32, data_rel: u32, size: u
     *p.add(7) = 0;
     *p.add(8) = 0;
 
-    let res_rel = (res as u32).wrapping_sub(DOTNET_MEMORY_BASE);
+    let res_rel = (res as u32).wrapping_sub(wasp_get_g7());
     asm_map_mut().insert(name, res_rel);
     REGISTERED_COUNT += 1;
     1
@@ -341,27 +366,69 @@ static mut SIMDHASH_GET_COUNT: u32 = 0;
 #[no_mangle]
 pub unsafe extern "C" fn wasp_simdhash_get(table_ptr: u32, key_ptr: u32) -> u32 {
     SIMDHASH_GET_COUNT += 1;
-    let key = read_cstr_rel(key_ptr);
     let simd_slot = &*SIMD_MAP.0.get();
-    if let Some(&v) = simd_slot.as_ref().and_then(|m| m.get(&(table_ptr, key.clone()))) {
-        // log first 3 hits to avoid log spam
+    if let Some(&v) = simd_slot.as_ref().and_then(|m| m.get(&(table_ptr, key_ptr))) {
         if SIMDHASH_GET_COUNT <= 5 {
             let mut buf = [0u8; 96];
             let mut i = 0;
-            for &b in b"[wasp-sh-get] " { buf[i] = b; i += 1; }
-            let nm = if key.len() < 50 { key.len() } else { 50 };
-            let mut j = 0;
-            while j < nm { buf[i] = key[j]; i += 1; j += 1; }
+            for &b in b"[wasp-sh-get] tbl=0x" { buf[i] = b; i += 1; }
+            for s in (0..32).step_by(4).rev() {
+                let n = (table_ptr >> s) & 0xF;
+                buf[i] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+                i += 1;
+            }
+            for &b in b" key=0x" { buf[i] = b; i += 1; }
+            for s in (0..32).step_by(4).rev() {
+                let n = (key_ptr >> s) & 0xF;
+                buf[i] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+                i += 1;
+            }
             for &b in b" SIMD-HIT" { buf[i] = b; i += 1; }
             debug_print(buf.as_ptr() as u32, i as u32);
         }
         return v;
     }
+    // Fall back to string-content lookup in SIMD_MAP_BY_STR (handles
+    // the common pattern where mono inserts under one ptr and looks up
+    // under a different ptr to the same string content).
+    let key = read_cstr_rel(key_ptr);
+    let by_str_slot = &*SIMD_MAP_BY_STR.0.get();
+    if !key.is_empty() {
+        if let Some(&v) = by_str_slot.as_ref().and_then(|m| m.get(&(table_ptr, key.clone()))) {
+            if SIMDHASH_GET_COUNT <= 5 {
+                let mut buf = [0u8; 96];
+                let mut i = 0;
+                for &b in b"[wasp-sh-get] str-hit " { buf[i] = b; i += 1; }
+                let nm = if key.len() < 50 { key.len() } else { 50 };
+                let mut j = 0;
+                while j < nm { buf[i] = key[j]; i += 1; j += 1; }
+                debug_print(buf.as_ptr() as u32, i as u32);
+            }
+            return v;
+        }
+        // Try with .dll suffix appended (mono looks up "Foo" but we
+        // stored "Foo.dll").
+        if !key.ends_with(b".dll") {
+            let mut k2 = key.clone();
+            k2.extend_from_slice(b".dll");
+            if let Some(&v) = by_str_slot.as_ref().and_then(|m| m.get(&(table_ptr, k2))) {
+                if SIMDHASH_GET_COUNT <= 5 {
+                    let mut buf = [0u8; 96];
+                    let mut i = 0;
+                    for &b in b"[wasp-sh-get] str-hit-dll " { buf[i] = b; i += 1; }
+                    let nm = if key.len() < 50 { key.len() } else { 50 };
+                    let mut j = 0;
+                    while j < nm { buf[i] = key[j]; i += 1; j += 1; }
+                    debug_print(buf.as_ptr() as u32, i as u32);
+                }
+                return v;
+            }
+        }
+    }
+    // Final fallback: ASM_MAP from wasp_add_assembly path (only used
+    // if the high-level mono_wasm_add_assembly patch is in effect).
     let asm_slot = &*ASM_MAP.0.get();
     let asm = asm_slot.as_ref();
-    // Mono's bundled-resources path normalizes via key_from_id which
-    // strips .dll/.pdb suffixes. Try the raw key first, then with
-    // ".dll" appended (matches our wasp_add_assembly storage form).
     let mut result = asm.and_then(|m| m.get(&key)).copied().unwrap_or(0);
     if result == 0 && !key.ends_with(b".dll") {
         let mut k2 = key.clone();
@@ -401,7 +468,7 @@ pub unsafe extern "C" fn wasp_simdhash_insert(
     _mode: u32,
 ) -> u32 {
     SIMDHASH_INS_COUNT += 1;
-    if SIMDHASH_INS_COUNT <= 8 {
+    if SIMDHASH_INS_COUNT <= 3 {
         let mut buf = [0u8; 256];
         let mut i = 0;
         for &b in b"[ins] tbl=0x" { buf[i] = b; i += 1; }
@@ -428,31 +495,16 @@ pub unsafe extern "C" fn wasp_simdhash_insert(
             buf[i] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
             i += 1;
         }
-        // Try reading key as string at BOTH abs and rel
-        for &b in b" abs=" { buf[i] = b; i += 1; }
-        let pa = key_ptr as *const u8;
-        let mut k = 0;
-        while k < 32 {
-            let bb = *pa.add(k);
-            if bb == 0 { break; }
-            buf[i] = if (0x20..0x7F).contains(&bb) { bb } else { b'.' };
-            i += 1;
-            k += 1;
-        }
-        for &b in b" rel=" { buf[i] = b; i += 1; }
-        let pr = crate::dotnet_to_abs(key_ptr);
-        let mut k = 0;
-        while k < 32 {
-            let bb = *pr.add(k);
-            if bb == 0 { break; }
-            buf[i] = if (0x20..0x7F).contains(&bb) { bb } else { b'.' };
-            i += 1;
-            k += 1;
-        }
         debug_print(buf.as_ptr() as u32, i as u32);
     }
-    let key = read_cstr_rel(key_ptr);
-    simd_map_mut().insert((table_ptr, key), value_ptr);
+    simd_map_mut().insert((table_ptr, key_ptr), value_ptr);
+    // Also store keyed by string content (if the key dereferences to a
+    // non-empty NUL-terminated string at g7+key_ptr) so later get()
+    // calls with a DIFFERENT pointer to the same content still hit.
+    let key_str = read_cstr_rel(key_ptr);
+    if !key_str.is_empty() {
+        simd_map_by_str_mut().insert((table_ptr, key_str), value_ptr);
+    }
     0  // OK_ADDED_NEW
 }
 
@@ -752,11 +804,26 @@ pub extern "C" fn canister_update_static_add() {
 /// (dotnet's code does `global.get 7 + arg_ptr` to compute the
 /// effective address). Our shim's absolute addresses must be translated
 /// by subtracting this constant before crossing the dotnet boundary.
+/// Initial value of dotnet's data base (`global 7`) before any
+/// memory.grow shift. Used by static-data convention BEFORE Mono
+/// triggers its first grow. After grow, callers must use
+/// `wasp_get_g7()` for the live value.
 pub(crate) const DOTNET_MEMORY_BASE: u32 = 2_752_512;
+
+/// Returns the LIVE value of dotnet's `global 7` (the data section
+/// base, which shifts every time fn 5236's grow wrapper runs). Body
+/// is replaced post-merge by `scripts/patch_fn_to_global_get.py` with
+/// a single `global.get 7` instruction.
+#[no_mangle]
+pub extern "C" fn wasp_get_g7() -> u32 {
+    // Placeholder — patched post-merge. Returns the static initial
+    // value as a fallback so unpatched builds at least try to function.
+    DOTNET_MEMORY_BASE
+}
 
 #[inline]
 fn dotnet_offset(p: *const u8) -> *const u8 {
-    ((p as u32).wrapping_sub(DOTNET_MEMORY_BASE)) as *const u8
+    ((p as u32).wrapping_sub(wasp_get_g7())) as *const u8
 }
 
 /// Inverse of dotnet_offset: given a dotnet-relative ptr received from
@@ -764,7 +831,7 @@ fn dotnet_offset(p: *const u8) -> *const u8 {
 /// our linear memory.
 #[inline]
 pub(crate) fn dotnet_to_abs(rel: u32) -> *const u8 {
-    rel.wrapping_add(DOTNET_MEMORY_BASE) as *const u8
+    rel.wrapping_add(wasp_get_g7()) as *const u8
 }
 
 /// Pure synthetic add_assembly (no upload required). Lets us reproduce

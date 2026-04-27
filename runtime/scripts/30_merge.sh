@@ -83,8 +83,36 @@ trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED
 echo "[6/7] wasi-stub (replace leftover wasi imports)"
 "$WASI_STUB" "$OUT_RENAMED" "$OUT_STUBBED"
 
-echo "[7/7] wasm-relax-simd (force align=0 on every memarg via direct binary patch)"
-"$REPO/shared/tools/wasm-relax-simd/relax_binary.py" "$OUT_STUBBED" "$OUT_FINAL"
+OUT_RELAXED=$(mktemp -t wasp-relaxed.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED"' EXIT
+
+echo "[7/8] wasm-relax-simd (force align=0 on every memarg via direct binary patch)"
+"$REPO/shared/tools/wasm-relax-simd/relax_binary.py" "$OUT_STUBBED" "$OUT_RELAXED"
+
+echo "[8/8] dn_simdhash + g7-helper post-merge patches"
+# Locate the three function indices we need to rewrite. Indices shift
+# between builds (wasm-merge re-numbers everything), so re-derive them
+# from the current artifact's exports.
+WAT=$(mktemp -t wasp-wat.XXXXXX)
+wasm-tools print "$OUT_RELAXED" -o "$WAT"
+G7_FN=$(grep -E '\(export "wasp_get_g7"'        "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
+GET_FN=$(grep -E '\(export "wasp_simdhash_get"'    "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
+INS_FN=$(grep -E '\(export "wasp_simdhash_insert"' "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
+rm -f "$WAT"
+[ -n "$G7_FN" ] && [ -n "$GET_FN" ] && [ -n "$INS_FN" ] || {
+    echo "  could not resolve all wasp shim fn indices (g7=$G7_FN get=$GET_FN ins=$INS_FN)"
+    exit 1
+}
+# dn_simdhash get/insert leaves are stable across builds (they live
+# inside dotnet.native.wasm which we don't recompile): fn 1024 is the
+# 2-arg dn_simdhash_get_value_or_default leaf, fn 559 is the 5-arg
+# dn_simdhash_insert_or_replace leaf.
+OUT_P1=$(mktemp -t wasp-p1.XXXXXX).wasm
+OUT_P2=$(mktemp -t wasp-p2.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$OUT_P1" "$OUT_P2"' EXIT
+python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_RELAXED" "$OUT_P1" "$G7_FN" 7
+python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P1"      "$OUT_P2" 1024 "$GET_FN"
+python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P2"      "$OUT_FINAL" 559 "$INS_FN"
 
 # ---- report -------------------------------------------------------------
 
