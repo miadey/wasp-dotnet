@@ -748,9 +748,8 @@ pub extern "C" fn mono_wasm_trace_logger(
         let prefix = b"[mono] ";
         let mut i = 0;
         for &b in prefix { buf[i] = b; i += 1; }
-
         if message != 0 {
-            let p = message as *const u8;
+            let p = crate::dotnet_to_abs(message as u32);
             let mut len = 0;
             while *p.add(len) != 0 && len < 4096 { len += 1; }
             let src = core::slice::from_raw_parts(p, len);

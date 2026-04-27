@@ -314,16 +314,27 @@ pub unsafe extern "C" fn wasp_add_assembly(name_rel: u32, data_rel: u32, size: u
 }
 
 /// Replacement for `mono_bundled_resources_get_assembly_resource`
-/// (fn 5662 in merged wasm). Returns the resource struct ptr (relative)
-/// or 0 if not found.
+/// AND `bundled_resources_get` (the lower-level lookup). Returns the
+/// resource struct ptr (relative) or 0 if not found.
 #[no_mangle]
 pub unsafe extern "C" fn wasp_get_assembly(name_rel: u32) -> u32 {
     let name = read_cstr_rel(name_rel);
     let slot = &*ASM_MAP.0.get();
-    match slot.as_ref().and_then(|m| m.get(&name)) {
-        Some(&res_rel) => res_rel,
-        None => 0,
+    let result = slot.as_ref().and_then(|m| m.get(&name)).copied().unwrap_or(0);
+    let mut buf = [0u8; 96];
+    let mut i = 0;
+    for &b in b"[wasp-get] " { buf[i] = b; i += 1; }
+    let name_max = if name.len() < 60 { name.len() } else { 60 };
+    let mut j = 0;
+    while j < name_max { buf[i] = name[j]; i += 1; j += 1; }
+    for &b in b" -> " { buf[i] = b; i += 1; }
+    if result == 0 {
+        for &b in b"NULL" { buf[i] = b; i += 1; }
+    } else {
+        for &b in b"OK" { buf[i] = b; i += 1; }
     }
+    debug_print(buf.as_ptr() as u32, i as u32);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -406,12 +417,36 @@ pub extern "C" fn canister_update_boot_mono() {
     unsafe {
         if MONO_BOOTED { reply_blob(b"already booted"); return; }
         print(b"[wasp-boot] setenv");
-        mono_embed::mono_wasm_setenv(TZ_INV_NAME.as_ptr(), TZ_INV_VAL.as_ptr());
-        mono_embed::mono_wasm_setenv(MONO_DEBUG_KEY.as_ptr(), MONO_DEBUG_VAL.as_ptr());
+        // Mono code does `global.get 7 + arg` to dereference; pointers
+        // must be dotnet-relative (caller subtracts DOTNET_MEMORY_BASE).
+        mono_embed::mono_wasm_setenv(
+            dotnet_offset(TZ_INV_NAME.as_ptr()),
+            dotnet_offset(TZ_INV_VAL.as_ptr()));
+        mono_embed::mono_wasm_setenv(
+            dotnet_offset(MONO_DEBUG_KEY.as_ptr()),
+            dotnet_offset(MONO_DEBUG_VAL.as_ptr()));
+
+        print(b"[wasp-boot] build keys/vals in dotnet heap");
+        // Build keys/vals arrays in mono malloc heap so g7 + array_ptr
+        // reads them. Each entry is a dotnet-relative pointer to the
+        // corresponding NUL-terminated string in our static data.
+        let keys_arr = mono_embed::malloc(12) as *mut u32;
+        *keys_arr.add(0) = dotnet_offset(APP_BASE_KEY.as_ptr()) as u32;
+        *keys_arr.add(1) = dotnet_offset(RID_KEY.as_ptr()) as u32;
+        *keys_arr.add(2) = dotnet_offset(INV_KEY.as_ptr()) as u32;
+
+        let vals_arr = mono_embed::malloc(12) as *mut u32;
+        *vals_arr.add(0) = dotnet_offset(APP_BASE_VAL.as_ptr()) as u32;
+        *vals_arr.add(1) = dotnet_offset(RID_VAL.as_ptr()) as u32;
+        *vals_arr.add(2) = dotnet_offset(INV_VAL.as_ptr()) as u32;
+
         print(b"[wasp-boot] load_runtime");
-        let keys: [*const u8; 3] = [APP_BASE_KEY.as_ptr(), RID_KEY.as_ptr(), INV_KEY.as_ptr()];
-        let vals: [*const u8; 3] = [APP_BASE_VAL.as_ptr(), RID_VAL.as_ptr(), INV_VAL.as_ptr()];
-        mono_embed::mono_wasm_load_runtime(0, 3, keys.as_ptr(), vals.as_ptr());
+        mono_embed::mono_wasm_load_runtime(
+            0,
+            3,
+            dotnet_offset(keys_arr as *const u8) as *const *const u8,
+            dotnet_offset(vals_arr as *const u8) as *const *const u8,
+        );
         MONO_BOOTED = true;
         reply_blob(b"booted!");
     }
@@ -562,11 +597,19 @@ pub extern "C" fn canister_update_static_add() {
 /// (dotnet's code does `global.get 7 + arg_ptr` to compute the
 /// effective address). Our shim's absolute addresses must be translated
 /// by subtracting this constant before crossing the dotnet boundary.
-const DOTNET_MEMORY_BASE: u32 = 2_752_512;
+pub(crate) const DOTNET_MEMORY_BASE: u32 = 2_752_512;
 
 #[inline]
 fn dotnet_offset(p: *const u8) -> *const u8 {
     ((p as u32).wrapping_sub(DOTNET_MEMORY_BASE)) as *const u8
+}
+
+/// Inverse of dotnet_offset: given a dotnet-relative ptr received from
+/// Mono code (e.g. as a callback arg), return the absolute address in
+/// our linear memory.
+#[inline]
+pub(crate) fn dotnet_to_abs(rel: u32) -> *const u8 {
+    rel.wrapping_add(DOTNET_MEMORY_BASE) as *const u8
 }
 
 /// Pure synthetic add_assembly (no upload required). Lets us reproduce
