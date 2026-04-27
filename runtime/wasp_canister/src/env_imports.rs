@@ -112,10 +112,24 @@ const ENOENT: i32 = -2; // no such file or directory
 // in-memory VFS over stable memory.
 // ===========================================================================
 
-/// Browser: check file accessibility. Canister: -ENOSYS.
+/// faccessat — return 0 for files we know about (mono uses access()
+/// to check existence; some code paths use this instead of stat).
 #[no_mangle]
-pub extern "C" fn __syscall_faccessat(_dirfd: i32, _path: i32, _mode: i32, _flags: i32) -> i32 {
-    ENOSYS
+pub extern "C" fn __syscall_faccessat(_dirfd: i32, path: i32, _mode: i32, _flags: i32) -> i32 {
+    unsafe {
+        let p = crate::dotnet_to_abs(path as u32);
+        let mut len = 0;
+        while *p.add(len) != 0 && len < 200 { len += 1; }
+        let mut buf = [0u8; 256];
+        let prefix = b"[faccessat] ";
+        let mut i = 0;
+        for &b in prefix { buf[i] = b; i += 1; }
+        for &b in core::slice::from_raw_parts(p, len) {
+            if i < buf.len() { buf[i] = b; i += 1; }
+        }
+        ic_debug_print_bytes(&buf[..i]);
+        if super::vfs::lookup(p).is_some() { 0 } else { ENOENT }
+    }
 }
 
 /// Browser: change current directory. Canister: -ENOSYS.
@@ -179,28 +193,81 @@ pub extern "C" fn __syscall_ioctl(_fd: i32, _request: i32, _arg: i32) -> i32 {
     ENOSYS
 }
 
-/// Browser: stat by fd. Canister: -EBADF.
+/// stat by open fd — route through VFS so g_file_test / fopen can
+/// see the file's size for our virtual /managed/*.dll paths.
 #[no_mangle]
-pub extern "C" fn __syscall_fstat64(_fd: i32, _statbuf: i32) -> i32 {
-    EBADF
+pub extern "C" fn __syscall_fstat64(fd: i32, statbuf: i32) -> i32 {
+    unsafe {
+        let buf_abs = crate::dotnet_to_abs(statbuf as u32) as *mut u8;
+        if super::vfs::stat_fd(fd, buf_abs) == 0 { 0 } else { EBADF }
+    }
 }
 
-/// Browser: stat by path. Canister: -ENOENT.
+/// stat by path — route through VFS. Returns 0 + populated statbuf
+/// for virtual paths, -ENOENT otherwise.
 #[no_mangle]
-pub extern "C" fn __syscall_stat64(_path: i32, _statbuf: i32) -> i32 {
-    ENOENT
+pub extern "C" fn __syscall_stat64(path: i32, statbuf: i32) -> i32 {
+    unsafe {
+        let p = crate::dotnet_to_abs(path as u32);
+        let mut len = 0;
+        while *p.add(len) != 0 && len < 200 { len += 1; }
+        let mut buf = [0u8; 256];
+        let prefix = b"[stat] ";
+        let mut i = 0;
+        for &b in prefix { buf[i] = b; i += 1; }
+        for &b in core::slice::from_raw_parts(p, len) {
+            if i < buf.len() { buf[i] = b; i += 1; }
+        }
+        let buf_abs = crate::dotnet_to_abs(statbuf as u32) as *mut u8;
+        let r = super::vfs::stat_path(p, buf_abs);
+        let suffix: &[u8] = if r == 0 { b" -> OK" } else { b" -> ENOENT" };
+        for &b in suffix {
+            if i < buf.len() { buf[i] = b; i += 1; }
+        }
+        ic_debug_print_bytes(&buf[..i]);
+        if r == 0 { 0 } else { ENOENT }
+    }
 }
 
-/// Browser: stat at directory fd. Canister: -ENOENT.
+/// stat at directory fd — same as stat_path (we ignore dirfd for our
+/// flat absolute-path VFS).
 #[no_mangle]
-pub extern "C" fn __syscall_newfstatat(_dirfd: i32, _path: i32, _statbuf: i32, _flags: i32) -> i32 {
-    ENOENT
+pub extern "C" fn __syscall_newfstatat(_dirfd: i32, path: i32, statbuf: i32, _flags: i32) -> i32 {
+    unsafe {
+        let p = crate::dotnet_to_abs(path as u32);
+        let mut len = 0;
+        while *p.add(len) != 0 && len < 200 { len += 1; }
+        let mut buf = [0u8; 256];
+        let prefix = b"[newfstatat] ";
+        let mut i = 0;
+        for &b in prefix { buf[i] = b; i += 1; }
+        for &b in core::slice::from_raw_parts(p, len) {
+            if i < buf.len() { buf[i] = b; i += 1; }
+        }
+        ic_debug_print_bytes(&buf[..i]);
+        let buf_abs = crate::dotnet_to_abs(statbuf as u32) as *mut u8;
+        if super::vfs::stat_path(p, buf_abs) == 0 { 0 } else { ENOENT }
+    }
 }
 
-/// Browser: stat without following symlinks. Canister: -ENOENT.
+/// lstat (no symlink follow) — same path as stat for our VFS.
 #[no_mangle]
-pub extern "C" fn __syscall_lstat64(_path: i32, _statbuf: i32) -> i32 {
-    ENOENT
+pub extern "C" fn __syscall_lstat64(path: i32, statbuf: i32) -> i32 {
+    unsafe {
+        let p = crate::dotnet_to_abs(path as u32);
+        let mut len = 0;
+        while *p.add(len) != 0 && len < 200 { len += 1; }
+        let mut buf = [0u8; 256];
+        let prefix = b"[lstat] ";
+        let mut i = 0;
+        for &b in prefix { buf[i] = b; i += 1; }
+        for &b in core::slice::from_raw_parts(p, len) {
+            if i < buf.len() { buf[i] = b; i += 1; }
+        }
+        ic_debug_print_bytes(&buf[..i]);
+        let buf_abs = crate::dotnet_to_abs(statbuf as u32) as *mut u8;
+        if super::vfs::stat_path(p, buf_abs) == 0 { 0 } else { ENOENT }
+    }
 }
 
 /// Browser: truncate file by fd. Canister: -EBADF. Note 64-bit length.

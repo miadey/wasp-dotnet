@@ -38,15 +38,20 @@ const WASPHOST: &[u8] = include_bytes!("../../inputs/WaspHost.dll");
 /// (which we set to `/`) and in MONO_ROOT/shared/Microsoft.NETCore.App/...
 /// We mount the same bytes under multiple plausible paths to maximise
 /// the chance Mono finds them on its first try.
+/// All BCL assemblies, mounted under the same `/managed/` prefix that
+/// boot_mono passes via TRUSTED_PLATFORM_ASSEMBLIES. Mono's TPA preload
+/// hook (mono_core_preload_hook in monovm.c) calls g_file_test +
+/// mono_assembly_request_open on each entry — our stat / openat / read
+/// shims return success for these paths.
 const FILES: &[(&[u8], &[u8])] = &[
+    (b"/managed/System.Private.CoreLib.dll", CORELIB),
+    (b"/managed/WaspHost.dll", WASPHOST),
+    // Also keep the legacy paths for any code path that uses them
+    // directly (e.g. issue #36 callers).
     (b"/WaspHost.dll", WASPHOST),
     (b"WaspHost.dll", WASPHOST),
-    (b"WaspHost", WASPHOST),
     (b"/System.Private.CoreLib.dll", CORELIB),
     (b"System.Private.CoreLib.dll", CORELIB),
-    (b"/usr/share/dotnet/shared/Microsoft.NETCore.App/10.0.0/System.Private.CoreLib.dll", CORELIB),
-    (b"./System.Private.CoreLib.dll", CORELIB),
-    (b"./WaspHost.dll", WASPHOST),
 ];
 
 /// Look up a NUL-terminated UTF-8 path. Returns `Some(&'static [u8])`
@@ -254,4 +259,68 @@ pub fn path_size(path_ptr: *const u8) -> i64 {
         Some(b) => b.len() as i64,
         None => -1,
     }
+}
+
+// ---------------------------------------------------------------------------
+// stat support
+// ---------------------------------------------------------------------------
+//
+// Mono's `g_file_test(path, G_FILE_TEST_IS_REGULAR)` calls `stat(path, &st)`
+// and checks `(st.st_mode & S_IFMT) == S_IFREG`. To make TPA's
+// `mono_core_preload_hook` (monovm.c) accept our virtual paths, we
+// must populate stat such that:
+//   * stat returns 0 (success)
+//   * st.st_mode has the S_IFREG bit set
+//   * st.st_size has the actual byte count (used by mono to size the
+//     file image buffer)
+//
+// Emscripten's struct stat layout (musl headers, wasm32) — order is:
+//   st_dev (8) | st_mode (4) | st_nlink (4) | st_uid (4) | st_gid (4) |
+//   st_rdev (8) | st_size (8) | st_blksize (4) | st_blocks (4) |
+//   st_atim/mtim/ctim (3 × 16 = 48) | st_ino (8)
+// Total ~96 bytes. The fields we care about for g_file_test and
+// mono_file_map_size are st_mode (offset 8) and st_size (offset 32).
+
+const S_IFREG: u32 = 0o100000;
+
+unsafe fn fill_stat(statbuf_abs: *mut u8, size: u64) {
+    // Zero the whole struct first.
+    for i in 0..96usize {
+        *statbuf_abs.add(i) = 0;
+    }
+    // st_mode @ offset 8 (S_IFREG | 0644 = 0x81A4)
+    *(statbuf_abs.add(8) as *mut u32) = S_IFREG | 0o644;
+    // st_nlink @ offset 12
+    *(statbuf_abs.add(12) as *mut u32) = 1;
+    // st_size @ offset 32 (i64)
+    *(statbuf_abs.add(32) as *mut u64) = size;
+    // st_blksize @ offset 40
+    *(statbuf_abs.add(40) as *mut u32) = 4096;
+    // st_blocks @ offset 44
+    *(statbuf_abs.add(44) as *mut u32) = ((size + 511) / 512) as u32;
+}
+
+/// Look up `path` in the VFS and fill `statbuf`. Returns 0 on success,
+/// -1 if the path is unknown. `path_ptr` is a dotnet-relative pointer
+/// (mono's compiled wasm uses g7+ptr); the caller is responsible for
+/// translating it to absolute via `crate::dotnet_to_abs`. Same for
+/// `statbuf_abs` (already absolute).
+pub fn stat_path(path_ptr: *const u8, statbuf_abs: *mut u8) -> i32 {
+    match lookup(path_ptr) {
+        Some(bytes) => {
+            unsafe { fill_stat(statbuf_abs, bytes.len() as u64) };
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Same but for an open fd.
+pub fn stat_fd(fd: i32, statbuf_abs: *mut u8) -> i32 {
+    let size = file_size(fd);
+    if size < 0 {
+        return -1;
+    }
+    unsafe { fill_stat(statbuf_abs, size as u64) };
+    0
 }

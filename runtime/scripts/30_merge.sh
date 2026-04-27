@@ -124,12 +124,12 @@ python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_RELAXED" "$OUT_P1" "$
 python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P1"      "$OUT_P2" "$DN_GET" "$GET_FN"
 python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P2"      "$OUT_P3" "$DN_INS" "$INS_FN"
 
-# Defang the corelib g_assert at assembly.c:2718. Our shim's bundled
-# resources lookup is incomplete — mono can't find the corelib via
-# its normal preload-hook chain — but stubbing the assert lets
-# load_runtime complete so we can continue building out the embed.
-# When real corelib loading is wired up (issue #41), this becomes
-# unnecessary.
+# Defang the corelib g_assert at assembly.c:2718. Our TPA + vfs
+# wiring is in place but mono's corelib loader in this build doesn't
+# actually invoke the TPA preload hook (it only goes through the
+# bundle path). Until that's resolved (issue #42), the defang lets
+# load_runtime complete so register_all + boot_mono test the rest
+# of the embed.
 python3 "$RUNTIME/scripts/patch_disable_g_assert.py" "$OUT_P3" "$OUT_FINAL" --line 2718
 
 # ---- report -------------------------------------------------------------

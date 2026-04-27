@@ -67,6 +67,11 @@ static mut MONO_BOOTED: bool = false;
 static mut REGISTERED_COUNT: usize = 0;
 
 static APP_BASE_KEY: &[u8] = b"APP_CONTEXT_BASE_DIRECTORY\0";
+static TPA_KEY: &[u8] = b"TRUSTED_PLATFORM_ASSEMBLIES\0";
+static APP_PATHS_KEY: &[u8] = b"APP_PATHS\0";
+// Colon separator on WASM (G_SEARCHPATH_SEPARATOR_S = ":" on non-Win).
+static TPA_VAL: &[u8] = b"/managed/System.Private.CoreLib.dll\0";
+static APP_PATHS_VAL: &[u8] = b"/managed\0";
 static APP_BASE_VAL: &[u8] = b"/\0";
 static RID_KEY: &[u8]      = b"RUNTIME_IDENTIFIER\0";
 static RID_VAL: &[u8]      = b"browser-wasm\0";
@@ -78,6 +83,8 @@ static TZ_INV_VAL: &[u8]   = b"true\0";
 
 static MONO_DEBUG_KEY: &[u8] = b"MONO_DEBUG\0";
 static MONO_DEBUG_VAL: &[u8] = b"\0"; // empty value avoids the parse-error exit(1) at mini-runtime.c:4279
+static MONO_PATH_KEY: &[u8] = b"MONO_PATH\0";
+static MONO_PATH_VAL: &[u8] = b"/managed\0";
 
 static MONO_LOG_LEVEL_KEY: &[u8] = b"MONO_LOG_LEVEL\0";
 static MONO_LOG_LEVEL_VAL: &[u8] = b"debug\0";
@@ -700,28 +707,68 @@ pub extern "C" fn canister_update_boot_mono() {
         mono_embed::mono_wasm_setenv(
             dotnet_offset(MONO_DEBUG_KEY.as_ptr()),
             dotnet_offset(MONO_DEBUG_VAL.as_ptr()));
-        // NOTE: a 3rd distinct setenv triggers the dn_simdhash bug
-        // (setenv uses simdhash internally). Skipping MONO_LOG_LEVEL
-        // / MONO_LOG_MASK until we patch the env hashtable too.
+        // 3rd setenv — was the dn_simdhash trap point but we now have
+        // the passthrough+shadow-map bypass at fn 559, so this should
+        // succeed.
+        mono_embed::mono_wasm_setenv(
+            dotnet_offset(MONO_PATH_KEY.as_ptr()),
+            dotnet_offset(MONO_PATH_VAL.as_ptr()));
 
         print(b"[wasp-boot] build keys/vals in dotnet heap");
-        // Build keys/vals arrays in mono malloc heap so g7 + array_ptr
-        // reads them. Each entry is a dotnet-relative pointer to the
-        // corresponding NUL-terminated string in our static data.
-        let keys_arr = mono_embed::malloc(12) as *mut u32;
-        *keys_arr.add(0) = dotnet_offset(APP_BASE_KEY.as_ptr()) as u32;
-        *keys_arr.add(1) = dotnet_offset(RID_KEY.as_ptr()) as u32;
-        *keys_arr.add(2) = dotnet_offset(INV_KEY.as_ptr()) as u32;
+        // 4 properties: APP_BASE, RID, INV, TPA. TPA causes mono's
+        // mono_core_preload_hook to load corelib via the standard
+        // g_file_test + open + read path (backed by our vfs).
+        // Allocate in mono-malloc heap so g7 + array_ptr resolves
+        // correctly inside mono code.
+        let keys_arr = mono_embed::malloc(20) as *mut u32;
+        let vals_arr = mono_embed::malloc(20) as *mut u32;
+        // CRITICAL: each property STRING also needs to be in mono-
+        // malloc heap (or otherwise reachable via g7+ptr by mono
+        // code). Copy each Rust static string into mono-malloc and
+        // store the dotnet-relative pointer to that copy.
+        unsafe fn cpy_static(src: &[u8]) -> u32 {
+            let dst = mono_embed::malloc(src.len()) as *mut u8;
+            let mut i = 0;
+            while i < src.len() {
+                *dst.add(i) = src[i];
+                i += 1;
+            }
+            (dst as u32).wrapping_sub(wasp_get_g7())
+        }
+        *keys_arr.add(0) = cpy_static(APP_BASE_KEY);
+        *keys_arr.add(1) = cpy_static(RID_KEY);
+        *keys_arr.add(2) = cpy_static(INV_KEY);
+        *keys_arr.add(3) = cpy_static(TPA_KEY);
+        *keys_arr.add(4) = cpy_static(APP_PATHS_KEY);
+        *vals_arr.add(0) = cpy_static(APP_BASE_VAL);
+        *vals_arr.add(1) = cpy_static(RID_VAL);
+        *vals_arr.add(2) = cpy_static(INV_VAL);
+        *vals_arr.add(3) = cpy_static(TPA_VAL);
+        *vals_arr.add(4) = cpy_static(APP_PATHS_VAL);
 
-        let vals_arr = mono_embed::malloc(12) as *mut u32;
-        *vals_arr.add(0) = dotnet_offset(APP_BASE_VAL.as_ptr()) as u32;
-        *vals_arr.add(1) = dotnet_offset(RID_VAL.as_ptr()) as u32;
-        *vals_arr.add(2) = dotnet_offset(INV_VAL.as_ptr()) as u32;
+        // Print the TPA value via direct read at the dotnet-relative
+        // pointer to verify our layout — mono should see this same
+        // string when it parses TRUSTED_PLATFORM_ASSEMBLIES.
+        let tpa_val_rel = *vals_arr.add(3);
+        let tpa_abs = wasp_get_g7().wrapping_add(tpa_val_rel) as *const u8;
+        let mut buf = [0u8; 256];
+        let prefix = b"[wasp-boot] tpa_val=";
+        let mut bi = 0;
+        for &b in prefix { buf[bi] = b; bi += 1; }
+        let mut k = 0;
+        while k < 200 {
+            let bb = *tpa_abs.add(k);
+            if bb == 0 { break; }
+            buf[bi] = bb;
+            bi += 1;
+            k += 1;
+        }
+        debug_print(buf.as_ptr() as u32, bi as u32);
 
         print(b"[wasp-boot] load_runtime");
         mono_embed::mono_wasm_load_runtime(
             0,
-            3,
+            5,
             dotnet_offset(keys_arr as *const u8) as *const *const u8,
             dotnet_offset(vals_arr as *const u8) as *const *const u8,
         );
