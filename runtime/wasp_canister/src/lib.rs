@@ -219,15 +219,10 @@ pub extern "C" fn canister_init() {
     print(b"[wasp-dotnet] canister_init: pre-ctors");
     unsafe {
         mono_embed::__wasm_call_ctors();
-        // Pre-fill Mono's dlmalloc pool with one large allocation. Forces
-        // ONE memory.grow → shift cycle here at init (before any Rust
-        // pointer values are stored long-term). Subsequent allocations
-        // reuse the freed pool without growing → no further shifts → all
-        // long-lived Rust pointers stay valid.
-        let p = mono_embed::malloc(20 * 1024 * 1024);
-        if !p.is_null() {
-            mono_embed::free(p);
-        }
+        // NO pre-grow — pre-grow shifts global 7 (dotnet's data base)
+        // away from our DOTNET_MEMORY_BASE constant, breaking
+        // dotnet_offset / dotnet_to_abs translations. Instead rely on
+        // Mono's own grow trigger when its heap actually fills.
     }
     print(b"[wasp-dotnet] canister_init: __wasm_call_ctors done");
 }
@@ -363,7 +358,16 @@ pub unsafe extern "C" fn wasp_simdhash_get(table_ptr: u32, key_ptr: u32) -> u32 
         return v;
     }
     let asm_slot = &*ASM_MAP.0.get();
-    let result = asm_slot.as_ref().and_then(|m| m.get(&key)).copied().unwrap_or(0);
+    let asm = asm_slot.as_ref();
+    // Mono's bundled-resources path normalizes via key_from_id which
+    // strips .dll/.pdb suffixes. Try the raw key first, then with
+    // ".dll" appended (matches our wasp_add_assembly storage form).
+    let mut result = asm.and_then(|m| m.get(&key)).copied().unwrap_or(0);
+    if result == 0 && !key.ends_with(b".dll") {
+        let mut k2 = key.clone();
+        k2.extend_from_slice(b".dll");
+        result = asm.and_then(|m| m.get(&k2)).copied().unwrap_or(0);
+    }
     if SIMDHASH_GET_COUNT <= 5 {
         let mut buf = [0u8; 96];
         let mut i = 0;
@@ -381,19 +385,72 @@ pub unsafe extern "C" fn wasp_simdhash_get(table_ptr: u32, key_ptr: u32) -> u32 
     result
 }
 
-/// Replacement for `dn_simdhash_ght_insert_replace` (fn 555 in merged
+static mut SIMDHASH_INS_COUNT: u32 = 0;
+
+/// Replacement for `dn_simdhash_ght_insert_replace` (fn 555/559 in merged
 /// wasm). Stores (table_ptr, key_string) → value in our shadow map.
 /// Returns 0 = DN_SIMDHASH_INSERT_OK_ADDED_NEW.
 ///
-/// Mono's signature: (struct, key, suffix_byte, value, mode) → status
+/// Mono's signature: (struct, key, hash, value, mode) → status
 #[no_mangle]
 pub unsafe extern "C" fn wasp_simdhash_insert(
     table_ptr: u32,
     key_ptr: u32,
-    _suffix: u32,
+    _hash: u32,
     value_ptr: u32,
     _mode: u32,
 ) -> u32 {
+    SIMDHASH_INS_COUNT += 1;
+    if SIMDHASH_INS_COUNT <= 8 {
+        let mut buf = [0u8; 256];
+        let mut i = 0;
+        for &b in b"[ins] tbl=0x" { buf[i] = b; i += 1; }
+        for s in (0..32).step_by(4).rev() {
+            let n = (table_ptr >> s) & 0xF;
+            buf[i] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            i += 1;
+        }
+        for &b in b" key=0x" { buf[i] = b; i += 1; }
+        for s in (0..32).step_by(4).rev() {
+            let n = (key_ptr >> s) & 0xF;
+            buf[i] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            i += 1;
+        }
+        for &b in b" hash=0x" { buf[i] = b; i += 1; }
+        for s in (0..32).step_by(4).rev() {
+            let n = (_hash >> s) & 0xF;
+            buf[i] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            i += 1;
+        }
+        for &b in b" val=0x" { buf[i] = b; i += 1; }
+        for s in (0..32).step_by(4).rev() {
+            let n = (value_ptr >> s) & 0xF;
+            buf[i] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
+            i += 1;
+        }
+        // Try reading key as string at BOTH abs and rel
+        for &b in b" abs=" { buf[i] = b; i += 1; }
+        let pa = key_ptr as *const u8;
+        let mut k = 0;
+        while k < 32 {
+            let bb = *pa.add(k);
+            if bb == 0 { break; }
+            buf[i] = if (0x20..0x7F).contains(&bb) { bb } else { b'.' };
+            i += 1;
+            k += 1;
+        }
+        for &b in b" rel=" { buf[i] = b; i += 1; }
+        let pr = crate::dotnet_to_abs(key_ptr);
+        let mut k = 0;
+        while k < 32 {
+            let bb = *pr.add(k);
+            if bb == 0 { break; }
+            buf[i] = if (0x20..0x7F).contains(&bb) { bb } else { b'.' };
+            i += 1;
+            k += 1;
+        }
+        debug_print(buf.as_ptr() as u32, i as u32);
+    }
     let key = read_cstr_rel(key_ptr);
     simd_map_mut().insert((table_ptr, key), value_ptr);
     0  // OK_ADDED_NEW
