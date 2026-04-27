@@ -109,10 +109,19 @@ DN_GET=1024
 
 OUT_P1=$(mktemp -t wasp-p1.XXXXXX).wasm
 OUT_P2=$(mktemp -t wasp-p2.XXXXXX).wasm
-trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$OUT_P1" "$OUT_P2"' EXIT
+OUT_P3=$(mktemp -t wasp-p3.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$OUT_P1" "$OUT_P2" "$OUT_P3"' EXIT
 python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_RELAXED" "$OUT_P1"   "$G7_FN" 7
 python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P1"      "$OUT_P2"   "$DN_GET" "$GET_FN"
-python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P2"      "$OUT_FINAL" "$DN_INS" "$INS_FN"
+python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P2"      "$OUT_P3" "$DN_INS" "$INS_FN"
+
+# Defang the corelib g_assert at assembly.c:2718. Our shim's bundled
+# resources lookup is incomplete — mono can't find the corelib via
+# its normal preload-hook chain — but stubbing the assert lets
+# load_runtime complete so we can continue building out the embed.
+# When real corelib loading is wired up (issue #41), this becomes
+# unnecessary.
+python3 "$RUNTIME/scripts/patch_disable_g_assert.py" "$OUT_P3" "$OUT_FINAL" --line 2718
 
 # ---- report -------------------------------------------------------------
 
