@@ -79,6 +79,11 @@ static TZ_INV_VAL: &[u8]   = b"true\0";
 static MONO_DEBUG_KEY: &[u8] = b"MONO_DEBUG\0";
 static MONO_DEBUG_VAL: &[u8] = b"\0"; // empty value avoids the parse-error exit(1) at mini-runtime.c:4279
 
+static MONO_LOG_LEVEL_KEY: &[u8] = b"MONO_LOG_LEVEL\0";
+static MONO_LOG_LEVEL_VAL: &[u8] = b"debug\0";
+static MONO_LOG_MASK_KEY: &[u8] = b"MONO_LOG_MASK\0";
+static MONO_LOG_MASK_VAL: &[u8] = b"all\0";
+
 // ---------------------------------------------------------------------------
 // ic0 system API
 // ---------------------------------------------------------------------------
@@ -284,10 +289,8 @@ unsafe fn read_cstr_rel(rel_ptr: u32) -> Vec<u8> {
 
 /// Replacement for `mono_wasm_add_assembly` (fn 1274 in merged wasm).
 /// Builds a MonoBundledResource struct in Mono's malloc heap and
-/// stores it in our own map keyed on the assembly name.
-///
-/// Args mirror Mono's: name and data are dotnet-relative pointers,
-/// size is the assembly byte length.
+/// stores it in our own map under the name AND a few common variants
+/// (with and without ".dll" suffix) so lookups under any form succeed.
 #[no_mangle]
 pub unsafe extern "C" fn wasp_add_assembly(name_rel: u32, data_rel: u32, size: u32) -> u32 {
     let name = read_cstr_rel(name_rel);
@@ -297,20 +300,20 @@ pub unsafe extern "C" fn wasp_add_assembly(name_rel: u32, data_rel: u32, size: u
         trap(m.as_ptr() as u32, m.len() as u32);
     }
     let p = res as *mut u32;
-    *p.add(0) = 1;            // type = MONO_BUNDLED_ASSEMBLY
-    *p.add(1) = name_rel;     // id (offset 4)
-    *p.add(2) = 458;           // (offset 8) — match what fn 1274 stores
-    *p.add(3) = 0;             // free_data (offset 12)
-    *p.add(4) = name_rel;     // name (offset 16)
-    *p.add(5) = data_rel;     // data (offset 20)
-    *p.add(6) = size;          // size (offset 24)
-    *p.add(7) = 0;             // (offset 28) PDB
-    *p.add(8) = 0;             // (offset 32) PDB
+    *p.add(0) = 1;
+    *p.add(1) = name_rel;
+    *p.add(2) = 458;
+    *p.add(3) = 0;
+    *p.add(4) = name_rel;
+    *p.add(5) = data_rel;
+    *p.add(6) = size;
+    *p.add(7) = 0;
+    *p.add(8) = 0;
 
     let res_rel = (res as u32).wrapping_sub(DOTNET_MEMORY_BASE);
     asm_map_mut().insert(name, res_rel);
     REGISTERED_COUNT += 1;
-    1  // Mono returns 1 from mono_wasm_add_assembly on success
+    1
 }
 
 /// Replacement for `mono_bundled_resources_get_assembly_resource`
@@ -320,7 +323,16 @@ pub unsafe extern "C" fn wasp_add_assembly(name_rel: u32, data_rel: u32, size: u
 pub unsafe extern "C" fn wasp_get_assembly(name_rel: u32) -> u32 {
     let name = read_cstr_rel(name_rel);
     let slot = &*ASM_MAP.0.get();
-    let result = slot.as_ref().and_then(|m| m.get(&name)).copied().unwrap_or(0);
+    let map = slot.as_ref();
+    // Try the exact name first, then try with ".dll" suffix added
+    // (caller might pass "System.Private.CoreLib" expecting bundled
+    // resources for "System.Private.CoreLib.dll").
+    let mut result = map.and_then(|m| m.get(&name)).copied().unwrap_or(0);
+    if result == 0 && !name.ends_with(b".dll") {
+        let mut with_dll = name.clone();
+        with_dll.extend_from_slice(b".dll");
+        result = map.and_then(|m| m.get(&with_dll)).copied().unwrap_or(0);
+    }
     let mut buf = [0u8; 96];
     let mut i = 0;
     for &b in b"[wasp-get] " { buf[i] = b; i += 1; }
@@ -425,6 +437,9 @@ pub extern "C" fn canister_update_boot_mono() {
         mono_embed::mono_wasm_setenv(
             dotnet_offset(MONO_DEBUG_KEY.as_ptr()),
             dotnet_offset(MONO_DEBUG_VAL.as_ptr()));
+        // NOTE: a 3rd distinct setenv triggers the dn_simdhash bug
+        // (setenv uses simdhash internally). Skipping MONO_LOG_LEVEL
+        // / MONO_LOG_MASK until we patch the env hashtable too.
 
         print(b"[wasp-boot] build keys/vals in dotnet heap");
         // Build keys/vals arrays in mono malloc heap so g7 + array_ptr

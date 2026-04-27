@@ -145,35 +145,32 @@ pub extern "C" fn __syscall_fcntl64(_fd: i32, _cmd: i32, _arg: i32) -> i32 {
 /// Browser: open a file at directory. Canister: -ENOENT (no FS).
 #[no_mangle]
 pub extern "C" fn __syscall_openat(_dirfd: i32, path: i32, _flags: i32, _mode: i32) -> i32 {
-    // Trace only if path is a sane non-empty UTF-8-looking C string in
-    // user memory. Skips the noise we previously hit when path pointed
-    // at low memory or non-printable garbage.
-    if path > 0x100000 {
-        unsafe {
-            let p = path as *const u8;
-            let mut len = 0usize;
-            let mut all_printable = true;
-            while *p.add(len) != 0 && len < 256 {
-                let b = *p.add(len);
-                if !(0x20..0x7f).contains(&b) { all_printable = false; }
-                len += 1;
-            }
-            if len > 0 && all_printable {
-                let mut buf = [0u8; 280];
-                let prefix = b"[openat] ";
-                let mut i = 0;
-                for &b in prefix { buf[i] = b; i += 1; }
-                for &b in core::slice::from_raw_parts(p, len) {
-                    if i >= buf.len() { break; }
-                    buf[i] = b;
-                    i += 1;
-                }
-                ic_debug_print_bytes(&buf[..i]);
-            }
+    // Mono passes `path` as a DOTNET-RELATIVE pointer (its compiled
+    // wasm uses `g7 + ptr` for memory access). Translate before reading.
+    unsafe {
+        let p = crate::dotnet_to_abs(path as u32);
+        let mut len = 0usize;
+        let mut all_printable = true;
+        while *p.add(len) != 0 && len < 256 {
+            let b = *p.add(len);
+            if !(0x20..0x7f).contains(&b) { all_printable = false; }
+            len += 1;
         }
+        if len > 0 && all_printable {
+            let mut buf = [0u8; 280];
+            let prefix = b"[openat] ";
+            let mut i = 0;
+            for &b in prefix { buf[i] = b; i += 1; }
+            for &b in core::slice::from_raw_parts(p, len) {
+                if i >= buf.len() { break; }
+                buf[i] = b;
+                i += 1;
+            }
+            ic_debug_print_bytes(&buf[..i]);
+        }
+        let fd = super::vfs::open_path(p);
+        if fd < 0 { -2 /* -ENOENT */ } else { fd }
     }
-    let fd = super::vfs::open_path(path as *const u8);
-    if fd < 0 { -2 /* -ENOENT */ } else { fd }
 }
 
 /// Browser: device-specific control. Canister: -ENOSYS.
