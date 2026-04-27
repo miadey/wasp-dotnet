@@ -224,4 +224,14 @@ extern "C" {
 
     /// Free a pointer previously returned by `malloc`.
     pub fn free(p: *mut u8);
+
+    /// Preserved-original dn_simdhash insert leaf (5 i32 → i32):
+    /// (table_ptr, key, hash, value, mode) → status. Exported by
+    /// `scripts/inject_dn_simdhash_passthrough.py`. Calling this
+    /// invokes mono's REAL bucket scan / insert logic instead of
+    /// our shadow-map shim. Use sparingly — the bug we're working
+    /// around triggers on the 3rd distinct-pointer insert.
+    pub fn wasp_dn_simdhash_insert_original(
+        table: u32, key: u32, hash: u32, value: u32, mode: u32,
+    ) -> u32;
 }

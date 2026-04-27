@@ -52,10 +52,15 @@ CONST_LOWER=$REPO/shared/tools/wasm-const-lower/lower.py
 [ -x "$WASI_STUB" ]   || { echo "missing $WASI_STUB — build it with: cargo build --release --manifest-path $REPO/shared/tools/wasi-stub/Cargo.toml" >&2; exit 1; }
 [ -x "$CONST_LOWER" ] || { echo "missing or non-exec: $CONST_LOWER" >&2; exit 1; }
 
+echo "[0/8] preserve dn_simdhash insert leaf in dotnet.native.wasm"
+DOTNET_PRE=$(mktemp -t wasp-dotnet-pre.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_RENAMED" "$DOTNET_PRE"' EXIT
+python3 "$RUNTIME/scripts/inject_dn_simdhash_passthrough.py" "$DOTNET_WASM" "$DOTNET_PRE"
+
 echo "[1/5] wasm-merge wasp_canister(as 'env') + dotnet.native(as 'dotnet')"
 wasm-merge \
     "$CANISTER_WASM" env \
-    "$DOTNET_WASM"   dotnet \
+    "$DOTNET_PRE"    dotnet \
     -o "$OUT_MERGED" \
     --all-features \
     --skip-export-conflicts
@@ -114,9 +119,9 @@ echo "  dn_simdhash leaves: get=$DN_GET, insert=$DN_INS"
 OUT_P1=$(mktemp -t wasp-p1.XXXXXX).wasm
 OUT_P2=$(mktemp -t wasp-p2.XXXXXX).wasm
 OUT_P3=$(mktemp -t wasp-p3.XXXXXX).wasm
-trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$OUT_P1" "$OUT_P2" "$OUT_P3"' EXIT
-python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_RELAXED" "$OUT_P1"   "$G7_FN" 7
-python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P1"      "$OUT_P2"   "$DN_GET" "$GET_FN"
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_P1" "$OUT_P2" "$OUT_P3"' EXIT
+python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_RELAXED" "$OUT_P1" "$G7_FN" 7
+python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P1"      "$OUT_P2" "$DN_GET" "$GET_FN"
 python3 "$RUNTIME/scripts/patch_fn_to_call.py"      "$OUT_P2"      "$OUT_P3" "$DN_INS" "$INS_FN"
 
 # Defang the corelib g_assert at assembly.c:2718. Our shim's bundled

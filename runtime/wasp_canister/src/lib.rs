@@ -468,6 +468,51 @@ pub unsafe extern "C" fn wasp_simdhash_insert(
     _mode: u32,
 ) -> u32 {
     SIMDHASH_INS_COUNT += 1;
+    // PASSTHROUGH MODE: for the first PASSTHROUGH_LIMIT distinct
+    // inserts, call mono's REAL dn_simdhash insert leaf so the
+    // entries land in the actual hash table. The dn_simdhash bug
+    // triggers on the 3rd distinct-pointer insert (per the original
+    // bypass investigation), so we let the first 2 succeed via the
+    // real path (one of which should be corelib). After that we
+    // fall back to the shadow-map bypass.
+    const PASSTHROUGH_LIMIT: u32 = 2;
+    if SIMDHASH_INS_COUNT <= PASSTHROUGH_LIMIT {
+        let r = mono_embed::wasp_dn_simdhash_insert_original(
+            table_ptr, key_ptr, _hash, value_ptr, _mode,
+        );
+        // Still maintain the shadow map so wasp_simdhash_get can
+        // serve later lookups when the real hash misses.
+        simd_map_mut().insert((table_ptr, key_ptr), value_ptr);
+        let key_str = read_cstr_rel(key_ptr);
+        if !key_str.is_empty() {
+            simd_map_by_str_mut().insert((table_ptr, key_str), value_ptr);
+        }
+        // Also auto-populate ASM_MAP from the resource struct.
+        let abs_value = dotnet_to_abs(value_ptr) as *const u32;
+        if !abs_value.is_null() {
+            let res_type = *abs_value.add(0);
+            if res_type == 1 {
+                let name_rel = *abs_value.add(1);
+                if name_rel != 0 {
+                    let name = read_cstr_rel(name_rel);
+                    if !name.is_empty() {
+                        asm_map_mut().insert(name.clone(), value_ptr);
+                        if let Some(base) = name.strip_suffix(b".dll") {
+                            asm_map_mut().insert(base.to_vec(), value_ptr);
+                        }
+                    }
+                }
+            }
+        }
+        let mut buf = [0u8; 64];
+        let mut i = 0;
+        for &b in b"[ins-passthrough#" { buf[i] = b; i += 1; }
+        i = format_decimal(&mut buf, i, SIMDHASH_INS_COUNT as u64);
+        for &b in b"] result=" { buf[i] = b; i += 1; }
+        i = format_decimal(&mut buf, i, r as u64);
+        debug_print(buf.as_ptr() as u32, i as u32);
+        return r;
+    }
     if SIMDHASH_INS_COUNT <= 3 {
         let mut buf = [0u8; 256];
         let mut i = 0;
@@ -758,11 +803,13 @@ pub extern "C" fn canister_update_probe_globals() {
         let g7 = wasp_get_g7();
         let mut buf = [0u8; 1024];
         let mut bi = 0;
-        for &c in b"non-zero @ 0x800000..0x900000:" { buf[bi] = c; bi += 1; }
+        for &c in b"non-zero in 0x880000..0x8a0000 (4-byte step):" { buf[bi] = c; bi += 1; }
         let mut found = 0;
-        // Scan a 1MB window stepping by 256 bytes (sparse).
-        let mut off = 0x800000u32;
-        while off < 0x900000 && found < 24 {
+        // Scan finely around the corelib loader's code-referenced
+        // addresses (0x885508, 0x885496, 0x885484) to find what's
+        // actually populated.
+        let mut off = 0x880000u32;
+        while off < 0x8a0000 && found < 30 {
             let v = *((g7.wrapping_add(off)) as *const u32);
             if v != 0 {
                 buf[bi] = b' '; bi += 1;
@@ -780,7 +827,7 @@ pub extern "C" fn canister_update_probe_globals() {
                 }
                 found += 1;
             }
-            off = off.wrapping_add(256);
+            off = off.wrapping_add(4);
         }
         if found == 0 {
             for &c in b" (all zero)" { buf[bi] = c; bi += 1; }
