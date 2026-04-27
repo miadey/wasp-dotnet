@@ -368,7 +368,7 @@ pub unsafe extern "C" fn wasp_simdhash_get(table_ptr: u32, key_ptr: u32) -> u32 
     SIMDHASH_GET_COUNT += 1;
     let simd_slot = &*SIMD_MAP.0.get();
     if let Some(&v) = simd_slot.as_ref().and_then(|m| m.get(&(table_ptr, key_ptr))) {
-        if SIMDHASH_GET_COUNT <= 5 {
+        if SIMDHASH_GET_COUNT <= 50 {
             let mut buf = [0u8; 96];
             let mut i = 0;
             for &b in b"[wasp-sh-get] tbl=0x" { buf[i] = b; i += 1; }
@@ -395,7 +395,7 @@ pub unsafe extern "C" fn wasp_simdhash_get(table_ptr: u32, key_ptr: u32) -> u32 
     let by_str_slot = &*SIMD_MAP_BY_STR.0.get();
     if !key.is_empty() {
         if let Some(&v) = by_str_slot.as_ref().and_then(|m| m.get(&(table_ptr, key.clone()))) {
-            if SIMDHASH_GET_COUNT <= 5 {
+            if SIMDHASH_GET_COUNT <= 50 {
                 let mut buf = [0u8; 96];
                 let mut i = 0;
                 for &b in b"[wasp-sh-get] str-hit " { buf[i] = b; i += 1; }
@@ -412,7 +412,7 @@ pub unsafe extern "C" fn wasp_simdhash_get(table_ptr: u32, key_ptr: u32) -> u32 
             let mut k2 = key.clone();
             k2.extend_from_slice(b".dll");
             if let Some(&v) = by_str_slot.as_ref().and_then(|m| m.get(&(table_ptr, k2))) {
-                if SIMDHASH_GET_COUNT <= 5 {
+                if SIMDHASH_GET_COUNT <= 50 {
                     let mut buf = [0u8; 96];
                     let mut i = 0;
                     for &b in b"[wasp-sh-get] str-hit-dll " { buf[i] = b; i += 1; }
@@ -435,7 +435,7 @@ pub unsafe extern "C" fn wasp_simdhash_get(table_ptr: u32, key_ptr: u32) -> u32 
         k2.extend_from_slice(b".dll");
         result = asm.and_then(|m| m.get(&k2)).copied().unwrap_or(0);
     }
-    if SIMDHASH_GET_COUNT <= 5 {
+    if SIMDHASH_GET_COUNT <= 50 {
         let mut buf = [0u8; 96];
         let mut i = 0;
         for &b in b"[wasp-sh-get] " { buf[i] = b; i += 1; }
@@ -685,27 +685,28 @@ pub extern "C" fn canister_update_boot_mono() {
     }
 }
 
-/// After boot_mono, try to obtain a MonoAssembly* for
-/// "System.Private.CoreLib" via the runtime's exported lookup. Returns
-/// the pointer value as a hex string so we can see if mono knows
-/// about corelib at all (NULL means no — confirms issue #42).
+/// After boot_mono, dump the cached corelib_assembly slot at
+/// dotnet-relative offset 0x885508 (where `mono_assembly_load_corlib`
+/// stores its result). Non-zero means mono successfully loaded
+/// corelib during load_runtime; zero means the assert at
+/// assembly.c:2718 was reached and our defang let it return NULL.
+/// This probe avoids invoking mono APIs that would themselves trip
+/// on the NULL corelib.
 #[export_name = "canister_update probe_corlib"]
 pub extern "C" fn canister_update_probe_corlib() {
     unsafe {
         if !MONO_BOOTED { reply_blob(b"not booted yet"); return; }
-        // The string "System.Private.CoreLib" must live in dotnet's
-        // memory space (mono_wasm_assembly_load adds g7 to deref).
-        let name = b"System.Private.CoreLib\0";
-        let dst = mono_embed::malloc(name.len()) as *mut u8;
-        let mut i = 0;
-        while i < name.len() { *dst.add(i) = name[i]; i += 1; }
-        let asm = mono_embed::mono_wasm_assembly_load(dotnet_offset(dst));
-        let mut buf = [0u8; 64];
+        // Address is dotnet-relative: read at g7 + 0x885508.
+        let slot_addr = wasp_get_g7().wrapping_add(0x885508u32);
+        let cached_corlib = *(slot_addr as *const u32);
+        // Also read mono_bundled_resources count (typically a global
+        // near other bundled-resources data; offset known from
+        // upstream traces). Skip if not at a known-good offset.
+        let mut buf = [0u8; 96];
         let mut bi = 0;
-        for &c in b"corelib_assembly=0x" { buf[bi] = c; bi += 1; }
-        let v = asm as u32;
+        for &c in b"corelib_slot[0x885508]=0x" { buf[bi] = c; bi += 1; }
         for s in (0..32).step_by(4).rev() {
-            let n = (v >> s) & 0xF;
+            let n = (cached_corlib >> s) & 0xF;
             buf[bi] = if n < 10 { b'0' + n as u8 } else { b'a' + (n - 10) as u8 };
             bi += 1;
         }
