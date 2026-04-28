@@ -794,12 +794,13 @@ pub extern "C" fn mono_wasm_set_entrypoint_breakpoint(_method_token: i32) {}
 /// forward the buffer to `ic0.debug_print`.
 #[no_mangle]
 pub extern "C" fn mono_wasm_trace_logger(
-    _log_domain: i32,
-    _log_level: i32,
+    log_domain: i32,
+    log_level: i32,
     message: i32,
     _fatal: i32,
     _user_data: i32,
 ) {
+    let _ = log_level; // unused
     // Mono ABI: `void wasm_trace_logger(char *log_domain, char *log_level,
     //                                    char *message, mono_bool fatal,
     //                                    void *user_data)` (5 args).
@@ -816,9 +817,21 @@ pub extern "C" fn mono_wasm_trace_logger(
         // Many mono builds pass log args by raw mem_base-offset; some
         // by literal absolute pointer. Show both interpretations.
         let mb = crate::wasp_get_mem_base();
+        // Print domain string (first arg) — usually a stable interned
+        // identifier like "Mono", "GLib", "DOTNET" — gives subsystem.
+        for &c in b"dom=" { if i < buf.len() { buf[i]=c; i+=1; } }
+        if log_domain != 0 {
+            let p = mb.wrapping_add(log_domain as u32) as *const u8;
+            let mut len = 0;
+            while len < 64 { let b = *p.add(len); if b == 0 { break; } len += 1; }
+            for k in 0..len {
+                if i >= buf.len() { break; }
+                buf[i] = *p.add(k); i += 1;
+            }
+        }
         let mut tmp = [0u8; 64];
         let mut ti = 0;
-        for &c in b"msg=" { tmp[ti] = c; ti += 1; }
+        for &c in b" msg=" { tmp[ti] = c; ti += 1; }
         ti = crate::format_decimal(&mut tmp, ti, message as u64);
         for &c in b" mb=" { tmp[ti] = c; ti += 1; }
         ti = crate::format_decimal(&mut tmp, ti, mb as u64);
@@ -827,26 +840,31 @@ pub extern "C" fn mono_wasm_trace_logger(
             if i >= buf.len() { break; }
             buf[i] = b; i += 1;
         }
-        // Try BOTH addressing conventions and emit the first non-empty.
-        for try_addr in [
-            mb.wrapping_add(message as u32),
-            message as u32,
+        // Dump first 32 bytes at BOTH candidate addresses as hex so
+        // we can SEE what's actually in memory.
+        for (label, addr) in [
+            (b"raw[" as &[u8], message as u32),
+            (b"mb+[", mb.wrapping_add(message as u32)),
         ] {
-            if try_addr == 0 { continue; }
-            let p = try_addr as *const u8;
-            let mut len = 0;
-            while len < 4096 {
-                let b = *p.add(len);
-                if b == 0 { break; }
-                len += 1;
-            }
-            if len > 0 {
-                for k in 0..len {
-                    if i >= buf.len() { break; }
-                    buf[i] = *p.add(k); i += 1;
+            for &c in label { if i < buf.len() { buf[i]=c; i+=1; } }
+            for &c in b"]: " { if i < buf.len() { buf[i]=c; i+=1; } }
+            if addr == 0 {
+                for &c in b"NULL" { if i < buf.len() { buf[i]=c; i+=1; } }
+            } else {
+                let p = addr as *const u8;
+                for k in 0..32 {
+                    let b = *p.add(k);
+                    // hex byte + space
+                    let hi = (b >> 4) & 0xF;
+                    let lo = b & 0xF;
+                    if i + 3 > buf.len() { break; }
+                    buf[i] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                    buf[i+1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                    buf[i+2] = b' ';
+                    i += 3;
                 }
-                break;
             }
+            for &c in b" | " { if i < buf.len() { buf[i]=c; i+=1; } }
         }
         ic_debug_print_bytes(&buf[..i]);
     }

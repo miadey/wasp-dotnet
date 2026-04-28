@@ -212,13 +212,17 @@ MB_FN=$(resolve_fn_idx "$mb_tok" "$WAT")
 GET_FN=$(resolve_fn_idx "$get_tok" "$WAT")
 INS_FN=$(resolve_fn_idx "$ins_tok" "$WAT")
 
-# Find the multi-memory-lowering mem_base global. asyncify_start_unwind's
-# lowered body uses `global.get <mem_base>; global.get <data_ptr>; i32.add`
-# to read buffer fields. Extract the FIRST `global.get` from that body —
-# that's mem_base. (The second global.get is the data ptr global, set
-# from the param.)
-MEM_BASE_GLOBAL=$(awk '/\(func \$asyncify_start_unwind /,/^  \)/' "$WAT" \
-    | grep -oE 'global\.get [0-9]+' | awk '{print $2}' | sed -n '1p')
+# Find the multi-memory-lowering mem_base global. mono code uses the
+# pattern `global.get <mem_base>; global.get 0; i32.const <large_off>;
+# i32.add; i32.add; i32.load align=1` to read static data. Find the
+# first `global.get` followed by `global.get 0; i32.const NNNNN; i32.add`
+# pattern within mono_assembly_load_corlib's body — that's mem_base.
+# mono code has `global.get 1; ...stack; ...; global.set 1; global.get
+# <mem_base>; local.get 0; i32.add` at function entry. Pick the
+# SECOND `global.get` from mono_assembly_load_corlib's body — first is
+# always wasp's __stack_pointer (global 1), second is mem_base.
+MEM_BASE_GLOBAL=$(awk '/\(func \$mono_assembly_load_corlib /,/^  \)/' "$WAT" \
+    | grep -oE 'global\.get [0-9]+' | awk '{print $2}' | sed -n '2p')
 echo "  resolved mem_base global = $MEM_BASE_GLOBAL"
 
 # dn_simdhash leaf resolution only succeeds for SIMD builds (scalar

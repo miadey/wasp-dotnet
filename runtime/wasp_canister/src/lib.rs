@@ -221,6 +221,33 @@ pub extern "C" fn maybe_yield() {
     }
 }
 
+/// Read up to 256 bytes of dotnet static memory at offsets 127870 and
+/// 128954 — the two candidate format-string addresses found statically
+/// in mono_assembly_load_corlib's monoeg_g_print call before exit(1).
+#[export_name = "canister_query peek_corlib_msg"]
+pub extern "C" fn canister_query_peek_corlib_msg() {
+    unsafe {
+        let mb = wasp_get_mem_base();
+        let mut buf = [0u8; 700];
+        let mut i = 0;
+        for off in [127870u32, 128954u32] {
+            buf[i] = b'@'; i += 1;
+            i = format_decimal(&mut buf, i, off as u64);
+            for &c in b": \"" { buf[i] = c; i += 1; }
+            let p = (mb.wrapping_add(off)) as *const u8;
+            for k in 0..256u32 {
+                let b = *p.add(k as usize);
+                if b == 0 { break; }
+                if i >= buf.len() - 4 { break; }
+                buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                i += 1;
+            }
+            for &c in b"\"\n" { if i < buf.len() { buf[i] = c; i += 1; } }
+        }
+        reply_blob(&buf[..i]);
+    }
+}
+
 /// Diagnostic — read MAYBE_YIELD_CALL_COUNT to confirm the wat-injected
 /// `call $maybe_yield` in the dn_simdhash leaf is actually firing.
 #[export_name = "canister_query maybe_yield_count"]
