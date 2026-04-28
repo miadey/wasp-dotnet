@@ -187,12 +187,15 @@ static mut MAYBE_YIELD_CALL_COUNT: u32 = 0;
 #[no_mangle]
 pub extern "C" fn maybe_yield() {
     unsafe {
-        MAYBE_YIELD_CALL_COUNT = MAYBE_YIELD_CALL_COUNT.wrapping_add(1);
-        if MAYBE_YIELD_CALL_COUNT == 1 {
-            print(b"[maybe_yield] first call");
+        // Rewind handshake: if asyncify is fast-forwarding (state==2)
+        // and the rewind state machine re-issues this call, clear the
+        // state so the caller's post-call check sees state==0 and
+        // continues normal execution from this point.
+        if asyncify_get_state() == 2 {
+            asyncify_stop_rewind();
+            return;
         }
         if performance_counter(0) > ASYNC_BUDGET_LIMIT {
-            print(b"[maybe_yield] start_unwind");
             let buf_ptr = (&raw mut ASYNC_BUF) as u32;
             (*(&raw mut ASYNC_BUF)).cur = buf_ptr + 8;
             (*(&raw mut ASYNC_BUF)).end = buf_ptr + 8 + (256 * 1024);
