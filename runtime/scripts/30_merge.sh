@@ -136,10 +136,16 @@ trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED
 echo "[7/9] wasm-relax-simd (force align=0 on every memarg via direct binary patch)"
 "$REPO/shared/tools/wasm-relax-simd/relax_binary.py" "$OUT_STUBBED" "$OUT_RELAXED"
 
-echo '[7.5/9] inject `call $maybe_yield` into dn_simdhash insert leaf (post-lowering)'
+echo '[7.5/9] inject `call $maybe_yield` into dn_simdhash insert leaves (post-lowering)'
 OUT_YIELDED=$(mktemp -t wasp-yielded.XXXXXX).wasm
 trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_YIELDED"' EXIT
 python3 "$RUNTIME/scripts/inject_yield_call.py" "$OUT_RELAXED" "$OUT_YIELDED" || cp "$OUT_RELAXED" "$OUT_YIELDED"
+
+echo '[7.55/9] inject `call $maybe_yield` at entry of outer mono add_assembly fns'
+OUT_YIELDED2=$(mktemp -t wasp-yielded2.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_YIELDED" "$OUT_YIELDED2"' EXIT
+python3 "$RUNTIME/scripts/inject_yield_at_entry.py" "$OUT_YIELDED" "$OUT_YIELDED2" || cp "$OUT_YIELDED" "$OUT_YIELDED2"
+OUT_YIELDED="$OUT_YIELDED2"
 
 echo "[7.7/9] wasm-opt --asyncify (post-lowering, scoped onlylist)"
 ASYNC_ONLYLIST="mono_wasm_add_assembly,mono_bundled_resources_add_assembly_resource,mono_bundled_resources_add_assembly_symbol_resource,mono_bundled_resources_add_satellite_assembly_resource,mono_bundled_resources_add,bundled_resources_get_assembly_resource,bundled_resource_add_free_func,key_from_id,dn_simdhash_ght_try_add,dn_simdhash_ght_try_add_with_hash,dn_simdhash_ght_try_insert_internal,dn_simdhash_ght_rehash_internal,dn_simdhash_ght_new_full,dn_simdhash_ght_default_hash,dn_simdhash_ght_default_comparer,dn_simdhash_ptr_ptr_try_add,dn_simdhash_ptr_ptr_try_add_with_hash,dn_simdhash_ptr_ptr_try_insert_internal,dn_simdhash_ptr_ptr_rehash_internal,dn_simdhash_ptr_ptr_new,dn_simdhash_ptrpair_ptr_try_add,dn_simdhash_ptrpair_ptr_try_add_with_hash,dn_simdhash_ptrpair_ptr_try_insert_internal,dn_simdhash_ptrpair_ptr_rehash_internal,dn_simdhash_string_ptr_try_add,dn_simdhash_string_ptr_try_add_raw,dn_simdhash_string_ptr_try_add_with_hash_raw,dn_simdhash_string_ptr_try_insert_internal,dn_simdhash_string_ptr_rehash_internal,dn_simdhash_ensure_capacity_internal,dn_simdhash_new_internal,dn_simdhash_make_str_key,maybe_yield"
