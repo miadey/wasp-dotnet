@@ -131,43 +131,49 @@ extern "C" {
 //        - wasp's `dotnet.asyncify_*` imports → dotnet's exports ✓
 // ---------------------------------------------------------------------------
 
-#[link(wasm_import_module = "dotnet")]
+// Import as "asyncify.<fn>". wasm-opt --asyncify auto-recognizes the
+// four control imports (start_unwind/stop_unwind/start_rewind/
+// stop_rewind) from the literal module name "asyncify" and replaces
+// them with internal calls to the asyncify_* runtime it generates.
+// `get_state` is NOT auto-handled; we read state from a placeholder
+// export patched post-asyncify by patch_fn_to_call.py.
+#[link(wasm_import_module = "asyncify")]
 extern "C" {
-    fn asyncify_start_unwind(data: u32);
-    fn asyncify_stop_unwind();
-    fn asyncify_start_rewind(data: u32);
-    fn asyncify_stop_rewind();
-    fn asyncify_get_state() -> u32;
+    #[link_name = "start_unwind"] fn asyncify_start_unwind(data: u32);
+    #[link_name = "stop_unwind"]  fn asyncify_stop_unwind();
+    #[link_name = "start_rewind"] fn asyncify_start_rewind(data: u32);
+    #[link_name = "stop_rewind"]  fn asyncify_stop_rewind();
 }
 
-/// Asyncify save buffer. Layout: u32 cur, u32 end, then 256 KiB of
-/// stack frames. ALLOCATED VIA mono_embed::malloc (not as a wasp static)
-/// because multi-memory-lowering rewrites asyncify's data-pointer reads
-/// to `global.get <mem_base> + ptr`. Wasp static addresses live below
-/// dotnet's mem_base, so `mem_base + wasp_addr` would wrap into garbage.
-/// mono malloc gives us an address in dotnet's heap region, and we pass
-/// the dotnet-relative offset (abs - mem_base) to asyncify.
-const ASYNC_BUF_BYTES: usize = 8 + 256 * 1024;
-static mut ASYNC_BUF_ABS: u32 = 0;     // absolute pointer (in mono heap)
-static mut ASYNC_BUF_REL: u32 = 0;     // dotnet-relative (= ABS - g7)
+/// Placeholder — patched post-asyncify to call asyncify_get_state.
+/// Distinct sentinel write to defeat ICF.
+static mut WASP_GETSTATE_SENTINEL: u32 = 0;
+
+#[no_mangle] #[inline(never)]
+pub extern "C" fn wasp_asyncify_get_state() -> u32 {
+    unsafe { core::ptr::write_volatile(&raw mut WASP_GETSTATE_SENTINEL, 0xC0DE0001); }
+    // black_box prevents the optimizer from constant-folding the
+    // return value; combined with #[inline(never)] this guarantees
+    // the call stays so patch_fn_to_call can rewrite the body to
+    // `call $asyncify_get_state` post-asyncify.
+    core::hint::black_box(0u32)
+}
+
+#[inline(never)]
+unsafe fn asyncify_get_state() -> u32 {
+    core::hint::black_box(wasp_asyncify_get_state())
+}
+
+/// Asyncify save buffer. Layout: u32 cur, u32 end, then 256 KiB stack.
+/// Asyncify runs AFTER multi-memory-lowering, so its emitted loads/
+/// stores target the merged memory at raw absolute addresses — no
+/// mem_base prefixing. We can use a plain wasp static.
+#[repr(C, align(8))]
+struct AsyncBuf { cur: u32, end: u32, stack: [u8; 256 * 1024] }
+static mut ASYNC_BUF: AsyncBuf = AsyncBuf { cur: 0, end: 0, stack: [0; 256 * 1024] };
 static mut ASYNC_RESUMING: bool = false;
 
-unsafe fn ensure_async_buf() {
-    if ASYNC_BUF_ABS == 0 {
-        let p = mono_embed::malloc(ASYNC_BUF_BYTES);
-        if p.is_null() {
-            let m = b"async_buf alloc failed";
-            trap(m.as_ptr() as u32, m.len() as u32);
-        }
-        ASYNC_BUF_ABS = p as u32;
-        // mem_base (NOT g7) — see wasp_get_mem_base comment.
-        ASYNC_BUF_REL = (p as u32).wrapping_sub(wasp_get_mem_base());
-    }
-}
-
-/// 1 = trigger unwind on FIRST maybe_yield call (diagnostic). Production:
-/// 45_000_000_000 (5B headroom under IC's 50B per-message cap).
-const ASYNC_BUDGET_LIMIT: u64 = 1;
+const ASYNC_BUDGET_LIMIT: u64 = 1_000_000;
 
 static mut MAYBE_YIELD_CALL_COUNT: u32 = 0;
 
@@ -186,19 +192,11 @@ pub extern "C" fn maybe_yield() {
             print(b"[maybe_yield] first call");
         }
         if performance_counter(0) > ASYNC_BUDGET_LIMIT {
-            ensure_async_buf();
             print(b"[maybe_yield] start_unwind");
-            let abs = ASYNC_BUF_ABS;
-            let rel = ASYNC_BUF_REL;
-            *((abs as *mut u32)) = rel + 8;                          // cur
-            *((abs as *mut u32).add(1)) = rel + 8 + (256 * 1024) as u32; // end
-            // Write sentinels across the data area so we can detect
-            // whether asyncify wrote at all (and where).
-            *((abs + 8) as *mut u32) = 0xC0FFEE00u32;
-            *((abs + 72) as *mut u32) = 0xC0FFEE72u32;
-            *((abs + 96) as *mut u32) = 0xC0FFEE96u32;
-            *((abs + 1024) as *mut u32) = 0xC0FE1024u32;
-            asyncify_start_unwind(rel);
+            let buf_ptr = (&raw mut ASYNC_BUF) as u32;
+            (*(&raw mut ASYNC_BUF)).cur = buf_ptr + 8;
+            (*(&raw mut ASYNC_BUF)).end = buf_ptr + 8 + (256 * 1024);
+            asyncify_start_unwind(buf_ptr);
         }
     }
 }
@@ -782,9 +780,31 @@ unsafe fn cmh(src: &[u8], pad: usize) -> *mut u8 {
     dst
 }
 
+/// Cached cmh allocations for the current add1 call. Cleared after
+/// each successful add1 completes. Reused on asyncify rewind so we
+/// don't leak ~1.7 MB per yield (corelib bytes-copy is the dominant
+/// allocation per BCL).
+static mut ADD1_CACHED_NAME: *mut u8 = core::ptr::null_mut();
+static mut ADD1_CACHED_BYTES: *mut u8 = core::ptr::null_mut();
+static mut ADD1_CACHED_IDX: u32 = u32::MAX;
+
 unsafe fn add1(name_src: &[u8], bytes_src: &[u8]) {
-    let name = cmh(name_src, 0);
-    let bytes = cmh(bytes_src, 4096);
+    let idx = BUILTIN_REG_IDX as u32;
+    let (name, bytes) = if ADD1_CACHED_IDX == idx
+        && !ADD1_CACHED_NAME.is_null()
+        && !ADD1_CACHED_BYTES.is_null() {
+        (ADD1_CACHED_NAME, ADD1_CACHED_BYTES)
+    } else {
+        // free previous cache entry if it was for a different idx
+        if !ADD1_CACHED_NAME.is_null() { mono_embed::free(ADD1_CACHED_NAME); }
+        if !ADD1_CACHED_BYTES.is_null() { mono_embed::free(ADD1_CACHED_BYTES); }
+        let n = cmh(name_src, 0);
+        let b = cmh(bytes_src, 4096);
+        ADD1_CACHED_NAME = n;
+        ADD1_CACHED_BYTES = b;
+        ADD1_CACHED_IDX = idx;
+        (n, b)
+    };
     mono_embed::mono_wasm_add_assembly(
         dotnet_offset(name), dotnet_offset(bytes), bytes_src.len() as i32);
 }
@@ -848,8 +868,8 @@ pub extern "C" fn canister_update_register_chunk() {
 
         if ASYNC_RESUMING {
             ASYNC_RESUMING = false;
-            ensure_async_buf();
-            asyncify_start_rewind(ASYNC_BUF_REL);
+            let buf_ptr = (&raw mut ASYNC_BUF) as u32;
+            asyncify_start_rewind(buf_ptr);
         }
 
         while BUILTIN_REG_IDX < total {
@@ -859,38 +879,6 @@ pub extern "C" fn canister_update_register_chunk() {
             print(b"[register_chunk] after add1");
             // After add1 returns, check if we just unwound (state == 1).
             let st = asyncify_get_state();
-            // Diagnostic: log buffer state before stop_unwind.
-            let abs = ASYNC_BUF_ABS;
-            let cur = if abs != 0 { *(abs as *const u32) } else { 0 };
-            let end = if abs != 0 { *((abs as *const u32).add(1)) } else { 0 };
-            let mut dbuf = [0u8; 160];
-            let mut di = 0;
-            for &c in b"[after-add1] state=" { dbuf[di] = c; di += 1; }
-            di = format_decimal(&mut dbuf, di, st as u64);
-            for &c in b" cur=" { dbuf[di] = c; di += 1; }
-            di = format_decimal(&mut dbuf, di, cur as u64);
-            for &c in b" end=" { dbuf[di] = c; di += 1; }
-            di = format_decimal(&mut dbuf, di, end as u64);
-            for &c in b" buf_abs=" { dbuf[di] = c; di += 1; }
-            di = format_decimal(&mut dbuf, di, abs as u64);
-            for &c in b" buf_rel=" { dbuf[di] = c; di += 1; }
-            di = format_decimal(&mut dbuf, di, ASYNC_BUF_REL as u64);
-            print(&dbuf[..di]);
-            // Print all 4 sentinels.
-            for &(label, off) in &[(b"@8=" as &[u8], 8), (b"@72=", 72), (b"@96=", 96), (b"@1024=", 1024)] {
-                let mut s = [0u8; 64];
-                let mut si = 0;
-                for &c in b"[sentinel] " { s[si] = c; si += 1; }
-                for &c in label { s[si] = c; si += 1; }
-                for &c in b"0x" { s[si] = c; si += 1; }
-                let v = if abs != 0 { *((abs + off) as *const u32) } else { 0 };
-                for shift in (0..32).step_by(4).rev() {
-                    let nibble = ((v >> shift) & 0xF) as u8;
-                    s[si] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
-                    si += 1;
-                }
-                print(&s[..si]);
-            }
             if st == 1 {
                 asyncify_stop_unwind();
                 ASYNC_RESUMING = true;
