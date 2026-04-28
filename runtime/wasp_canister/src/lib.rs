@@ -919,8 +919,13 @@ unsafe fn add1(name_src: &[u8], bytes_src: &[u8]) {
         ADD1_CACHED_IDX = idx;
         (n, b)
     };
+    // Use mem_base offset for both name (string mono dereferences) and
+    // bytes (PE buffer mono later reads metadata from). Previously used
+    // g7 which is a different base — the mismatch caused mono to read
+    // metadata at the WRONG address (off by mem_base - g7), failing
+    // metadata-decode assertions during class load.
     mono_embed::mono_wasm_add_assembly(
-        dotnet_offset(name), dotnet_offset(bytes), bytes_src.len() as i32);
+        dotnet_mem_offset(name), dotnet_mem_offset(bytes), bytes_src.len() as i32);
 }
 
 #[export_name = "canister_update register_all"]
@@ -1478,6 +1483,15 @@ pub extern "C" fn wasp_get_mem_base() -> u32 {
 #[inline]
 fn dotnet_offset(p: *const u8) -> *const u8 {
     ((p as u32).wrapping_sub(wasp_get_g7())) as *const u8
+}
+
+/// MEMORY-BASED dotnet_offset: subtracts the multi-memory-lowering
+/// mem_base instead of the g7 ALC base. Use this for byte buffers
+/// (assembly bytes, strings) that mono will dereference via
+/// `mem_base + ptr` after our offset is treated as a memory address.
+#[inline]
+fn dotnet_mem_offset(p: *const u8) -> *const u8 {
+    ((p as u32).wrapping_sub(wasp_get_mem_base())) as *const u8
 }
 
 /// Inverse of dotnet_offset: given a dotnet-relative ptr received from

@@ -236,6 +236,9 @@ PDB_TOK=$(grep -oE "\(func \\\$mono_has_pdb_checksum \(;[0-9]+;\)" "$WAT" | head
 PDB_FN=$(echo "$PDB_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 BRG_TOK=$(grep -oE "\(func \\\$bundled_resources_get_assembly_resource \(;[0-9]+;\)" "$WAT" | head -1)
 BRG_FN=$(echo "$BRG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+SP_RAW_TOK=$(grep -oE "\(func \\\$dn_simdhash_string_ptr_try_get_value_with_hash_raw \(;[0-9]+;\)" "$WAT" | head -1)
+SP_RAW_FN=$(echo "$SP_RAW_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+echo "  resolved dn_simdhash_string_ptr_try_get_value_with_hash_raw fn idx = $SP_RAW_FN"
 GP_TOK=$(grep -oE "\(func \\\$monoeg_g_print \(;[0-9]+;\)" "$WAT" | head -1)
 GP_FN=$(echo "$GP_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 WLG_TOK=$(grep -oE "\(func \\\$wasp_log_g_print \(;[0-9]+;\)" "$WAT" | head -1)
@@ -262,6 +265,14 @@ if [ -n "$PDB_FN" ]; then
     OUT_PDB=$(mktemp -t wasp-pdb.XXXXXX).wasm
     python3 "$RUNTIME/scripts/patch_fn_return_zero.py" "$PATCH_INPUT" "$OUT_PDB" "$PDB_FN"
     PATCH_INPUT="$OUT_PDB"
+fi
+# Bypass the SIMD-vectorized string_ptr lookup that traps with
+# heap-OOB during mono_class_load_from_name. Returning 0 makes mono
+# treat the lookup as "not found" — slow path will scan/insert.
+if [ -n "$SP_RAW_FN" ]; then
+    OUT_SPRAW=$(mktemp -t wasp-spraw.XXXXXX).wasm
+    python3 "$RUNTIME/scripts/patch_fn_return_zero.py" "$PATCH_INPUT" "$OUT_SPRAW" "$SP_RAW_FN"
+    PATCH_INPUT="$OUT_SPRAW"
 fi
 # Hook monoeg_g_print → wasp_log_g_print so we can capture the format
 # string mono passes (typically the load_corlib failure message right
