@@ -147,6 +147,13 @@ trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED
 python3 "$RUNTIME/scripts/inject_yield_at_entry.py" "$OUT_YIELDED" "$OUT_YIELDED2" || cp "$OUT_YIELDED" "$OUT_YIELDED2"
 OUT_YIELDED="$OUT_YIELDED2"
 
+echo '[7.56/9] inject arg trace at mono_assembly_request_open + bundled_resources_get_assembly_resource'
+OUT_TRACE1=$(mktemp -t wasp-trace1.XXXXXX).wasm
+OUT_TRACE2=$(mktemp -t wasp-trace2.XXXXXX).wasm
+python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_YIELDED" "$OUT_TRACE1" mono_assembly_request_open || cp "$OUT_YIELDED" "$OUT_TRACE1"
+python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_TRACE1" "$OUT_TRACE2" bundled_resources_get_assembly_resource || cp "$OUT_TRACE1" "$OUT_TRACE2"
+OUT_YIELDED="$OUT_TRACE2"
+
 echo "[7.7/9] wasm-opt --asyncify (post-lowering, scoped onlylist)"
 ASYNC_ONLYLIST="mono_wasm_add_assembly,mono_bundled_resources_add_assembly_resource,mono_bundled_resources_add_assembly_symbol_resource,mono_bundled_resources_add_satellite_assembly_resource,mono_bundled_resources_add,bundled_resources_get_assembly_resource,bundled_resources_get,bundled_resource_add_free_func,key_from_id,dn_simdhash_ght_try_add,dn_simdhash_ght_try_add_with_hash,dn_simdhash_ght_try_insert_internal,dn_simdhash_ght_rehash_internal,dn_simdhash_ght_new_full,dn_simdhash_ght_default_hash,dn_simdhash_ght_default_comparer,dn_simdhash_ght_get_value_or_default,dn_simdhash_ght_try_get_value,dn_simdhash_ght_try_get_value_with_hash,dn_simdhash_ptr_ptr_try_add,dn_simdhash_ptr_ptr_try_add_with_hash,dn_simdhash_ptr_ptr_try_insert_internal,dn_simdhash_ptr_ptr_rehash_internal,dn_simdhash_ptr_ptr_new,dn_simdhash_ptr_ptr_try_get_value,dn_simdhash_ptr_ptr_try_get_value_with_hash,dn_simdhash_ptrpair_ptr_try_add,dn_simdhash_ptrpair_ptr_try_add_with_hash,dn_simdhash_ptrpair_ptr_try_insert_internal,dn_simdhash_ptrpair_ptr_rehash_internal,dn_simdhash_string_ptr_try_add,dn_simdhash_string_ptr_try_add_raw,dn_simdhash_string_ptr_try_add_with_hash_raw,dn_simdhash_string_ptr_try_insert_internal,dn_simdhash_string_ptr_rehash_internal,dn_simdhash_string_ptr_try_get_value,dn_simdhash_string_ptr_try_get_value_raw,dn_simdhash_string_ptr_try_get_value_with_hash_raw,dn_simdhash_ensure_capacity_internal,dn_simdhash_new_internal,dn_simdhash_make_str_key,maybe_yield"
 OUT_ASYNCIFIED=$(mktemp -t wasp-asyncified.XXXXXX).wasm

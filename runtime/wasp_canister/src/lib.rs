@@ -221,6 +221,34 @@ pub extern "C" fn maybe_yield() {
     }
 }
 
+/// Generic string-pointer logger. The injected wat call site does
+/// `local.get 0; call $wasp_log_str_ptr` at the entry of a target fn,
+/// so we receive the function's first arg (typically a name pointer)
+/// and can dump the C-string at mem_base + that pointer.
+#[no_mangle]
+pub extern "C" fn wasp_log_str_ptr(p: u32) {
+    unsafe {
+        let mb = wasp_get_mem_base();
+        let mut buf = [0u8; 256];
+        let mut i = 0;
+        for &c in b"[trace] p=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, p as u64);
+        for &c in b" str=\"" { buf[i] = c; i += 1; }
+        if p != 0 {
+            let abs = mb.wrapping_add(p) as *const u8;
+            for k in 0..128u32 {
+                let b = *abs.add(k as usize);
+                if b == 0 { break; }
+                if i >= buf.len() - 4 { break; }
+                buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                i += 1;
+            }
+        }
+        for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+        debug_print(buf.as_ptr() as u32, i as u32);
+    }
+}
+
 /// Hooked replacement for `monoeg_g_print(fmt, args)`. We don't bother
 /// implementing real printf — just capture the format string + log it
 /// to ic0.debug_print so we can see what mono is trying to print
