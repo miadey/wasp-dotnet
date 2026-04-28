@@ -39,7 +39,9 @@ fi
 wasm-tools parse "$TMP/renamed.wat" -o "$TMP/renamed.wasm"
 
 # 4. Run ic-wasm shrink (drops unused funcs + debug info)
-ic-wasm "$TMP/renamed.wasm" -o "$TMP/shrunk.wasm" shrink
+#    -k preserves the name section so downstream asyncify-onlylist can
+#    target functions by name (e.g. $dn_simdhash_*, $mono_*).
+ic-wasm "$TMP/renamed.wasm" -o "$TMP/shrunk.wasm" shrink -k
 
 # 5. Done — caller can apply ic-wasm metadata to embed candid:service if desired
 cp "$TMP/shrunk.wasm" "$OUT"

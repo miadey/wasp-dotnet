@@ -103,12 +103,14 @@ wasm-merge \
     "$DOTNET_PRE"    dotnet \
     -o "$OUT_MERGED" \
     --all-features \
-    --skip-export-conflicts
+    --skip-export-conflicts \
+    -g
 
 echo "[2/5] wasm-opt --multi-memory-lowering"
 wasm-opt "$OUT_MERGED" -o "$OUT_LOWERED" \
     --multi-memory-lowering \
-    --all-features
+    --all-features \
+    -g
 
 echo "[3/6] wasm-const-lower (inline extended-const data/element offsets)"
 "$CONST_LOWER" "$OUT_LOWERED" "$OUT_CONST"
@@ -131,16 +133,74 @@ echo "[6/7] wasi-stub (replace leftover wasi imports)"
 OUT_RELAXED=$(mktemp -t wasp-relaxed.XXXXXX).wasm
 trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED"' EXIT
 
-echo "[7/8] wasm-relax-simd (force align=0 on every memarg via direct binary patch)"
+echo "[7/9] wasm-relax-simd (force align=0 on every memarg via direct binary patch)"
 "$REPO/shared/tools/wasm-relax-simd/relax_binary.py" "$OUT_STUBBED" "$OUT_RELAXED"
+
+echo '[7.5/9] inject call $maybe_yield at start of dn_simdhash insert leaf'
+OUT_YIELDED=$(mktemp -t wasp-yielded.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_YIELDED"' EXIT
+python3 "$RUNTIME/scripts/inject_yield_call.py" "$OUT_RELAXED" "$OUT_YIELDED" || cp "$OUT_RELAXED" "$OUT_YIELDED"
+
+echo "[7.7/9] wasm-opt --asyncify (SCOPED via --asyncify-onlylist@dn_simdhash chain)"
+ASYNC_ONLYLIST="mono_wasm_add_assembly,mono_bundled_resources_add_assembly_resource,mono_bundled_resources_add_assembly_symbol_resource,mono_bundled_resources_add_satellite_assembly_resource,mono_bundled_resources_add,bundled_resources_get_assembly_resource,bundled_resource_add_free_func,key_from_id,dn_simdhash_ght_try_add,dn_simdhash_ght_try_add_with_hash,dn_simdhash_ght_try_insert_internal,dn_simdhash_ght_rehash_internal,dn_simdhash_ght_new_full,dn_simdhash_ght_default_hash,dn_simdhash_ght_default_comparer,dn_simdhash_ptr_ptr_try_add,dn_simdhash_ptr_ptr_try_add_with_hash,dn_simdhash_ptr_ptr_try_insert_internal,dn_simdhash_ptr_ptr_rehash_internal,dn_simdhash_ptr_ptr_new,dn_simdhash_ptrpair_ptr_try_add,dn_simdhash_ptrpair_ptr_try_add_with_hash,dn_simdhash_ptrpair_ptr_try_insert_internal,dn_simdhash_ptrpair_ptr_rehash_internal,dn_simdhash_string_ptr_try_add,dn_simdhash_string_ptr_try_add_raw,dn_simdhash_string_ptr_try_add_with_hash_raw,dn_simdhash_string_ptr_try_insert_internal,dn_simdhash_string_ptr_rehash_internal,dn_simdhash_ensure_capacity_internal,dn_simdhash_new_internal,dn_simdhash_make_str_key,maybe_yield"
+OUT_ASYNCIFIED=$(mktemp -t wasp-asyncified.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_YIELDED" "$OUT_ASYNCIFIED"' EXIT
+wasm-opt "$OUT_YIELDED" -o "$OUT_ASYNCIFIED" \
+    --asyncify \
+    --pass-arg=asyncify-onlylist@"$ASYNC_ONLYLIST" \
+    --all-features \
+    -g
+
+echo "[7.8/9] patch wasp_asyncify_* placeholders → call asyncify_*"
+ASYNC_WAT=$(mktemp -t wasp-asyncwat.XXXXXX)
+wasm-tools print "$OUT_ASYNCIFIED" -o "$ASYNC_WAT"
+# Resolve a `$name` ref or numeric index in an export declaration to
+# the underlying function index by scanning the func definitions.
+resolve_fn_idx() {
+    local TOK="$1"; local WAT="$2"
+    if [ "${TOK:0:1}" = "\$" ]; then
+        # `$name` form — find the func definition: `(func $name (;N;)`
+        grep -oE "\(func ${TOK//\$/\\\$} \(;[0-9]+;\)" "$WAT" \
+            | head -1 | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]'
+    else
+        echo "$TOK"
+    fi
+}
+PATCHED=$(mktemp -t wasp-asyncpatched.XXXXXX).wasm
+cp "$OUT_ASYNCIFIED" "$PATCHED"
+for FN in start_unwind stop_unwind start_rewind stop_rewind get_state; do
+    SRC_TOK=$(grep -E "\(export \"wasp_asyncify_${FN}\"" "$ASYNC_WAT" \
+              | grep -oE '\(func [^)]+\)' | head -1 | sed -E 's/\(func //;s/\)//')
+    DST_TOK=$(grep -E "\(export \"asyncify_${FN}\"" "$ASYNC_WAT" \
+              | grep -oE '\(func [^)]+\)' | head -1 | sed -E 's/\(func //;s/\)//')
+    SRC=$(resolve_fn_idx "$SRC_TOK" "$ASYNC_WAT")
+    DST=$(resolve_fn_idx "$DST_TOK" "$ASYNC_WAT")
+    if [ -z "$SRC" ] || [ -z "$DST" ]; then
+        echo "  asyncify_${FN}: src='$SRC_TOK'->'$SRC' dst='$DST_TOK'->'$DST' — missing one, skipping"
+        continue
+    fi
+    NEXT=$(mktemp -t wasp-asyncpatched.XXXXXX).wasm
+    python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$PATCHED" "$NEXT" "$SRC" "$DST" 2>&1 \
+        | sed "s/^/  asyncify_${FN}: /"
+    rm -f "$PATCHED"
+    PATCHED="$NEXT"
+done
+rm -f "$ASYNC_WAT"
+OUT_RELAXED="$PATCHED"
 
 echo "[8/8] g7-helper + (conditional) dn_simdhash post-merge patches"
 WAT=$(mktemp -t wasp-wat.XXXXXX)
 wasm-tools print "$OUT_RELAXED" -o "$WAT"
 
-G7_FN=$(grep -E '\(export "wasp_get_g7"'           "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
-GET_FN=$(grep -E '\(export "wasp_simdhash_get"'    "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
-INS_FN=$(grep -E '\(export "wasp_simdhash_insert"' "$WAT" | grep -oE 'func [0-9]+' | grep -oE '[0-9]+')
+# Resolve export → fn index. With -g preserved names exports use the
+# `(func $name)` form; map back to the numeric index by scanning func
+# definitions. resolve_fn_idx() was defined earlier in [7.8/9].
+g7_tok=$(grep -E '\(export "wasp_get_g7"'           "$WAT" | grep -oE '\(func [^)]+\)' | head -1 | sed -E 's/\(func //;s/\)//')
+get_tok=$(grep -E '\(export "wasp_simdhash_get"'    "$WAT" | grep -oE '\(func [^)]+\)' | head -1 | sed -E 's/\(func //;s/\)//')
+ins_tok=$(grep -E '\(export "wasp_simdhash_insert"' "$WAT" | grep -oE '\(func [^)]+\)' | head -1 | sed -E 's/\(func //;s/\)//')
+G7_FN=$(resolve_fn_idx "$g7_tok" "$WAT")
+GET_FN=$(resolve_fn_idx "$get_tok" "$WAT")
+INS_FN=$(resolve_fn_idx "$ins_tok" "$WAT")
 
 # dn_simdhash leaf resolution only succeeds for SIMD builds (scalar
 # build's body fingerprint differs). On no-SIMD builds we DON'T need
@@ -169,11 +229,15 @@ else
     DEFANG_INPUT="$OUT_P1"
 fi
 
-# Always apply assert defang for now — even on no-SIMD builds we want
-# load_runtime to complete so we can probe what state mono ends up in.
-# Once corelib actually loads, the assert never fires and the defang
-# becomes a no-op.
-python3 "$RUNTIME/scripts/patch_disable_g_assert.py" "$DEFANG_INPUT" "$OUT_FINAL" --line 2718
+# Always apply assert defang for now — best-effort only. With asyncify
+# the wat pattern may be transformed; if defang misses, fall back to a
+# raw copy. Once corelib actually loads (all 34 BCLs registered via
+# the chunked register_chunk + asyncify path), the assert never fires
+# anyway.
+if ! python3 "$RUNTIME/scripts/patch_disable_g_assert.py" "$DEFANG_INPUT" "$OUT_FINAL" --line 2718 2>&1; then
+    echo "  defang missed (likely asyncify renumbering) — using raw copy"
+    cp "$DEFANG_INPUT" "$OUT_FINAL"
+fi
 
 # ---- report -------------------------------------------------------------
 

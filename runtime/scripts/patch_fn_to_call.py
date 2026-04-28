@@ -41,11 +41,12 @@ def main():
         subprocess.run(["wasm-tools", "print", str(in_wasm), "-o", str(wat)], check=True)
         text = wat.read_text()
 
-        marker = f"  (func (;{src_idx};)"
-        start = text.find(marker)
-        if start < 0:
+        # Handle both `(func (;N;)` and `(func $name (;N;)` forms.
+        m = re.search(rf'^  \(func (?:\$\S+ )?\(;{src_idx};\)', text, re.MULTILINE)
+        if not m:
             print(f"no func {src_idx}", file=sys.stderr)
             return 1
+        start = m.start()
         end = text.find("\n  )\n", start)
         if end < 0:
             return 1

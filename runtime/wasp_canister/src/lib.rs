@@ -109,6 +109,111 @@ extern "C" {
     fn performance_counter(counter_type: u32) -> u64;
 }
 
+// ---------------------------------------------------------------------------
+// Asyncify integration (scoped via --asyncify-onlylist)
+//
+// Pipeline (30_merge.sh):
+//   - inject_yield_call.py adds `call $maybe_yield` to dn_simdhash insert leaf
+//   - wasm-opt --asyncify --pass-arg=asyncify-onlylist@<dn_simdhash chain>
+//     instruments ONLY those functions, adding ~60 KB (vs 10 MB unbounded).
+//   - asyncify creates 5 exports: asyncify_start_unwind, _stop_unwind,
+//     _start_rewind, _stop_rewind, _get_state.
+//   - patch_fn_to_call.py rewrites the placeholder wasp_asyncify_*
+//     export bodies below to call the real asyncify_* exports.
+//
+// We can't import asyncify_* directly because asyncify runs AFTER
+// wasm-merge, so any "env.asyncify_*" import would be unresolved at
+// install time. Instead we export no-op placeholders here and patch
+// their bodies post-asyncify to call the real exports.
+// ---------------------------------------------------------------------------
+
+// 256 KiB asyncify save buffer (header + stack frames per binaryen docs).
+#[repr(C, align(8))]
+struct AsyncBuf { cur: u32, end: u32, stack: [u8; 256 * 1024] }
+static mut ASYNC_BUF: AsyncBuf = AsyncBuf { cur: 0, end: 0, stack: [0; 256 * 1024] };
+static mut ASYNC_RESUMING: bool = false;
+
+/// Budget threshold for triggering an asyncify unwind from inside the
+/// dn_simdhash insert leaf. Set to 1 (always yield on first call) for
+/// rewind-path debugging; production value is 45_000_000_000 (5B
+/// headroom under the IC's 50B per-message instruction cap).
+const ASYNC_BUDGET_LIMIT: u64 = 1;
+
+/// Placeholder bodies — patched post-asyncify by patch_fn_to_call.py
+/// to call the real asyncify_* exports added by wasm-opt --asyncify.
+/// Distinct sentinel writes prevent LLVM/lld ICF (identical-code-folding)
+/// from merging these with other empty no-op extern fns (e.g. the mono
+/// interp stubs in env_imports.rs).
+static mut WASP_ASYNCIFY_SENTINEL: [u32; 5] = [0; 5];
+
+#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_start_unwind(data: u32) {
+    unsafe { core::ptr::write_volatile(&raw mut WASP_ASYNCIFY_SENTINEL[0], data); }
+}
+#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_stop_unwind() {
+    unsafe { core::ptr::write_volatile(&raw mut WASP_ASYNCIFY_SENTINEL[1], 1); }
+}
+#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_start_rewind(data: u32) {
+    unsafe { core::ptr::write_volatile(&raw mut WASP_ASYNCIFY_SENTINEL[2], data); }
+}
+#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_stop_rewind() {
+    unsafe { core::ptr::write_volatile(&raw mut WASP_ASYNCIFY_SENTINEL[3], 1); }
+}
+#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_get_state() -> u32 {
+    unsafe { core::ptr::read_volatile(&raw const WASP_ASYNCIFY_SENTINEL[4]) }
+}
+
+/// `maybe_yield` is exported with that exact name; inject_yield_call.py
+/// emits `call $maybe_yield` at the start of the dn_simdhash insert
+/// leaf body during the merge pipeline. When the per-message instruction
+/// budget is exhausted, we initiate an asyncify unwind that returns the
+/// stack all the way back to register_chunk's caller.
+static mut MAYBE_YIELD_CALL_COUNT: u32 = 0;
+
+#[no_mangle]
+pub extern "C" fn maybe_yield() {
+    unsafe {
+        // The asyncify-injected prologue (added because maybe_yield
+        // is in --asyncify-onlylist) handles the state==2 rewind by
+        // restoring locals and jumping to the saved point — which is
+        // immediately after the `wasp_asyncify_start_unwind` call
+        // below. We call `stop_rewind` there to clear state back to 0,
+        // completing the rewind handshake.
+        MAYBE_YIELD_CALL_COUNT = MAYBE_YIELD_CALL_COUNT.wrapping_add(1);
+        if MAYBE_YIELD_CALL_COUNT == 1 {
+            print(b"[maybe_yield] first call");
+        }
+        if performance_counter(0) > ASYNC_BUDGET_LIMIT {
+            print(b"[maybe_yield] starting unwind");
+            let buf_ptr = (&raw mut ASYNC_BUF) as u32;
+            // Always reinitialize buffer for THIS unwind. cur=start of
+            // data area, end=top of buffer.
+            (*(&raw mut ASYNC_BUF)).cur = buf_ptr + 8;
+            (*(&raw mut ASYNC_BUF)).end = buf_ptr + 8 + (256 * 1024);
+            wasp_asyncify_start_unwind(buf_ptr);
+            print(b"[maybe_yield] post-start_unwind (rewind path)");
+            // On the rewind pass the asyncify state machine resumes
+            // execution at this point with state==2 (rewinding). Only
+            // then should we call stop_rewind to clear it. On the
+            // unwind pass state==1 and we must NOT call stop_rewind
+            // (it would clobber the unwind signal).
+            if wasp_asyncify_get_state() == 2 {
+                wasp_asyncify_stop_rewind();
+            }
+        }
+    }
+}
+
+/// Diagnostic — read MAYBE_YIELD_CALL_COUNT to confirm the wat-injected
+/// `call $maybe_yield` in the dn_simdhash leaf is actually firing.
+#[export_name = "canister_query maybe_yield_count"]
+pub extern "C" fn canister_query_maybe_yield_count() {
+    unsafe {
+        let mut buf = [0u8; 32];
+        let n = format_decimal(&mut buf, 0, MAYBE_YIELD_CALL_COUNT as u64);
+        reply_blob(&buf[..n]);
+    }
+}
+
 /// Raw `ic0::debug_print` from a byte slice. No format machinery.
 fn print(bytes: &[u8]) {
     unsafe { debug_print(bytes.as_ptr() as u32, bytes.len() as u32) }
@@ -232,15 +337,13 @@ pub extern "C" fn canister_init() {
         mono_embed::__wasm_call_ctors();
     }
     print(b"[wasp-dotnet] canister_init: __wasm_call_ctors done");
-    // Register the FIRST 5 BUILTIN_BCL entries here. canister_init's
-    // higher instruction budget (200B vs 50B for updates) lets us push
-    // past the dn_simdhash bucket-array growth (which happens around
-    // insert #3 with initial cap=2). Once the table is at cap=8 or
-    // larger, subsequent register_next calls from the client should
-    // each fit in 50B.
-    // Don't register here — leave it to register_all (works via the
-    // dn_simdhash bypass in SIMD builds, where the first 2 inserts
-    // pass through to mono's real hash and the rest use shadow map).
+    // Register all 34 BCLs here. canister_init's 1T-instruction budget
+    // (vs 50B per update message) is the only place we can fit the
+    // scalar dn_simdhash insert loop end-to-end. Without this, no
+    // single update can register a single BCL post-table-grow.
+    // BCL registration deferred to register_chunk (asyncify-chunked) —
+    // canister_init's 1T budget is insufficient for all 34 BCLs in
+    // scalar dn_simdhash mode.
 }
 
 // ---------------------------------------------------------------------------
@@ -731,47 +834,55 @@ pub extern "C" fn canister_update_register_next() {
     }
 }
 
-/// Chunked register: keeps adding BUILTIN_BCL entries until either
-/// finished OR the IC instruction counter approaches the 50B cap. Lets
-/// the client make ONE call which processes as many entries as fit,
-/// then ~17 polls instead of 34. Reply format:
-///   "progress N/M @ <insns>"   — partial; call again
-///   "all-registered @ <insns>" — done
+/// Chunked register with asyncify yield support. Each call may either
+/// complete an add_assembly normally OR yield mid-way; the caller
+/// invokes repeatedly until the reply is "all-registered".
+///
+/// Protocol:
+///   call register_chunk → "in_progress N/M" (call again) | "all-registered"
 #[export_name = "canister_update register_chunk"]
 pub extern "C" fn canister_update_register_chunk() {
+    print(b"[register_chunk] entry");
     unsafe {
-        // IC's per-update-message limit is 50_000_000_000 instructions.
-        // Reserve ~10 billion of headroom for the LAST insert (which
-        // may be expensive if dn_simdhash rehashes).
-        const BUDGET_CAP: u64 = 40_000_000_000;
         let total = BUILTIN_BCL.len();
-        loop {
-            if BUILTIN_REG_IDX >= total {
-                let mut buf = [0u8; 64];
-                let mut bi = 0;
-                for &c in b"all-registered @ " { buf[bi] = c; bi += 1; }
-                let used = performance_counter(0);
-                bi = format_decimal(&mut buf, bi, used);
-                reply_blob(&buf[..bi]);
-                return;
-            }
-            let used = performance_counter(0);
-            if used >= BUDGET_CAP {
+
+        if ASYNC_RESUMING {
+            ASYNC_RESUMING = false;
+            let buf_ptr = (&raw mut ASYNC_BUF) as u32;
+            wasp_asyncify_start_rewind(buf_ptr);
+            // Per the asyncify protocol, after start_rewind the next
+            // function call enters fast-forward mode. Re-call add1 with
+            // the SAME index so the state machine resumes inside mono.
+            // maybe_yield itself calls stop_rewind when state==2 (above).
+        }
+
+        while BUILTIN_REG_IDX < total {
+            let (n, b) = BUILTIN_BCL[BUILTIN_REG_IDX];
+            print(b"[register_chunk] before add1");
+            add1(n, b);
+            print(b"[register_chunk] after add1");
+            // After add1 returns, check if we just unwound (state == 1).
+            let st = wasp_asyncify_get_state();
+            if st == 1 {
+                wasp_asyncify_stop_unwind();
+                ASYNC_RESUMING = true;
                 let mut buf = [0u8; 96];
                 let mut bi = 0;
-                for &c in b"progress " { buf[bi] = c; bi += 1; }
+                for &c in b"in_progress " { buf[bi] = c; bi += 1; }
                 bi = format_decimal(&mut buf, bi, BUILTIN_REG_IDX as u64);
                 for &c in b"/" { buf[bi] = c; bi += 1; }
                 bi = format_decimal(&mut buf, bi, total as u64);
-                for &c in b" @ " { buf[bi] = c; bi += 1; }
-                bi = format_decimal(&mut buf, bi, used);
                 reply_blob(&buf[..bi]);
                 return;
             }
-            let (n, b) = BUILTIN_BCL[BUILTIN_REG_IDX];
-            add1(n, b);
             BUILTIN_REG_IDX += 1;
         }
+
+        if ASYNC_RESUMING {
+            wasp_asyncify_stop_rewind();
+            ASYNC_RESUMING = false;
+        }
+        reply_blob(b"all-registered");
     }
 }
 
