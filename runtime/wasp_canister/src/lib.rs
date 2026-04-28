@@ -274,7 +274,38 @@ pub extern "C" fn canister_query_probe_bundled_get() {
                 }
             }
         }
-        for &c in b"\"" { if i<buf.len() { buf[i]=c; i+=1; } }
+        for &c in b"\" add1_bytes_hdr=" { if i<buf.len() { buf[i]=c; i+=1; } }
+        let bytes_abs = ADD1_CACHED_BYTES as u32;
+        if bytes_abs != 0 {
+            let p = bytes_abs as *const u8;
+            for k in 0..8u32 {
+                let b = *p.add(k as usize);
+                let hi = (b >> 4) & 0xF;
+                let lo = b & 0xF;
+                if i + 3 > buf.len() { break; }
+                buf[i] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                buf[i+1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                buf[i+2] = b' ';
+                i += 3;
+            }
+        }
+        // result is dotnet-relative (returned by lowered mono code).
+        // Read struct at mem_base + result.
+        for &c in b"| at_mb+result=" { if i<buf.len() { buf[i]=c; i+=1; } }
+        if result != 0 {
+            let abs_struct = mb.wrapping_add(result);
+            let p = abs_struct as *const u8;
+            for k in 0..32u32 {
+                let b = *p.add(k as usize);
+                let hi = (b >> 4) & 0xF;
+                let lo = b & 0xF;
+                if i + 3 > buf.len() { break; }
+                buf[i] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                buf[i+1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                buf[i+2] = b' ';
+                i += 3;
+            }
+        }
         reply_blob(&buf[..i]);
     }
 }
