@@ -221,30 +221,40 @@ pub extern "C" fn maybe_yield() {
     }
 }
 
-/// Generic string-pointer logger. The injected wat call site does
-/// `local.get 0; call $wasp_log_str_ptr` at the entry of a target fn,
-/// so we receive the function's first arg (typically a name pointer)
-/// and can dump the C-string at mem_base + that pointer.
+/// Generic string-pointer logger. Logs first 32 bytes as both ASCII
+/// and hex so we can distinguish empty strings, format templates,
+/// and binary structs.
 #[no_mangle]
 pub extern "C" fn wasp_log_str_ptr(p: u32) {
     unsafe {
         let mb = wasp_get_mem_base();
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; 400];
         let mut i = 0;
         for &c in b"[trace] p=" { buf[i] = c; i += 1; }
         i = format_decimal(&mut buf, i, p as u64);
-        for &c in b" str=\"" { buf[i] = c; i += 1; }
+        for &c in b" hex=" { buf[i] = c; i += 1; }
         if p != 0 {
             let abs = mb.wrapping_add(p) as *const u8;
-            for k in 0..128u32 {
+            for k in 0..32u32 {
+                let b = *abs.add(k as usize);
+                let hi = (b >> 4) & 0xF;
+                let lo = b & 0xF;
+                if i + 3 > buf.len() { break; }
+                buf[i] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                buf[i+1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                buf[i+2] = b' ';
+                i += 3;
+            }
+            for &c in b"| ascii=\"" { if i < buf.len() { buf[i]=c; i+=1; } }
+            for k in 0..64u32 {
                 let b = *abs.add(k as usize);
                 if b == 0 { break; }
                 if i >= buf.len() - 4 { break; }
                 buf[i] = if (32..127).contains(&b) { b } else { b'.' };
                 i += 1;
             }
+            for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
         }
-        for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
         debug_print(buf.as_ptr() as u32, i as u32);
     }
 }
