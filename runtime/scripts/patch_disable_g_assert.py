@@ -67,7 +67,7 @@ def main():
             pat_a = re.compile(
                 r'(?P<indent>[ \t]+)i32\.const \d+\s*\n'
                 r'(?P=indent)i32\.const ' + str(line_no) + r'\s*\n'
-                r'(?P=indent)call \d+\s*\n'
+                r'(?P=indent)call (?:\d+|\$\S+)\s*\n'
                 r'(?P=indent)unreachable\s*$',
                 re.MULTILINE,
             )
@@ -80,7 +80,7 @@ def main():
                 r'(?P=indent)i32\.const \d+\s*\n'
                 r'(?P=indent)i32\.add\s*\n'
                 r'(?P=indent)i32\.const ' + str(line_no) + r'\s*\n'
-                r'(?P=indent)call \d+\s*\n'
+                r'(?P=indent)call (?:\d+|\$\S+)\s*\n'
                 r'(?P=indent)unreachable\s*$',
                 re.MULTILINE,
             )

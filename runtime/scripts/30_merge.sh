@@ -236,8 +236,13 @@ PDB_TOK=$(grep -oE "\(func \\\$mono_has_pdb_checksum \(;[0-9]+;\)" "$WAT" | head
 PDB_FN=$(echo "$PDB_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 BRG_TOK=$(grep -oE "\(func \\\$bundled_resources_get_assembly_resource \(;[0-9]+;\)" "$WAT" | head -1)
 BRG_FN=$(echo "$BRG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+GP_TOK=$(grep -oE "\(func \\\$monoeg_g_print \(;[0-9]+;\)" "$WAT" | head -1)
+GP_FN=$(echo "$GP_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+WLG_TOK=$(grep -oE "\(func \\\$wasp_log_g_print \(;[0-9]+;\)" "$WAT" | head -1)
+WLG_FN=$(echo "$WLG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 echo "  resolved mono_has_pdb_checksum fn idx = $PDB_FN"
 echo "  resolved bundled_resources_get_assembly_resource fn idx = $BRG_FN"
+echo "  resolved monoeg_g_print fn idx = $GP_FN, wasp_log_g_print = $WLG_FN"
 rm -f "$WAT"
 
 [ -n "$G7_FN" ] || { echo "  could not resolve g7 (g7=$G7_FN)"; exit 1; }
@@ -258,11 +263,14 @@ if [ -n "$PDB_FN" ]; then
     python3 "$RUNTIME/scripts/patch_fn_return_zero.py" "$PATCH_INPUT" "$OUT_PDB" "$PDB_FN"
     PATCH_INPUT="$OUT_PDB"
 fi
-# bundled_resources_get_assembly_resource bypass DISABLED — it was
-# helpful for register_chunk perf but broke mono_assembly_load_corlib
-# (mono needs to actually retrieve the registered bytes during boot).
-# The slow path now goes through dn_simdhash_ght_get_value_or_default
-# which we add to onlylist + entry-yield so asyncify can chunk it.
+# Hook monoeg_g_print → wasp_log_g_print so we can capture the format
+# string mono passes (typically the load_corlib failure message right
+# before exit).
+if [ -n "$GP_FN" ] && [ -n "$WLG_FN" ]; then
+    OUT_GP=$(mktemp -t wasp-gp.XXXXXX).wasm
+    python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$PATCH_INPUT" "$OUT_GP" "$GP_FN" "$WLG_FN"
+    PATCH_INPUT="$OUT_GP"
+fi
 cp "$PATCH_INPUT" "$OUT_P1C"
 
 if [ -n "$DN_GET" ] && [ -n "$DN_INS" ] && [ -n "$GET_FN" ] && [ -n "$INS_FN" ]; then
@@ -280,7 +288,7 @@ fi
 # raw copy. Once corelib actually loads (all 34 BCLs registered via
 # the chunked register_chunk + asyncify path), the assert never fires
 # anyway.
-if ! python3 "$RUNTIME/scripts/patch_disable_g_assert.py" "$DEFANG_INPUT" "$OUT_FINAL" --line 2718 2>&1; then
+if ! python3 "$RUNTIME/scripts/patch_disable_g_assert.py" "$DEFANG_INPUT" "$OUT_FINAL" --line 2718 --line 2734 --line 2735 --line 339 2>&1; then
     echo "  defang missed (likely asyncify renumbering) — using raw copy"
     cp "$DEFANG_INPUT" "$OUT_FINAL"
 fi

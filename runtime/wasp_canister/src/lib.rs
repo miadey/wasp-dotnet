@@ -221,6 +221,49 @@ pub extern "C" fn maybe_yield() {
     }
 }
 
+/// Hooked replacement for `monoeg_g_print(fmt, args)`. We don't bother
+/// implementing real printf — just capture the format string + log it
+/// to ic0.debug_print so we can see what mono is trying to print
+/// (typically the "couldn't load corlib" message right before exit).
+#[no_mangle]
+pub extern "C" fn wasp_log_g_print(fmt: u32, args: u32) {
+    unsafe {
+        let mb = wasp_get_mem_base();
+        let mut buf = [0u8; 600];
+        let mut i = 0;
+        for &c in b"[g_print] mb=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, mb as u64);
+        for &c in b" fmt=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, fmt as u64);
+        for &c in b" args=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, args as u64);
+        for &c in b" | mb+fmt: \"" { buf[i] = c; i += 1; }
+        if fmt != 0 {
+            let p = mb.wrapping_add(fmt) as *const u8;
+            for k in 0..256u32 {
+                let b = *p.add(k as usize);
+                if b == 0 { break; }
+                if i >= buf.len() - 4 { break; }
+                buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                i += 1;
+            }
+        }
+        for &c in b"\" raw_fmt: \"" { if i < buf.len() { buf[i] = c; i += 1; } }
+        if fmt != 0 {
+            let p = fmt as *const u8;
+            for k in 0..96u32 {
+                let b = *p.add(k as usize);
+                if b == 0 { break; }
+                if i >= buf.len() - 4 { break; }
+                buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                i += 1;
+            }
+        }
+        for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+        debug_print(buf.as_ptr() as u32, i as u32);
+    }
+}
+
 /// Read up to 256 bytes of dotnet static memory at offsets 127870 and
 /// 128954 — the two candidate format-string addresses found statically
 /// in mono_assembly_load_corlib's monoeg_g_print call before exit(1).
