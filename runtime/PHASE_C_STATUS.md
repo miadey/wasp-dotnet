@@ -89,7 +89,31 @@ mismatch.
    not be wired up if some init step we skipped or chunked broke
    the hook installation.
 
-## Probe pipeline diagnostic (most recent finding)
+## Probe pipeline diagnostic — round 2
+
+Reproduced step-by-step: applying each post-asyncify patch script
+individually (patch_fn_to_call asyncify_get_state, patch_fn_to_global_get
+g7, patch_fn_to_global_get mem_base, patch_fn_return_zero pdb,
+patch_fn_to_call monoeg_g_print, patch_fn_to_call probe→bundled_get)
+ON A FRESH ASYNCIFIED WAT preserves probe_bundled_get count = 5.
+
+But the ACTUAL `30_merge.sh` run produces canister.wasm with probe
+count = 0. Latest run shows the pipeline STOPS partway with
+`grep: ... No such file or directory` for a wasp-wat temp file —
+likely a script bug introduced when adding the probe-patch step
+(temp file cleanup trap fires too early, or one of the new variable
+references is unset).
+
+So the immediate fix is the script bug, not a wat-manipulation bug.
+Need to:
+1. Inspect `30_merge.sh` step [8/8] — verify `$WAT` is alive throughout
+   all the `*_TOK` greps + the new probe patch.
+2. Confirm the trap chain isn't deleting the WAT file before the
+   probe-patch step needs it.
+3. Re-run after fixing and confirm probe_bundled_get is in the final
+   canister.wasm.
+
+## Probe pipeline diagnostic (round 1 — superseded by round 2)
 
 Stage-by-stage trace of `wasp_probe_bundled_get` and
 `canister_query probe_bundled_get` exports:
