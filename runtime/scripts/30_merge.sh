@@ -306,10 +306,11 @@ fi
 # raw copy. Once corelib actually loads (all 34 BCLs registered via
 # the chunked register_chunk + asyncify path), the assert never fires
 # anyway.
-if ! python3 "$RUNTIME/scripts/patch_disable_g_assert.py" "$DEFANG_INPUT" "$OUT_FINAL" --line 2718 --line 2734 --line 2735 --line 339 2>&1; then
-    echo "  defang missed (likely asyncify renumbering) — using raw copy"
-    cp "$DEFANG_INPUT" "$OUT_FINAL"
-fi
+# Defang DISABLED — masking the real load_corlib failure left mono
+# running on garbage (downstream functions received empty strings).
+# Need to find/fix the actual assertion source instead of bypassing.
+echo "  defang skipped — see arg-tracer commit; need real fix for load_corlib"
+cp "$DEFANG_INPUT" "$OUT_FINAL"
 
 # ---- report -------------------------------------------------------------
 

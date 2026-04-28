@@ -1078,17 +1078,17 @@ pub extern "C" fn canister_update_boot_mono() {
         // Mono code does `global.get 7 + arg` to dereference; pointers
         // must be dotnet-relative (caller subtracts DOTNET_MEMORY_BASE).
         mono_embed::mono_wasm_setenv(
-            dotnet_offset(TZ_INV_NAME.as_ptr()),
-            dotnet_offset(TZ_INV_VAL.as_ptr()));
+            dotnet_mem_offset(TZ_INV_NAME.as_ptr()),
+            dotnet_mem_offset(TZ_INV_VAL.as_ptr()));
         mono_embed::mono_wasm_setenv(
-            dotnet_offset(MONO_DEBUG_KEY.as_ptr()),
-            dotnet_offset(MONO_DEBUG_VAL.as_ptr()));
+            dotnet_mem_offset(MONO_DEBUG_KEY.as_ptr()),
+            dotnet_mem_offset(MONO_DEBUG_VAL.as_ptr()));
         // 3rd setenv — was the dn_simdhash trap point but we now have
         // the passthrough+shadow-map bypass at fn 559, so this should
         // succeed.
         mono_embed::mono_wasm_setenv(
-            dotnet_offset(MONO_PATH_KEY.as_ptr()),
-            dotnet_offset(MONO_PATH_VAL.as_ptr()));
+            dotnet_mem_offset(MONO_PATH_KEY.as_ptr()),
+            dotnet_mem_offset(MONO_PATH_VAL.as_ptr()));
 
         print(b"[wasp-boot] build keys/vals in dotnet heap");
         // 4 properties: APP_BASE, RID, INV, TPA. TPA causes mono's
@@ -1109,7 +1109,9 @@ pub extern "C" fn canister_update_boot_mono() {
                 *dst.add(i) = src[i];
                 i += 1;
             }
-            (dst as u32).wrapping_sub(wasp_get_g7())
+            // Use mem_base (NOT g7) — mono dereferences via
+            // mem_base + ptr after multi-memory-lowering.
+            (dst as u32).wrapping_sub(wasp_get_mem_base())
         }
         *keys_arr.add(0) = cpy_static(APP_BASE_KEY);
         *keys_arr.add(1) = cpy_static(RID_KEY);
@@ -1126,7 +1128,7 @@ pub extern "C" fn canister_update_boot_mono() {
         // pointer to verify our layout — mono should see this same
         // string when it parses TRUSTED_PLATFORM_ASSEMBLIES.
         let tpa_val_rel = *vals_arr.add(3);
-        let tpa_abs = wasp_get_g7().wrapping_add(tpa_val_rel) as *const u8;
+        let tpa_abs = wasp_get_mem_base().wrapping_add(tpa_val_rel) as *const u8;
         let mut buf = [0u8; 256];
         let prefix = b"[wasp-boot] tpa_val=";
         let mut bi = 0;
@@ -1145,8 +1147,8 @@ pub extern "C" fn canister_update_boot_mono() {
         mono_embed::mono_wasm_load_runtime(
             0,
             5,
-            dotnet_offset(keys_arr as *const u8) as *const *const u8,
-            dotnet_offset(vals_arr as *const u8) as *const *const u8,
+            dotnet_mem_offset(keys_arr as *const u8) as *const *const u8,
+            dotnet_mem_offset(vals_arr as *const u8) as *const *const u8,
         );
         ASYNC_DISABLED = false;
         MONO_BOOTED = true;
