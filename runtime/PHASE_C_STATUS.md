@@ -1,5 +1,31 @@
 # Phase C status — asyncify chunking + Mono runtime boot
 
+## TL;DR (final state of self-paced loop)
+
+- **Asyncify chunking infrastructure**: complete and proven. Pipeline,
+  imports, rewind handshake, name resolution, mem_base discovery,
+  multi-leaf injection, placeholder + patch_fn_to_call shim — all work.
+- **corelib registration**: works ONLY when no asyncify yields fire
+  (set BUDGET=45_000_000_000). Yields during the dn_simdhash insert
+  corrupt mono's bucket state — registration appears to succeed
+  (reg_idx=1) but probe_bundled_get can't find the entry afterward.
+- **boot_mono**: still asserts in `mono_assembly_load_corlib` even
+  when corelib IS in the bundled-resources table (probe verified).
+  The failure is past the bundled getter, somewhere in
+  `mono_assembly_request_open` → PE parse / MonoImage init.
+- **Diagnostic conclusion**: the bundled-resources getter returns a
+  non-NULL value (result=7811440) but reading 32 bytes at both
+  raw `result` and `mem_base + result` returns ALL ZEROS. Either
+  there's a third addressing convention or the value is some sort
+  of sentinel.
+
+The remaining work needs deep mono internals knowledge — finding
+which of dozens of mono helpers between bundled-getter and PE-parser
+returns NULL, and why. Loop iterations no longer productive without
+that.
+
+
+
 ## What works
 
 **Asyncify chunking infrastructure is complete and proven.**
