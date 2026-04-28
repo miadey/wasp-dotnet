@@ -190,11 +190,15 @@ static mut MAYBE_YIELD_UNWIND_COUNT: u32 = 0;
 pub extern "C" fn maybe_yield() {
     unsafe {
         MAYBE_YIELD_CALL_COUNT = MAYBE_YIELD_CALL_COUNT.wrapping_add(1);
-        // Rewind handshake: if asyncify is fast-forwarding (state==2)
-        // and the rewind state machine re-issues this call, clear the
-        // state so the caller's post-call check sees state==0 and
-        // continues normal execution from this point.
-        if asyncify_get_state() == 2 {
+        let st = asyncify_get_state();
+        let mut s = [0u8; 32];
+        let mut i = 0;
+        for &c in b"[my] s=" { s[i] = c; i += 1; }
+        i = format_decimal(&mut s, i, st as u64);
+        for &c in b" c=" { s[i] = c; i += 1; }
+        i = format_decimal(&mut s, i, MAYBE_YIELD_CALL_COUNT as u64);
+        print(&s[..i]);
+        if st == 2 {
             asyncify_stop_rewind();
             return;
         }

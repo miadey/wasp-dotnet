@@ -222,6 +222,9 @@ echo "  resolved mem_base global = $MEM_BASE_GLOBAL"
 DN_LEAVES=$(python3 "$RUNTIME/scripts/find_dn_simdhash_leaves.py" "$WAT" 2>/dev/null || true)
 DN_GET=$(echo "$DN_LEAVES" | grep -oE '^get=[0-9]+' | grep -oE '[0-9]+' || true)
 DN_INS=$(echo "$DN_LEAVES" | grep -oE '^insert=[0-9]+' | grep -oE '[0-9]+' || true)
+PDB_TOK=$(grep -oE "\(func \\\$mono_has_pdb_checksum \(;[0-9]+;\)" "$WAT" | head -1)
+PDB_FN=$(echo "$PDB_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+echo "  resolved mono_has_pdb_checksum fn idx = $PDB_FN"
 rm -f "$WAT"
 
 [ -n "$G7_FN" ] || { echo "  could not resolve g7 (g7=$G7_FN)"; exit 1; }
@@ -230,20 +233,26 @@ rm -f "$WAT"
 
 OUT_P1=$(mktemp -t wasp-p1.XXXXXX).wasm
 OUT_P1B=$(mktemp -t wasp-p1b.XXXXXX).wasm
+OUT_P1C=$(mktemp -t wasp-p1c.XXXXXX).wasm
 OUT_P2=$(mktemp -t wasp-p2.XXXXXX).wasm
 OUT_P3=$(mktemp -t wasp-p3.XXXXXX).wasm
-trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_P1" "$OUT_P1B" "$OUT_P2" "$OUT_P3"' EXIT
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_P1" "$OUT_P1B" "$OUT_P1C" "$OUT_P2" "$OUT_P3"' EXIT
 python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_RELAXED" "$OUT_P1" "$G7_FN" 7
 python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_P1" "$OUT_P1B" "$MB_FN" "$MEM_BASE_GLOBAL"
+if [ -n "$PDB_FN" ]; then
+    python3 "$RUNTIME/scripts/patch_fn_return_zero.py" "$OUT_P1B" "$OUT_P1C" "$PDB_FN"
+else
+    cp "$OUT_P1B" "$OUT_P1C"
+fi
 
 if [ -n "$DN_GET" ] && [ -n "$DN_INS" ] && [ -n "$GET_FN" ] && [ -n "$INS_FN" ]; then
     echo "  SIMD build — applying dn_simdhash bypass: get=$DN_GET → $GET_FN, insert=$DN_INS → $INS_FN"
-    python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$OUT_P1B" "$OUT_P2" "$DN_GET" "$GET_FN"
+    python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$OUT_P1C" "$OUT_P2" "$DN_GET" "$GET_FN"
     python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$OUT_P2" "$OUT_P3" "$DN_INS" "$INS_FN"
     DEFANG_INPUT="$OUT_P3"
 else
     echo "  no-SIMD build — skipping dn_simdhash bypass + assert defang"
-    DEFANG_INPUT="$OUT_P1B"
+    DEFANG_INPUT="$OUT_P1C"
 fi
 
 # Always apply assert defang for now — best-effort only. With asyncify
