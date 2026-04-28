@@ -89,6 +89,38 @@ mismatch.
    not be wired up if some init step we skipped or chunked broke
    the hook installation.
 
+## Probe pipeline diagnostic (most recent finding)
+
+Stage-by-stage trace of `wasp_probe_bundled_get` and
+`canister_query probe_bundled_get` exports:
+
+- after wasm-merge: PRESENT
+- after multi-memory-lowering: PRESENT
+- after const-lower: PRESENT
+- after table-merge: PRESENT
+- after icp-publish (incl. ic-wasm shrink -k): PRESENT
+- after wasi-stub: PRESENT
+- after relax-simd: PRESENT
+- after inject_yield_call + inject_yield_at_entry + 3× inject_arg_trace: PRESENT
+- after wasm-opt --asyncify: PRESENT
+- after wasm-tools print/parse round trip: PRESENT
+- in final canister.wasm: **MISSING**
+
+So one of the post-asyncify patch scripts (patch_fn_to_call for
+asyncify_get_state placeholder, g7-helper, mem_base, mono_has_pdb_checksum
+return-zero, monoeg_g_print → wasp_log_g_print hook, or the new
+wasp_probe_bundled_get → bundled_resources_get_assembly_resource hook)
+silently drops the probe export. Most likely the `text.find("\n  )\n", start)`
+boundary detection in patch_fn_to_call.py / patch_fn_return_zero.py /
+patch_fn_to_global_get.py finds the wrong closing paren and replaces
+across function boundaries, eating later functions including the new
+probe.
+
+Next iteration: instrument the patch scripts to print line ranges of
+each replacement, find the offending one, fix the boundary detection
+to be unambiguous (e.g. require matching indent + check the next func
+header is unaffected).
+
 ## Diagnostic step that would be most informative next
 
 Write a `canister_update probe_bundled_get` that calls
