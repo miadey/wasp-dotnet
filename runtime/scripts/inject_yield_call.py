@@ -31,12 +31,15 @@ import tempfile
 from pathlib import Path
 
 
-def find_insert_leaf(text):
-    """Same heuristic as find_dn_simdhash_leaves.py. Both SIMD-build
-    pattern (str_ptr-style: h20+h8+rem_u, no call_indirect) and
-    no-SIMD-build pattern handled."""
-    # Handle both numeric-only `(func (;N;) ...)` and named
-    # `(func $name (;N;) ...)` forms (the latter when -g preserved names).
+def find_insert_leaves(text):
+    """Find ALL dn_simdhash insert leaves (ght / ptr_ptr / string_ptr /
+    ptrpair_ptr / u32_ptr variants). Each is a 5-arg → i32 func with a
+    body in the 5K-13K char range using h20+h8+rem_u arithmetic.
+
+    Returns a list of (fn_idx, body_size, body_start_offset) tuples.
+    All matches get a `call $maybe_yield` so whichever leaf the runtime
+    actually exercises during a particular insert path will yield.
+    """
     hdr_re = re.compile(
         r'^  \(func (?:\$[A-Za-z_][A-Za-z0-9_]* )?\(;(\d+);\) \(type \d+\) \(param i32 i32 i32 i32 i32\) \(result i32\)\s*$',
         re.MULTILINE,
@@ -55,10 +58,7 @@ def find_insert_leaf(text):
             and 'i32.rem_u' in body
         ):
             matches.append((fn, sz, m.end()))
-    if not matches:
-        return None
-    matches.sort(key=lambda x: -x[1])
-    return matches[0]
+    return matches
 
 
 def main():
@@ -99,36 +99,31 @@ def main():
                 return 1
             yield_fn = m.group(1)
 
-        # Find dn_simdhash insert leaf.
-        leaf = find_insert_leaf(text)
-        if not leaf:
-            print("no dn_simdhash insert leaf found", file=sys.stderr)
+        # Find ALL dn_simdhash insert leaves and inject into each.
+        # Inject in REVERSE byte-position order so earlier offsets stay
+        # valid as we splice.
+        leaves = find_insert_leaves(text)
+        if not leaves:
+            print("no dn_simdhash insert leaves found", file=sys.stderr)
             return 1
-        leaf_fn, leaf_sz, body_start = leaf
+        leaves.sort(key=lambda x: -x[2])  # by body_start desc
 
-        # Inject `call <yield_fn>` AFTER the `(local ...)` declaration
-        # line if present. Wat function bodies look like:
-        #   (func (;N;) (type T) (param ...) (result ...)
-        #     (local i32 i32 ...)        ← optional
-        #     <body instructions>
-        #   )
-        # body_start points to just after the header newline. Find the
-        # first newline within the body — if the next line is `(local`,
-        # skip past it so the injected call goes at the start of actual
-        # instructions.
-        body_end = text.find('\n  )\n', body_start)
-        body = text[body_start:body_end]
-        # Find first `\n    ` in body (instruction indentation).
-        # Skip the (local ...) line if present.
-        offset = 0
-        # body[0] is '\n' (newline after header). body[1:] starts with
-        # 4-space indent. Look for `(local` on first content line.
-        first_nl = body.find('\n', 1)  # find newline after first content line
-        if first_nl > 0 and '(local' in body[1:first_nl]:
-            offset = first_nl
-        injected = f"\n    call {yield_fn}"
-        new_body = body[:offset] + injected + body[offset:]
-        new_text = text[:body_start] + new_body + text[body_end:]
+        new_text = text
+        for leaf_fn, leaf_sz, body_start in leaves:
+            body_end = new_text.find('\n  )\n', body_start)
+            body = new_text[body_start:body_end]
+            offset = 0
+            first_nl = body.find('\n', 1)
+            if first_nl > 0 and '(local' in body[1:first_nl]:
+                offset = first_nl
+            injected = f"\n    call {yield_fn}"
+            new_body = body[:offset] + injected + body[offset:]
+            new_text = new_text[:body_start] + new_body + new_text[body_end:]
+            print(
+                f"  injected `call {yield_fn}` into fn {leaf_fn} "
+                f"({leaf_sz} chars body)",
+                file=sys.stderr,
+            )
 
         out_wat.write_text(new_text)
         try:
@@ -140,8 +135,7 @@ def main():
             print(f"wasm-tools parse failed; check {out_wat}", file=sys.stderr)
             return 1
         print(
-            f"  injected `call {yield_fn}` (maybe_yield) at start of fn "
-            f"{leaf_fn} (dn_simdhash insert leaf, {leaf_sz} chars body) "
+            f"  injected `call {yield_fn}` into {len(leaves)} leaves "
             f"→ {out_wasm}",
             file=sys.stderr,
         )
