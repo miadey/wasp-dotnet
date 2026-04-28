@@ -33,7 +33,11 @@ PATTERNS = [
     r'^mono_bundled_resources_add_assembly_resource$',
     r'^mono_bundled_resources_add_assembly_symbol_resource$',
     r'^mono_bundled_resources_add$',
+    r'^bundled_resources_get_assembly_resource$',
+    r'^bundled_resources_get$',
     r'^dn_simdhash_ensure_capacity_internal$',
+    r'^dn_simdhash_ght_get_value_or_default$',
+    r'^dn_simdhash_ght_try_get_value(?:_with_hash)?$',
 ]
 
 

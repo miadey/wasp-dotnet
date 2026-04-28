@@ -175,6 +175,12 @@ static mut ASYNC_RESUMING: bool = false;
 
 const ASYNC_BUDGET_LIMIT: u64 = 1;
 
+/// Set to true while inside an entry whose caller doesn't handle the
+/// asyncify state==1 unwind protocol (e.g. boot_mono). When true,
+/// maybe_yield never unwinds — it just returns. Avoids state==1
+/// leaking up to a frame that can't deal with it.
+static mut ASYNC_DISABLED: bool = false;
+
 static mut MAYBE_YIELD_CALL_COUNT: u32 = 0;
 static mut MAYBE_YIELD_LAST_BUDGET: u64 = 0;
 static mut MAYBE_YIELD_UNWIND_COUNT: u32 = 0;
@@ -202,6 +208,7 @@ pub extern "C" fn maybe_yield() {
             asyncify_stop_rewind();
             return;
         }
+        if ASYNC_DISABLED { return; }
         let budget = performance_counter(0);
         MAYBE_YIELD_LAST_BUDGET = budget;
         if budget > ASYNC_BUDGET_LIMIT {
@@ -256,7 +263,7 @@ unsafe fn format_decimal_at(p: *mut u8, mut i: usize, mut v: u64) -> usize {
 }
 
 /// Format `v` as decimal ASCII into `buf[i..]`, returning new offset.
-fn format_decimal(buf: &mut [u8], mut i: usize, mut v: u64) -> usize {
+pub(crate) fn format_decimal(buf: &mut [u8], mut i: usize, mut v: u64) -> usize {
     if v == 0 {
         if i < buf.len() { buf[i] = b'0'; i += 1; }
         return i;
@@ -932,6 +939,13 @@ pub extern "C" fn canister_update_register_chunk() {
 pub extern "C" fn canister_update_boot_mono() {
     unsafe {
         if MONO_BOOTED { reply_blob(b"already booted"); return; }
+        // Disable maybe_yield unwinds for the whole boot_mono call.
+        // boot_mono doesn't have asyncify-aware caller logic; if a
+        // yield fired, state==1 would leak past mono_wasm_load_runtime
+        // and trap somewhere downstream. boot_mono runs in canister_init-
+        // like context (full instruction budget), so chunking isn't
+        // needed here anyway.
+        ASYNC_DISABLED = true;
         // Pre-grow linear memory by 32 MiB (512 wasm pages) BEFORE
         // touching mono. The agent's diagnosis of the dn_simdhash bug
         // was: a stale base pointer after the table grows past its
@@ -1015,6 +1029,7 @@ pub extern "C" fn canister_update_boot_mono() {
             dotnet_offset(keys_arr as *const u8) as *const *const u8,
             dotnet_offset(vals_arr as *const u8) as *const *const u8,
         );
+        ASYNC_DISABLED = false;
         MONO_BOOTED = true;
         reply_blob(b"booted!");
     }

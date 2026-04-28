@@ -812,15 +812,40 @@ pub extern "C" fn mono_wasm_trace_logger(
         let prefix = b"[mono] ";
         let mut i = 0;
         for &b in prefix { buf[i] = b; i += 1; }
-        if message != 0 {
-            let p = crate::dotnet_to_abs(message as u32);
+        // Dump raw arg values so we can see what mono actually passes.
+        // Many mono builds pass log args by raw mem_base-offset; some
+        // by literal absolute pointer. Show both interpretations.
+        let mb = crate::wasp_get_mem_base();
+        let mut tmp = [0u8; 64];
+        let mut ti = 0;
+        for &c in b"msg=" { tmp[ti] = c; ti += 1; }
+        ti = crate::format_decimal(&mut tmp, ti, message as u64);
+        for &c in b" mb=" { tmp[ti] = c; ti += 1; }
+        ti = crate::format_decimal(&mut tmp, ti, mb as u64);
+        for &c in b" | " { tmp[ti] = c; ti += 1; }
+        for &b in &tmp[..ti] {
+            if i >= buf.len() { break; }
+            buf[i] = b; i += 1;
+        }
+        // Try BOTH addressing conventions and emit the first non-empty.
+        for try_addr in [
+            mb.wrapping_add(message as u32),
+            message as u32,
+        ] {
+            if try_addr == 0 { continue; }
+            let p = try_addr as *const u8;
             let mut len = 0;
-            while *p.add(len) != 0 && len < 4096 { len += 1; }
-            let src = core::slice::from_raw_parts(p, len);
-            for &b in src {
-                if i >= buf.len() { break; }
-                buf[i] = b;
-                i += 1;
+            while len < 4096 {
+                let b = *p.add(len);
+                if b == 0 { break; }
+                len += 1;
+            }
+            if len > 0 {
+                for k in 0..len {
+                    if i >= buf.len() { break; }
+                    buf[i] = *p.add(k); i += 1;
+                }
+                break;
             }
         }
         ic_debug_print_bytes(&buf[..i]);
