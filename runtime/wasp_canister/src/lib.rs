@@ -221,6 +221,40 @@ pub extern "C" fn maybe_yield() {
     }
 }
 
+/// Placeholder — patched post-asyncify by patch_fn_to_call.py to
+/// `call $bundled_resources_get_assembly_resource`. Same pattern as
+/// wasp_asyncify_get_state. Distinct sentinel write defeats LLVM ICF.
+static mut PROBE_BUNDLED_SENTINEL: u32 = 0;
+
+#[no_mangle] #[inline(never)]
+pub extern "C" fn wasp_probe_bundled_get(name_rel: u32) -> u32 {
+    unsafe { core::ptr::write_volatile(&raw mut PROBE_BUNDLED_SENTINEL, 0xB0DE0001); }
+    core::hint::black_box(name_rel.wrapping_mul(0))
+}
+
+/// Probe: did our register_chunk actually insert corelib in mono's
+/// bundled-resources table? Calls the patched wasp_probe_bundled_get
+/// (which post-asyncify is a forwarder to bundled_resources_get_assembly_resource)
+/// with "System.Private.CoreLib.dll".
+#[export_name = "canister_query probe_bundled_get"]
+pub extern "C" fn canister_query_probe_bundled_get() {
+    unsafe {
+        let name: &[u8] = b"System.Private.CoreLib.dll\0";
+        let dst = mono_embed::malloc(name.len());
+        if dst.is_null() { reply_blob(b"alloc failed"); return; }
+        for i in 0..name.len() { *dst.add(i) = name[i]; }
+        let rel = (dst as u32).wrapping_sub(wasp_get_mem_base());
+        let result = wasp_probe_bundled_get(rel);
+        let mut buf = [0u8; 128];
+        let mut i = 0;
+        for &c in b"name=\"System.Private.CoreLib.dll\" rel=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, rel as u64);
+        for &c in b" result=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, result as u64);
+        reply_blob(&buf[..i]);
+    }
+}
+
 /// Generic string-pointer logger. Logs first 32 bytes as both ASCII
 /// and hex so we can distinguish empty strings, format templates,
 /// and binary structs.
