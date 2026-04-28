@@ -224,7 +224,10 @@ DN_GET=$(echo "$DN_LEAVES" | grep -oE '^get=[0-9]+' | grep -oE '[0-9]+' || true)
 DN_INS=$(echo "$DN_LEAVES" | grep -oE '^insert=[0-9]+' | grep -oE '[0-9]+' || true)
 PDB_TOK=$(grep -oE "\(func \\\$mono_has_pdb_checksum \(;[0-9]+;\)" "$WAT" | head -1)
 PDB_FN=$(echo "$PDB_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+BRG_TOK=$(grep -oE "\(func \\\$bundled_resources_get_assembly_resource \(;[0-9]+;\)" "$WAT" | head -1)
+BRG_FN=$(echo "$BRG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 echo "  resolved mono_has_pdb_checksum fn idx = $PDB_FN"
+echo "  resolved bundled_resources_get_assembly_resource fn idx = $BRG_FN"
 rm -f "$WAT"
 
 [ -n "$G7_FN" ] || { echo "  could not resolve g7 (g7=$G7_FN)"; exit 1; }
@@ -239,10 +242,16 @@ OUT_P3=$(mktemp -t wasp-p3.XXXXXX).wasm
 trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_P1" "$OUT_P1B" "$OUT_P1C" "$OUT_P2" "$OUT_P3"' EXIT
 python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_RELAXED" "$OUT_P1" "$G7_FN" 7
 python3 "$RUNTIME/scripts/patch_fn_to_global_get.py" "$OUT_P1" "$OUT_P1B" "$MB_FN" "$MEM_BASE_GLOBAL"
+PATCH_INPUT="$OUT_P1B"
 if [ -n "$PDB_FN" ]; then
-    python3 "$RUNTIME/scripts/patch_fn_return_zero.py" "$OUT_P1B" "$OUT_P1C" "$PDB_FN"
+    OUT_PDB=$(mktemp -t wasp-pdb.XXXXXX).wasm
+    python3 "$RUNTIME/scripts/patch_fn_return_zero.py" "$PATCH_INPUT" "$OUT_PDB" "$PDB_FN"
+    PATCH_INPUT="$OUT_PDB"
+fi
+if [ -n "$BRG_FN" ]; then
+    python3 "$RUNTIME/scripts/patch_fn_return_zero.py" "$PATCH_INPUT" "$OUT_P1C" "$BRG_FN"
 else
-    cp "$OUT_P1B" "$OUT_P1C"
+    cp "$PATCH_INPUT" "$OUT_P1C"
 fi
 
 if [ -n "$DN_GET" ] && [ -n "$DN_INS" ] && [ -n "$GET_FN" ] && [ -n "$INS_FN" ]; then
