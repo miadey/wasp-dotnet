@@ -252,9 +252,12 @@ GP_TOK=$(grep -oE "\(func \\\$monoeg_g_print \(;[0-9]+;\)" "$WAT" | head -1)
 GP_FN=$(echo "$GP_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 WLG_TOK=$(grep -oE "\(func \\\$wasp_log_g_print \(;[0-9]+;\)" "$WAT" | head -1)
 WLG_FN=$(echo "$WLG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+WPBG_TOK=$(grep -oE "\(func \\\$wasp_probe_bundled_get \(;[0-9]+;\)" "$WAT" | head -1)
+WPBG_FN=$(echo "$WPBG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 echo "  resolved mono_has_pdb_checksum fn idx = $PDB_FN"
 echo "  resolved bundled_resources_get_assembly_resource fn idx = $BRG_FN"
 echo "  resolved monoeg_g_print fn idx = $GP_FN, wasp_log_g_print = $WLG_FN"
+echo "  resolved wasp_probe_bundled_get fn idx = $WPBG_FN"
 rm -f "$WAT"
 
 [ -n "$G7_FN" ] || { echo "  could not resolve g7 (g7=$G7_FN)"; exit 1; }
@@ -295,8 +298,7 @@ fi
 # Patch wasp_probe_bundled_get placeholder → bundled_resources_get_assembly_resource
 # so the wasp probe query can directly check whether our registered
 # corelib bytes are findable in the bundled-resources table.
-WPBG_TOK=$(grep -oE "\(func \\\$wasp_probe_bundled_get \(;[0-9]+;\)" "$WAT" | head -1)
-WPBG_FN=$(echo "$WPBG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+# (WPBG_FN was resolved earlier, before $WAT was deleted.)
 if [ -n "$WPBG_FN" ] && [ -n "$BRG_FN" ]; then
     OUT_PROBE=$(mktemp -t wasp-probe.XXXXXX).wasm
     python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$PATCH_INPUT" "$OUT_PROBE" "$WPBG_FN" "$BRG_FN"
