@@ -157,7 +157,14 @@ python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_TRACE2" "$OUT_TRACE3" mono_
 OUT_YIELDED="$OUT_TRACE3"
 
 echo "[7.7/9] wasm-opt --asyncify (post-lowering, scoped onlylist)"
-ASYNC_ONLYLIST="mono_wasm_add_assembly,mono_bundled_resources_add_assembly_resource,mono_bundled_resources_add_assembly_symbol_resource,mono_bundled_resources_add_satellite_assembly_resource,mono_bundled_resources_add,bundled_resources_get_assembly_resource,bundled_resources_get,bundled_resource_add_free_func,key_from_id,dn_simdhash_ght_try_add,dn_simdhash_ght_try_add_with_hash,dn_simdhash_ght_try_insert_internal,dn_simdhash_ght_rehash_internal,dn_simdhash_ght_new_full,dn_simdhash_ght_default_hash,dn_simdhash_ght_default_comparer,dn_simdhash_ght_get_value_or_default,dn_simdhash_ght_try_get_value,dn_simdhash_ght_try_get_value_with_hash,dn_simdhash_ptr_ptr_try_add,dn_simdhash_ptr_ptr_try_add_with_hash,dn_simdhash_ptr_ptr_try_insert_internal,dn_simdhash_ptr_ptr_rehash_internal,dn_simdhash_ptr_ptr_new,dn_simdhash_ptr_ptr_try_get_value,dn_simdhash_ptr_ptr_try_get_value_with_hash,dn_simdhash_ptrpair_ptr_try_add,dn_simdhash_ptrpair_ptr_try_add_with_hash,dn_simdhash_ptrpair_ptr_try_insert_internal,dn_simdhash_ptrpair_ptr_rehash_internal,dn_simdhash_string_ptr_try_add,dn_simdhash_string_ptr_try_add_raw,dn_simdhash_string_ptr_try_add_with_hash_raw,dn_simdhash_string_ptr_try_insert_internal,dn_simdhash_string_ptr_rehash_internal,dn_simdhash_string_ptr_try_get_value,dn_simdhash_string_ptr_try_get_value_raw,dn_simdhash_string_ptr_try_get_value_with_hash_raw,dn_simdhash_ensure_capacity_internal,dn_simdhash_new_internal,dn_simdhash_make_str_key,maybe_yield"
+# Minimized onlylist: only the maybe_yield trigger itself. With this
+# scope, asyncify instrumentation is essentially absent from mono code
+# — eliminates the dn_simdhash insert corruption we observed when
+# yields fire mid-insert. Tradeoff: register_chunk can no longer chunk
+# (any one BCL >50B fails). Use BUDGET=45B + canister_init pre-register
+# for corelib to fit within budgets. Keep the maybe_yield infrastructure
+# so the canister still installs cleanly.
+ASYNC_ONLYLIST="maybe_yield"
 OUT_ASYNCIFIED=$(mktemp -t wasp-asyncified.XXXXXX).wasm
 trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_TABLE" "$OUT_RENAMED" "$OUT_STUBBED" "$OUT_RELAXED" "$DOTNET_PRE" "$OUT_YIELDED" "$OUT_ASYNCIFIED"' EXIT
 wasm-opt "$OUT_YIELDED" -o "$OUT_ASYNCIFIED" \
