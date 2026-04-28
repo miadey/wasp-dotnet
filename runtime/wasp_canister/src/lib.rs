@@ -173,7 +173,7 @@ struct AsyncBuf { cur: u32, end: u32, stack: [u8; 256 * 1024] }
 static mut ASYNC_BUF: AsyncBuf = AsyncBuf { cur: 0, end: 0, stack: [0; 256 * 1024] };
 static mut ASYNC_RESUMING: bool = false;
 
-const ASYNC_BUDGET_LIMIT: u64 = 1;
+const ASYNC_BUDGET_LIMIT: u64 = 45_000_000_000;
 
 /// Set to true while inside an entry whose caller doesn't handle the
 /// asyncify state==1 unwind protocol (e.g. boot_mono). When true,
@@ -243,14 +243,38 @@ pub extern "C" fn canister_query_probe_bundled_get() {
         let dst = mono_embed::malloc(name.len());
         if dst.is_null() { reply_blob(b"alloc failed"); return; }
         for i in 0..name.len() { *dst.add(i) = name[i]; }
-        let rel = (dst as u32).wrapping_sub(wasp_get_mem_base());
-        let result = wasp_probe_bundled_get(rel);
-        let mut buf = [0u8; 128];
+        let mb = wasp_get_mem_base();
+        let probe_rel = (dst as u32).wrapping_sub(mb);
+        let result = wasp_probe_bundled_get(probe_rel);
+        let add1_abs = ADD1_CACHED_NAME as u32;
+        let add1_rel = if add1_abs != 0 { add1_abs.wrapping_sub(mb) } else { 0 };
+        let mut buf = [0u8; 320];
         let mut i = 0;
-        for &c in b"name=\"System.Private.CoreLib.dll\" rel=" { buf[i] = c; i += 1; }
-        i = format_decimal(&mut buf, i, rel as u64);
-        for &c in b" result=" { buf[i] = c; i += 1; }
+        for &c in b"mb=" { buf[i]=c; i+=1; }
+        i = format_decimal(&mut buf, i, mb as u64);
+        for &c in b" probe_rel=" { buf[i]=c; i+=1; }
+        i = format_decimal(&mut buf, i, probe_rel as u64);
+        for &c in b" add1_rel=" { buf[i]=c; i+=1; }
+        i = format_decimal(&mut buf, i, add1_rel as u64);
+        for &c in b" result=" { buf[i]=c; i+=1; }
         i = format_decimal(&mut buf, i, result as u64);
+        for (label, abs) in [
+            (b" probe_str=\"" as &[u8], dst as u32),
+            (b"\" add1_str=\"" as &[u8], add1_abs),
+        ] {
+            for &c in label { if i<buf.len() { buf[i]=c; i+=1; } }
+            if abs != 0 {
+                let p = abs as *const u8;
+                for k in 0..40u32 {
+                    let b = *p.add(k as usize);
+                    if b == 0 { break; }
+                    if i >= buf.len() - 4 { break; }
+                    buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                    i += 1;
+                }
+            }
+        }
+        for &c in b"\"" { if i<buf.len() { buf[i]=c; i+=1; } }
         reply_blob(&buf[..i]);
     }
 }
@@ -996,8 +1020,25 @@ unsafe fn add1(name_src: &[u8], bytes_src: &[u8]) {
     // g7 which is a different base — the mismatch caused mono to read
     // metadata at the WRONG address (off by mem_base - g7), failing
     // metadata-decode assertions during class load.
-    mono_embed::mono_wasm_add_assembly(
-        dotnet_mem_offset(name), dotnet_mem_offset(bytes), bytes_src.len() as i32);
+    let mb_before = wasp_get_mem_base();
+    let name_off = dotnet_mem_offset(name);
+    let bytes_off = dotnet_mem_offset(bytes);
+    let rc = mono_embed::mono_wasm_add_assembly(
+        name_off, bytes_off, bytes_src.len() as i32);
+    let mb_after = wasp_get_mem_base();
+    let mut buf = [0u8; 192];
+    let mut bi = 0;
+    for &c in b"[add1] idx=" { buf[bi] = c; bi += 1; }
+    bi = format_decimal(&mut buf, bi, idx as u64);
+    for &c in b" mb_before=" { buf[bi] = c; bi += 1; }
+    bi = format_decimal(&mut buf, bi, mb_before as u64);
+    for &c in b" mb_after=" { buf[bi] = c; bi += 1; }
+    bi = format_decimal(&mut buf, bi, mb_after as u64);
+    for &c in b" name_off=" { buf[bi] = c; bi += 1; }
+    bi = format_decimal(&mut buf, bi, name_off as u32 as u64);
+    for &c in b" rc=" { buf[bi] = c; bi += 1; }
+    bi = format_decimal(&mut buf, bi, rc as u32 as u64);
+    print(&buf[..bi]);
 }
 
 #[export_name = "canister_update register_all"]
