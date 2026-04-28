@@ -437,6 +437,13 @@ unsafe fn reply_blob(payload: &[u8]) {
 
 #[no_mangle]
 pub extern "C" fn canister_init() {
+    print(b"[wasp-dotnet] canister_init: pre-grow heap by 256MiB");
+    // Pre-grow BEFORE ctors so multi-memory-lowering's mem_base
+    // stabilizes early. Mono later wouldn't need to grow during
+    // class-load (the dn_simdhash bucket pointers stored before a
+    // grow would otherwise be stale relative to the post-grow
+    // mem_base, causing heap-out-of-bounds reads). 4096 pages = 256 MiB.
+    let _ = core::arch::wasm32::memory_grow(0, 4096);
     print(b"[wasp-dotnet] canister_init: pre-ctors");
     unsafe {
         mono_embed::__wasm_call_ctors();
