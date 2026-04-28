@@ -110,95 +110,95 @@ extern "C" {
 }
 
 // ---------------------------------------------------------------------------
-// Asyncify integration (scoped via --asyncify-onlylist)
+// Asyncify integration — pre-merge on dotnet alone with env.maybe_yield
+// as the unwind trigger import.
 //
-// Pipeline (30_merge.sh):
-//   - inject_yield_call.py adds `call $maybe_yield` to dn_simdhash insert leaf
-//   - wasm-opt --asyncify --pass-arg=asyncify-onlylist@<dn_simdhash chain>
-//     instruments ONLY those functions, adding ~60 KB (vs 10 MB unbounded).
-//   - asyncify creates 5 exports: asyncify_start_unwind, _stop_unwind,
-//     _start_rewind, _stop_rewind, _get_state.
-//   - patch_fn_to_call.py rewrites the placeholder wasp_asyncify_*
-//     export bodies below to call the real asyncify_* exports.
-//
-// We can't import asyncify_* directly because asyncify runs AFTER
-// wasm-merge, so any "env.asyncify_*" import would be unresolved at
-// install time. Instead we export no-op placeholders here and patch
-// their bodies post-asyncify to call the real exports.
+// Pipeline (30_merge.sh, runs BEFORE wasm-merge):
+//   1. inject_maybe_yield_import.py: add `(import "env" "maybe_yield" ...)`
+//      to dotnet so wasm-opt --asyncify recognizes it as the trigger.
+//   2. inject_yield_call.py: prepend `call $maybe_yield` to dn_simdhash
+//      insert leaf body.
+//   3. wasm-opt --asyncify
+//        --pass-arg=asyncify-imports@env.maybe_yield
+//        --pass-arg=asyncify-onlylist@<chain>
+//      Asyncify treats every call to env.maybe_yield as an unwind
+//      candidate and inserts saved-points + post-call state checks at
+//      each call site. Asyncify creates 5 exports on dotnet:
+//      asyncify_start_unwind, _stop_unwind, _start_rewind, _stop_rewind,
+//      asyncify_get_state.
+//   4. wasm-merge wasp(env) + asyncified-dotnet(dotnet):
+//        - dotnet's env.maybe_yield → wasp's exported maybe_yield ✓
+//        - wasp's `dotnet.asyncify_*` imports → dotnet's exports ✓
 // ---------------------------------------------------------------------------
 
-// 256 KiB asyncify save buffer (header + stack frames per binaryen docs).
-#[repr(C, align(8))]
-struct AsyncBuf { cur: u32, end: u32, stack: [u8; 256 * 1024] }
-static mut ASYNC_BUF: AsyncBuf = AsyncBuf { cur: 0, end: 0, stack: [0; 256 * 1024] };
+#[link(wasm_import_module = "dotnet")]
+extern "C" {
+    fn asyncify_start_unwind(data: u32);
+    fn asyncify_stop_unwind();
+    fn asyncify_start_rewind(data: u32);
+    fn asyncify_stop_rewind();
+    fn asyncify_get_state() -> u32;
+}
+
+/// Asyncify save buffer. Layout: u32 cur, u32 end, then 256 KiB of
+/// stack frames. ALLOCATED VIA mono_embed::malloc (not as a wasp static)
+/// because multi-memory-lowering rewrites asyncify's data-pointer reads
+/// to `global.get <mem_base> + ptr`. Wasp static addresses live below
+/// dotnet's mem_base, so `mem_base + wasp_addr` would wrap into garbage.
+/// mono malloc gives us an address in dotnet's heap region, and we pass
+/// the dotnet-relative offset (abs - mem_base) to asyncify.
+const ASYNC_BUF_BYTES: usize = 8 + 256 * 1024;
+static mut ASYNC_BUF_ABS: u32 = 0;     // absolute pointer (in mono heap)
+static mut ASYNC_BUF_REL: u32 = 0;     // dotnet-relative (= ABS - g7)
 static mut ASYNC_RESUMING: bool = false;
 
-/// Budget threshold for triggering an asyncify unwind from inside the
-/// dn_simdhash insert leaf. Set to 1 (always yield on first call) for
-/// rewind-path debugging; production value is 45_000_000_000 (5B
-/// headroom under the IC's 50B per-message instruction cap).
+unsafe fn ensure_async_buf() {
+    if ASYNC_BUF_ABS == 0 {
+        let p = mono_embed::malloc(ASYNC_BUF_BYTES);
+        if p.is_null() {
+            let m = b"async_buf alloc failed";
+            trap(m.as_ptr() as u32, m.len() as u32);
+        }
+        ASYNC_BUF_ABS = p as u32;
+        // mem_base (NOT g7) — see wasp_get_mem_base comment.
+        ASYNC_BUF_REL = (p as u32).wrapping_sub(wasp_get_mem_base());
+    }
+}
+
+/// 1 = trigger unwind on FIRST maybe_yield call (diagnostic). Production:
+/// 45_000_000_000 (5B headroom under IC's 50B per-message cap).
 const ASYNC_BUDGET_LIMIT: u64 = 1;
 
-/// Placeholder bodies — patched post-asyncify by patch_fn_to_call.py
-/// to call the real asyncify_* exports added by wasm-opt --asyncify.
-/// Distinct sentinel writes prevent LLVM/lld ICF (identical-code-folding)
-/// from merging these with other empty no-op extern fns (e.g. the mono
-/// interp stubs in env_imports.rs).
-static mut WASP_ASYNCIFY_SENTINEL: [u32; 5] = [0; 5];
-
-#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_start_unwind(data: u32) {
-    unsafe { core::ptr::write_volatile(&raw mut WASP_ASYNCIFY_SENTINEL[0], data); }
-}
-#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_stop_unwind() {
-    unsafe { core::ptr::write_volatile(&raw mut WASP_ASYNCIFY_SENTINEL[1], 1); }
-}
-#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_start_rewind(data: u32) {
-    unsafe { core::ptr::write_volatile(&raw mut WASP_ASYNCIFY_SENTINEL[2], data); }
-}
-#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_stop_rewind() {
-    unsafe { core::ptr::write_volatile(&raw mut WASP_ASYNCIFY_SENTINEL[3], 1); }
-}
-#[no_mangle] #[inline(never)] pub extern "C" fn wasp_asyncify_get_state() -> u32 {
-    unsafe { core::ptr::read_volatile(&raw const WASP_ASYNCIFY_SENTINEL[4]) }
-}
-
-/// `maybe_yield` is exported with that exact name; inject_yield_call.py
-/// emits `call $maybe_yield` at the start of the dn_simdhash insert
-/// leaf body during the merge pipeline. When the per-message instruction
-/// budget is exhausted, we initiate an asyncify unwind that returns the
-/// stack all the way back to register_chunk's caller.
 static mut MAYBE_YIELD_CALL_COUNT: u32 = 0;
 
+/// Satisfies dotnet's `env.maybe_yield` import (resolved at wasm-merge).
+/// Asyncify treats CALLS to this import (via `call $maybe_yield` injected
+/// into the dn_simdhash insert leaf) as unwind candidates and inserts
+/// the saved-point + post-call state check at each call site. As the
+/// trigger import, asyncify does NOT instrument this body — it never
+/// participates in the rewind state machine, so calling start_unwind
+/// directly here is safe.
 #[no_mangle]
 pub extern "C" fn maybe_yield() {
     unsafe {
-        // The asyncify-injected prologue (added because maybe_yield
-        // is in --asyncify-onlylist) handles the state==2 rewind by
-        // restoring locals and jumping to the saved point — which is
-        // immediately after the `wasp_asyncify_start_unwind` call
-        // below. We call `stop_rewind` there to clear state back to 0,
-        // completing the rewind handshake.
         MAYBE_YIELD_CALL_COUNT = MAYBE_YIELD_CALL_COUNT.wrapping_add(1);
         if MAYBE_YIELD_CALL_COUNT == 1 {
             print(b"[maybe_yield] first call");
         }
         if performance_counter(0) > ASYNC_BUDGET_LIMIT {
-            print(b"[maybe_yield] starting unwind");
-            let buf_ptr = (&raw mut ASYNC_BUF) as u32;
-            // Always reinitialize buffer for THIS unwind. cur=start of
-            // data area, end=top of buffer.
-            (*(&raw mut ASYNC_BUF)).cur = buf_ptr + 8;
-            (*(&raw mut ASYNC_BUF)).end = buf_ptr + 8 + (256 * 1024);
-            wasp_asyncify_start_unwind(buf_ptr);
-            print(b"[maybe_yield] post-start_unwind (rewind path)");
-            // On the rewind pass the asyncify state machine resumes
-            // execution at this point with state==2 (rewinding). Only
-            // then should we call stop_rewind to clear it. On the
-            // unwind pass state==1 and we must NOT call stop_rewind
-            // (it would clobber the unwind signal).
-            if wasp_asyncify_get_state() == 2 {
-                wasp_asyncify_stop_rewind();
-            }
+            ensure_async_buf();
+            print(b"[maybe_yield] start_unwind");
+            let abs = ASYNC_BUF_ABS;
+            let rel = ASYNC_BUF_REL;
+            *((abs as *mut u32)) = rel + 8;                          // cur
+            *((abs as *mut u32).add(1)) = rel + 8 + (256 * 1024) as u32; // end
+            // Write sentinels across the data area so we can detect
+            // whether asyncify wrote at all (and where).
+            *((abs + 8) as *mut u32) = 0xC0FFEE00u32;
+            *((abs + 72) as *mut u32) = 0xC0FFEE72u32;
+            *((abs + 96) as *mut u32) = 0xC0FFEE96u32;
+            *((abs + 1024) as *mut u32) = 0xC0FE1024u32;
+            asyncify_start_unwind(rel);
         }
     }
 }
@@ -848,12 +848,8 @@ pub extern "C" fn canister_update_register_chunk() {
 
         if ASYNC_RESUMING {
             ASYNC_RESUMING = false;
-            let buf_ptr = (&raw mut ASYNC_BUF) as u32;
-            wasp_asyncify_start_rewind(buf_ptr);
-            // Per the asyncify protocol, after start_rewind the next
-            // function call enters fast-forward mode. Re-call add1 with
-            // the SAME index so the state machine resumes inside mono.
-            // maybe_yield itself calls stop_rewind when state==2 (above).
+            ensure_async_buf();
+            asyncify_start_rewind(ASYNC_BUF_REL);
         }
 
         while BUILTIN_REG_IDX < total {
@@ -862,9 +858,41 @@ pub extern "C" fn canister_update_register_chunk() {
             add1(n, b);
             print(b"[register_chunk] after add1");
             // After add1 returns, check if we just unwound (state == 1).
-            let st = wasp_asyncify_get_state();
+            let st = asyncify_get_state();
+            // Diagnostic: log buffer state before stop_unwind.
+            let abs = ASYNC_BUF_ABS;
+            let cur = if abs != 0 { *(abs as *const u32) } else { 0 };
+            let end = if abs != 0 { *((abs as *const u32).add(1)) } else { 0 };
+            let mut dbuf = [0u8; 160];
+            let mut di = 0;
+            for &c in b"[after-add1] state=" { dbuf[di] = c; di += 1; }
+            di = format_decimal(&mut dbuf, di, st as u64);
+            for &c in b" cur=" { dbuf[di] = c; di += 1; }
+            di = format_decimal(&mut dbuf, di, cur as u64);
+            for &c in b" end=" { dbuf[di] = c; di += 1; }
+            di = format_decimal(&mut dbuf, di, end as u64);
+            for &c in b" buf_abs=" { dbuf[di] = c; di += 1; }
+            di = format_decimal(&mut dbuf, di, abs as u64);
+            for &c in b" buf_rel=" { dbuf[di] = c; di += 1; }
+            di = format_decimal(&mut dbuf, di, ASYNC_BUF_REL as u64);
+            print(&dbuf[..di]);
+            // Print all 4 sentinels.
+            for &(label, off) in &[(b"@8=" as &[u8], 8), (b"@72=", 72), (b"@96=", 96), (b"@1024=", 1024)] {
+                let mut s = [0u8; 64];
+                let mut si = 0;
+                for &c in b"[sentinel] " { s[si] = c; si += 1; }
+                for &c in label { s[si] = c; si += 1; }
+                for &c in b"0x" { s[si] = c; si += 1; }
+                let v = if abs != 0 { *((abs + off) as *const u32) } else { 0 };
+                for shift in (0..32).step_by(4).rev() {
+                    let nibble = ((v >> shift) & 0xF) as u8;
+                    s[si] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
+                    si += 1;
+                }
+                print(&s[..si]);
+            }
             if st == 1 {
-                wasp_asyncify_stop_unwind();
+                asyncify_stop_unwind();
                 ASYNC_RESUMING = true;
                 let mut buf = [0u8; 96];
                 let mut bi = 0;
@@ -879,7 +907,7 @@ pub extern "C" fn canister_update_register_chunk() {
         }
 
         if ASYNC_RESUMING {
-            wasp_asyncify_stop_rewind();
+            asyncify_stop_rewind();
             ASYNC_RESUMING = false;
         }
         reply_blob(b"all-registered");
@@ -1315,6 +1343,20 @@ pub(crate) const DOTNET_MEMORY_BASE: u32 = 2_752_512;
 pub extern "C" fn wasp_get_g7() -> u32 {
     // Placeholder — patched post-merge. Returns the static initial
     // value as a fallback so unpatched builds at least try to function.
+    DOTNET_MEMORY_BASE
+}
+
+/// Distinct from g7: this returns the multi-memory-lowering mem_base
+/// (global N where dotnet's memory was placed in the merged module).
+/// Patched post-merge to `global.get <N>` by find-and-patch in
+/// 30_merge.sh. Needed for asyncify's buffer pointer math: asyncify's
+/// lowered code reads buffer fields via `mem_base + ptr`, so the ptr
+/// we pass MUST be `abs - mem_base` (not `abs - g7`).
+#[no_mangle]
+pub extern "C" fn wasp_get_mem_base() -> u32 {
+    // Distinct sentinel write so ICF doesn't merge with wasp_get_g7.
+    static mut MEM_BASE_SENTINEL: u32 = 0;
+    unsafe { core::ptr::write_volatile(&raw mut MEM_BASE_SENTINEL, 0xDEADBEEF); }
     DOTNET_MEMORY_BASE
 }
 

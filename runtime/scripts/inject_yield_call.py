@@ -76,16 +76,28 @@ def main():
         )
         text = wat.read_text()
 
-        # Find maybe_yield export — handle both numeric (func N) and
-        # named (func $maybe_yield) forms (the latter when -g is preserved).
-        m = re.search(r'\(export "maybe_yield" \(func (\d+|\$[A-Za-z_][A-Za-z0-9_]*)\)\)', text)
-        if not m:
-            print("no `maybe_yield` export — wasp_canister must export it", file=sys.stderr)
-            return 1
-        yield_token = m.group(1)
-        # patch_fn_to_call style: emit `call <token>` directly (works for
-        # both numeric indices and $named refs in wat).
-        yield_fn = yield_token
+        # Find maybe_yield — either as an EXPORT (post-merge canister)
+        # or as an IMPORT (pre-merge dotnet that we asyncify alone).
+        # With -g preserved, refs use `$name` form.
+        m = re.search(
+            r'\(export "maybe_yield" \(func (\d+|\$[A-Za-z_][A-Za-z0-9_]*)\)\)',
+            text,
+        )
+        if m:
+            yield_fn = m.group(1)
+        else:
+            m = re.search(
+                r'\(import "env" "maybe_yield" \(func (\$[A-Za-z_][A-Za-z0-9_]*)',
+                text,
+            )
+            if not m:
+                print(
+                    "no `maybe_yield` import or export — must be present "
+                    "(import in pre-merge dotnet, export in merged canister)",
+                    file=sys.stderr,
+                )
+                return 1
+            yield_fn = m.group(1)
 
         # Find dn_simdhash insert leaf.
         leaf = find_insert_leaf(text)
