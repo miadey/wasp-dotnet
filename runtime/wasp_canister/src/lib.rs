@@ -173,9 +173,11 @@ struct AsyncBuf { cur: u32, end: u32, stack: [u8; 256 * 1024] }
 static mut ASYNC_BUF: AsyncBuf = AsyncBuf { cur: 0, end: 0, stack: [0; 256 * 1024] };
 static mut ASYNC_RESUMING: bool = false;
 
-const ASYNC_BUDGET_LIMIT: u64 = 1_000_000;
+const ASYNC_BUDGET_LIMIT: u64 = 1;
 
 static mut MAYBE_YIELD_CALL_COUNT: u32 = 0;
+static mut MAYBE_YIELD_LAST_BUDGET: u64 = 0;
+static mut MAYBE_YIELD_UNWIND_COUNT: u32 = 0;
 
 /// Satisfies dotnet's `env.maybe_yield` import (resolved at wasm-merge).
 /// Asyncify treats CALLS to this import (via `call $maybe_yield` injected
@@ -187,6 +189,7 @@ static mut MAYBE_YIELD_CALL_COUNT: u32 = 0;
 #[no_mangle]
 pub extern "C" fn maybe_yield() {
     unsafe {
+        MAYBE_YIELD_CALL_COUNT = MAYBE_YIELD_CALL_COUNT.wrapping_add(1);
         // Rewind handshake: if asyncify is fast-forwarding (state==2)
         // and the rewind state machine re-issues this call, clear the
         // state so the caller's post-call check sees state==0 and
@@ -195,7 +198,10 @@ pub extern "C" fn maybe_yield() {
             asyncify_stop_rewind();
             return;
         }
-        if performance_counter(0) > ASYNC_BUDGET_LIMIT {
+        let budget = performance_counter(0);
+        MAYBE_YIELD_LAST_BUDGET = budget;
+        if budget > ASYNC_BUDGET_LIMIT {
+            MAYBE_YIELD_UNWIND_COUNT = MAYBE_YIELD_UNWIND_COUNT.wrapping_add(1);
             let buf_ptr = (&raw mut ASYNC_BUF) as u32;
             (*(&raw mut ASYNC_BUF)).cur = buf_ptr + 8;
             (*(&raw mut ASYNC_BUF)).end = buf_ptr + 8 + (256 * 1024);
@@ -209,9 +215,17 @@ pub extern "C" fn maybe_yield() {
 #[export_name = "canister_query maybe_yield_count"]
 pub extern "C" fn canister_query_maybe_yield_count() {
     unsafe {
-        let mut buf = [0u8; 32];
-        let n = format_decimal(&mut buf, 0, MAYBE_YIELD_CALL_COUNT as u64);
-        reply_blob(&buf[..n]);
+        let mut buf = [0u8; 128];
+        let mut i = 0;
+        for &c in b"calls=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, MAYBE_YIELD_CALL_COUNT as u64);
+        for &c in b" unwinds=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, MAYBE_YIELD_UNWIND_COUNT as u64);
+        for &c in b" last_budget=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, MAYBE_YIELD_LAST_BUDGET);
+        for &c in b" reg_idx=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, BUILTIN_REG_IDX as u64);
+        reply_blob(&buf[..i]);
     }
 }
 
@@ -875,33 +889,38 @@ pub extern "C" fn canister_update_register_chunk() {
             asyncify_start_rewind(buf_ptr);
         }
 
-        while BUILTIN_REG_IDX < total {
-            let (n, b) = BUILTIN_BCL[BUILTIN_REG_IDX];
-            print(b"[register_chunk] before add1");
-            add1(n, b);
-            print(b"[register_chunk] after add1");
-            // After add1 returns, check if we just unwound (state == 1).
-            let st = asyncify_get_state();
-            if st == 1 {
-                asyncify_stop_unwind();
-                ASYNC_RESUMING = true;
-                let mut buf = [0u8; 96];
-                let mut bi = 0;
-                for &c in b"in_progress " { buf[bi] = c; bi += 1; }
-                bi = format_decimal(&mut buf, bi, BUILTIN_REG_IDX as u64);
-                for &c in b"/" { buf[bi] = c; bi += 1; }
-                bi = format_decimal(&mut buf, bi, total as u64);
-                reply_blob(&buf[..bi]);
-                return;
-            }
-            BUILTIN_REG_IDX += 1;
+        if BUILTIN_REG_IDX >= total {
+            reply_blob(b"all-registered");
+            return;
         }
-
-        if ASYNC_RESUMING {
-            asyncify_stop_rewind();
-            ASYNC_RESUMING = false;
+        let (n, b) = BUILTIN_BCL[BUILTIN_REG_IDX];
+        print(b"[register_chunk] before add1");
+        add1(n, b);
+        print(b"[register_chunk] after add1");
+        let st = asyncify_get_state();
+        if st == 1 {
+            asyncify_stop_unwind();
+            ASYNC_RESUMING = true;
+            let mut buf = [0u8; 96];
+            let mut bi = 0;
+            for &c in b"in_progress " { buf[bi] = c; bi += 1; }
+            bi = format_decimal(&mut buf, bi, BUILTIN_REG_IDX as u64);
+            for &c in b"/" { buf[bi] = c; bi += 1; }
+            bi = format_decimal(&mut buf, bi, total as u64);
+            reply_blob(&buf[..bi]);
+            return;
         }
-        reply_blob(b"all-registered");
+        // add1 completed normally (no unwind). Advance to the next BCL
+        // and reply — caller invokes register_chunk again for the next
+        // BCL. One BCL per message keeps inter-BCL mono work bounded.
+        BUILTIN_REG_IDX += 1;
+        let mut buf = [0u8; 96];
+        let mut bi = 0;
+        for &c in b"completed " { buf[bi] = c; bi += 1; }
+        bi = format_decimal(&mut buf, bi, BUILTIN_REG_IDX as u64);
+        for &c in b"/" { buf[bi] = c; bi += 1; }
+        bi = format_decimal(&mut buf, bi, total as u64);
+        reply_blob(&buf[..bi]);
     }
 }
 
