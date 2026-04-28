@@ -42,6 +42,61 @@ as a string pointer). So mono never even reaches the point where it has
 a real corelib name to look up — something earlier in the load_corlib
 flow returns NULL/garbage to its caller.
 
+## Mono source confirmed (agent research)
+
+`mono_assembly_load_corlib` source: `src/mono/mono/metadata/assembly.c:2675`
+on release/10.0.
+
+Tries in order:
+1. `invoke_assembly_preload_hook(req.alc, aname, NULL)` where
+   `aname = mono_assembly_name_new("System.Private.CoreLib")` (no .dll)
+2. If `MONO_PATH` set: `load_in_path("System.Private.CoreLib.dll", ...)`
+3. **Fallback**: `mono_assembly_request_open("System.Private.CoreLib.dll", ...)`
+   — this is the bundle path
+4. Webcil variants if `ENABLE_WEBCIL`
+5. If still NULL: `g_assert(corlib)` at line 2718 → exit(1).
+
+Bundled-resources lookup (`bundled-resources.c:78-107`) uses
+`key_from_id` which strips known extensions (`.dll`, `.webcil`,
+`.wasm`) and re-appends `dll`. Hash via `MurmurHash3_32_streaming`,
+equality via plain `strcmp` — **case sensitive, no path stripping**.
+
+`mono_wasm_add_assembly` (`src/mono/browser/runtime/driver.c:107`)
+calls `mono_bundled_resources_add_assembly_resource(name, name, ...)`
+with the name AS-IS — no normalization.
+
+So canonical key = bare `<Name>.dll`. **We register
+`"System.Private.CoreLib.dll"` already.** Name match should be
+exact. The g_assert is firing for some OTHER reason than name
+mismatch.
+
+## Remaining hypotheses (after agent research)
+
+1. **Cached bytes pointer staleness**: multi-memory-lowering's
+   `emscripten_resize_heap` does `memory.copy` + `global.set 430` —
+   it MOVES dotnet's memory base when growing. Pointers cached
+   before a grow become stale (point to physically-moved data). Our
+   `add1` caches `ADD1_CACHED_BYTES`; if a grow happens between the
+   register_chunk-loop messages and `boot_mono`, mono dereferences
+   the cached ptr at the wrong location.
+2. **dn_simdhash table state corruption from asyncify**: asyncify
+   instruments the bundled-resources insert chain. If the rewind
+   doesn't perfectly restore some non-local state (e.g. the table's
+   bucket-array ptr stored in a struct field), the bucket pointer
+   itself might end up stale.
+3. **Bundled-resources hook not actually installed**: mono's
+   preload hook chain (`mono_install_assembly_preload_hook`) may
+   not be wired up if some init step we skipped or chunked broke
+   the hook installation.
+
+## Diagnostic step that would be most informative next
+
+Write a `canister_update probe_bundled_get` that calls
+`mono_bundled_resources_get_assembly_resource(name)` directly with
+"System.Private.CoreLib.dll", AFTER register_chunk completes BUT
+BEFORE boot_mono. Returns the looked-up value (NULL or a real
+struct ptr). That definitively tells us whether registration took.
+
 ## Top suspects for the remaining issue
 
 1. **mono_wasm_load_runtime args malformed**: The TPA value ("/managed/
