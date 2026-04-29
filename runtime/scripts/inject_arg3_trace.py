@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""inject_arg_trace — prepend `local.get 0; call $<logger>` at the
-entry body of a single named function. Lets us see what string
-pointer mono passes as that function's first arg without disturbing
-the function's signature or stack discipline.
+"""inject_arg3_trace — prepend `local.get 0; local.get 1; local.get 2;
+call $<logger>` at the entry body of a single named function. Same
+pattern as inject_arg_trace but for 3-arg functions where we want to
+see all three args (e.g. mono_class_load_from_name(image, ns, name)).
 
 Usage:
-  inject_arg_trace.py <in.wasm> <out.wasm> <fn_name> [<logger>]
-
-If <logger> is omitted, defaults to `wasp_log_str_ptr`.
+  inject_arg3_trace.py <in.wasm> <out.wasm> <fn_name> <logger>
 """
 
 import re
@@ -18,11 +16,10 @@ from pathlib import Path
 
 
 def main():
-    if len(sys.argv) not in (4, 5):
+    if len(sys.argv) != 5:
         print(__doc__, file=sys.stderr)
         return 2
-    in_wasm, out_wasm, fn_name = sys.argv[1], sys.argv[2], sys.argv[3]
-    logger = sys.argv[4] if len(sys.argv) == 5 else "wasp_log_str_ptr"
+    in_wasm, out_wasm, fn_name, logger = sys.argv[1:5]
 
     with tempfile.TemporaryDirectory() as td:
         wat = Path(td) / "in.wat"
@@ -30,7 +27,6 @@ def main():
         subprocess.run(["wasm-tools", "print", in_wasm, "-o", str(wat)], check=True)
         text = wat.read_text()
 
-        # Find target function header.
         hdr_re = re.compile(
             rf'^  \(func \${re.escape(fn_name)} \(;\d+;\)[^\n]*$',
             re.MULTILINE,
@@ -41,7 +37,6 @@ def main():
             return 1
         body_start = m.end()
 
-        # If next line is `(local ...)`, inject AFTER it.
         after_hdr = text[body_start + 1:]
         first_line_end = after_hdr.find('\n')
         first_line = after_hdr[:first_line_end] if first_line_end > 0 else ''
@@ -52,6 +47,8 @@ def main():
 
         inject = (
             "\n    local.get 0"
+            "\n    local.get 1"
+            "\n    local.get 2"
             f"\n    call ${logger}"
         )
         new_text = text[:offset] + inject + text[offset:]
@@ -66,7 +63,7 @@ def main():
             print(f"wasm-tools parse failed; check {out_wat}", file=sys.stderr)
             return 1
         print(
-            f"  injected `call ${logger}` at start of ${fn_name}",
+            f"  injected `call ${logger}` (3 args) at start of ${fn_name}",
             file=sys.stderr,
         )
     return 0

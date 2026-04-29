@@ -151,10 +151,12 @@ echo '[7.56/9] inject arg trace at mono_assembly_request_open + bundled_resource
 OUT_TRACE1=$(mktemp -t wasp-trace1.XXXXXX).wasm
 OUT_TRACE2=$(mktemp -t wasp-trace2.XXXXXX).wasm
 OUT_TRACE3=$(mktemp -t wasp-trace3.XXXXXX).wasm
-python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_YIELDED" "$OUT_TRACE1" mono_assembly_request_open || cp "$OUT_YIELDED" "$OUT_TRACE1"
-python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_TRACE1" "$OUT_TRACE2" bundled_resources_get_assembly_resource || cp "$OUT_TRACE1" "$OUT_TRACE2"
-python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_TRACE2" "$OUT_TRACE3" mono_assembly_name_new || cp "$OUT_TRACE2" "$OUT_TRACE3"
-OUT_YIELDED="$OUT_TRACE3"
+python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_YIELDED" "$OUT_TRACE1" mono_assembly_request_open wasp_log_request_open || cp "$OUT_YIELDED" "$OUT_TRACE1"
+python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_TRACE1" "$OUT_TRACE2" bundled_resources_get_assembly_resource wasp_log_bundled_get || cp "$OUT_TRACE1" "$OUT_TRACE2"
+python3 "$RUNTIME/scripts/inject_arg_trace.py" "$OUT_TRACE2" "$OUT_TRACE3" mono_assembly_name_new wasp_log_name_new || cp "$OUT_TRACE2" "$OUT_TRACE3"
+OUT_TRACE4=$(mktemp -t wasp-trace4.XXXXXX).wasm
+python3 "$RUNTIME/scripts/inject_arg3_trace.py" "$OUT_TRACE3" "$OUT_TRACE4" mono_class_load_from_name wasp_log_class_load || cp "$OUT_TRACE3" "$OUT_TRACE4"
+OUT_YIELDED="$OUT_TRACE4"
 
 echo "[7.7/9] wasm-opt --asyncify (post-lowering, scoped onlylist)"
 # Minimized onlylist: only the maybe_yield trigger itself. With this
@@ -261,10 +263,18 @@ WLG_TOK=$(grep -oE "\(func \\\$wasp_log_g_print \(;[0-9]+;\)" "$WAT" | head -1)
 WLG_FN=$(echo "$WLG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 WPBG_TOK=$(grep -oE "\(func \\\$wasp_probe_bundled_get \(;[0-9]+;\)" "$WAT" | head -1)
 WPBG_FN=$(echo "$WPBG_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+SP_TOK=$(grep -oE "\(func \\\$monoeg_g_strdup_printf \(;[0-9]+;\)" "$WAT" | head -1)
+SP_FN=$(echo "$SP_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+WSP_TOK=$(grep -oE "\(func \\\$wasp_g_strdup_printf \(;[0-9]+;\)" "$WAT" | head -1)
+WSP_FN=$(echo "$WSP_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+WBR_TOK=$(grep -oE "\(func \\\$wasp_bundled_resource_get \(;[0-9]+;\)" "$WAT" | head -1)
+WBR_FN=$(echo "$WBR_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 echo "  resolved mono_has_pdb_checksum fn idx = $PDB_FN"
 echo "  resolved bundled_resources_get_assembly_resource fn idx = $BRG_FN"
 echo "  resolved monoeg_g_print fn idx = $GP_FN, wasp_log_g_print = $WLG_FN"
 echo "  resolved wasp_probe_bundled_get fn idx = $WPBG_FN"
+echo "  resolved monoeg_g_strdup_printf fn idx = $SP_FN, wasp_g_strdup_printf = $WSP_FN"
+echo "  resolved wasp_bundled_resource_get fn idx = $WBR_FN"
 rm -f "$WAT"
 
 [ -n "$G7_FN" ] || { echo "  could not resolve g7 (g7=$G7_FN)"; exit 1; }
@@ -311,6 +321,30 @@ if [ -n "$WPBG_FN" ] && [ -n "$BRG_FN" ]; then
     python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$PATCH_INPUT" "$OUT_PROBE" "$WPBG_FN" "$BRG_FN"
     PATCH_INPUT="$OUT_PROBE"
     echo "  patched wasp_probe_bundled_get ($WPBG_FN) → bundled_resources_get_assembly_resource ($BRG_FN)"
+fi
+
+# Replace monoeg_g_strdup_printf with wasp_g_strdup_printf. The native
+# implementation returns zero-filled buffers in our wasi-stub'd
+# environment (printf syscall path is broken), causing
+# mono_assembly_load_corlib's `g_strdup_printf("%s.dll", ...)` to
+# produce an empty filename → mono_assembly_request_open never finds
+# corelib in the bundled table.
+if [ -n "$SP_FN" ] && [ -n "$WSP_FN" ]; then
+    OUT_SDP=$(mktemp -t wasp-sdp.XXXXXX).wasm
+    python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$PATCH_INPUT" "$OUT_SDP" "$SP_FN" "$WSP_FN"
+    PATCH_INPUT="$OUT_SDP"
+    echo "  patched monoeg_g_strdup_printf ($SP_FN) → wasp_g_strdup_printf ($WSP_FN)"
+fi
+
+# Replace mono's bundled_resources_get_assembly_resource (dn_simdhash-
+# backed lookup) with our shadow-map lookup wasp_bundled_resource_get.
+# Our add1 path also populates this shadow map so any name registered
+# via mono_wasm_add_assembly is also findable through this bypass.
+if [ -n "$BRG_FN" ] && [ -n "$WBR_FN" ]; then
+    OUT_WBR=$(mktemp -t wasp-wbr.XXXXXX).wasm
+    python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$PATCH_INPUT" "$OUT_WBR" "$BRG_FN" "$WBR_FN"
+    PATCH_INPUT="$OUT_WBR"
+    echo "  patched bundled_resources_get_assembly_resource ($BRG_FN) → wasp_bundled_resource_get ($WBR_FN)"
 fi
 
 cp "$PATCH_INPUT" "$OUT_P1C"

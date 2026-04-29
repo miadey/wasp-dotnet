@@ -840,32 +840,23 @@ pub extern "C" fn mono_wasm_trace_logger(
             if i >= buf.len() { break; }
             buf[i] = b; i += 1;
         }
-        // Dump first 32 bytes at BOTH candidate addresses as hex so
-        // we can SEE what's actually in memory.
-        for (label, addr) in [
-            (b"raw[" as &[u8], message as u32),
-            (b"mb+[", mb.wrapping_add(message as u32)),
-        ] {
-            for &c in label { if i < buf.len() { buf[i]=c; i+=1; } }
-            for &c in b"]: " { if i < buf.len() { buf[i]=c; i+=1; } }
-            if addr == 0 {
-                for &c in b"NULL" { if i < buf.len() { buf[i]=c; i+=1; } }
-            } else {
-                let p = addr as *const u8;
-                for k in 0..32 {
-                    let b = *p.add(k);
-                    // hex byte + space
-                    let hi = (b >> 4) & 0xF;
-                    let lo = b & 0xF;
-                    if i + 3 > buf.len() { break; }
-                    buf[i] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
-                    buf[i+1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
-                    buf[i+2] = b' ';
-                    i += 3;
-                }
+        // Dump up to 1024 chars of the actual message (mb-relative
+        // addressing) as printable ASCII. This is the assertion text /
+        // log line mono is trying to emit before exit — the most
+        // informative diagnostic we have.
+        for &c in b"text=\"" { if i < buf.len() { buf[i]=c; i+=1; } }
+        if message != 0 {
+            let p = mb.wrapping_add(message as u32) as *const u8;
+            let mut k = 0;
+            while k < 1024 {
+                let b = *p.add(k);
+                if b == 0 { break; }
+                if i >= buf.len() - 4 { break; }
+                buf[i] = if (32..127).contains(&b) || b == b'\n' { b } else { b'.' };
+                i += 1; k += 1;
             }
-            for &c in b" | " { if i < buf.len() { buf[i]=c; i+=1; } }
         }
+        for &c in b"\"" { if i < buf.len() { buf[i]=c; i+=1; } }
         ic_debug_print_bytes(&buf[..i]);
     }
 }

@@ -197,13 +197,9 @@ pub extern "C" fn maybe_yield() {
     unsafe {
         MAYBE_YIELD_CALL_COUNT = MAYBE_YIELD_CALL_COUNT.wrapping_add(1);
         let st = asyncify_get_state();
-        let mut s = [0u8; 32];
-        let mut i = 0;
-        for &c in b"[my] s=" { s[i] = c; i += 1; }
-        i = format_decimal(&mut s, i, st as u64);
-        for &c in b" c=" { s[i] = c; i += 1; }
-        i = format_decimal(&mut s, i, MAYBE_YIELD_CALL_COUNT as u64);
-        print(&s[..i]);
+        // [my] log silenced — was flooding the log and pushing useful
+        // diagnostics off the dfx canister logs tail. Counter is still
+        // available via canister_query maybe_yield_count.
         if st == 2 {
             asyncify_stop_rewind();
             return;
@@ -310,40 +306,477 @@ pub extern "C" fn canister_query_probe_bundled_get() {
     }
 }
 
-/// Generic string-pointer logger. Logs first 32 bytes as both ASCII
-/// and hex so we can distinguish empty strings, format templates,
-/// and binary structs.
+/// Walk the registered corelib PE → CLI → metadata → tables and report
+/// the TypeDef row count plus the first few type names. If the bytes
+/// mono parses are valid, this should show a row count > 0 and the
+/// first row should be `<Module>` (offset 1 = `System.Object`). If the
+/// row count is 0 or the strings are garbage, mono is parsing the
+/// wrong bytes (addressing convention issue).
+#[export_name = "canister_query dump_corlib_meta"]
+pub extern "C" fn canister_query_dump_corlib_meta() {
+    unsafe {
+        let mut buf = [0u8; 1024];
+        let mut i = 0usize;
+        let bytes_abs = ADD1_CACHED_BYTES as u32;
+        if bytes_abs == 0 {
+            reply_blob(b"corelib not registered");
+            return;
+        }
+        let base = bytes_abs as *const u8;
+
+        macro_rules! emit { ($s:expr) => {
+            for &c in $s.as_bytes() { if i < buf.len() { buf[i] = c; i += 1; } }
+        }; }
+        macro_rules! emit_b { ($s:expr) => {
+            for &c in $s { if i < buf.len() { buf[i] = c; i += 1; } }
+        }; }
+        macro_rules! emit_dec { ($v:expr) => { i = format_decimal(&mut buf, i, $v as u64); }; }
+        macro_rules! emit_hex { ($v:expr) => {
+            let v: u32 = $v;
+            for s in (0..32u32).step_by(4).rev() {
+                let n = ((v >> s) & 0xF) as u8;
+                if i < buf.len() {
+                    buf[i] = if n < 10 { b'0' + n } else { b'a' + n - 10 };
+                    i += 1;
+                }
+            }
+        }; }
+
+        // Helpers to read u16 / u32 little-endian.
+        let rd_u32 = |off: u32| -> u32 {
+            let p = base.add(off as usize) as *const u32;
+            core::ptr::read_unaligned(p)
+        };
+        let rd_u16 = |off: u32| -> u16 {
+            let p = base.add(off as usize) as *const u16;
+            core::ptr::read_unaligned(p)
+        };
+
+        // 1. DOS header — verify "MZ", read e_lfanew at offset 0x3C.
+        let mz = rd_u16(0);
+        emit!("mz=0x"); emit_hex!(mz as u32);
+        let pe_off = rd_u32(0x3C);
+        emit!(" pe_off=0x"); emit_hex!(pe_off);
+
+        // 2. PE signature at pe_off — should be "PE\0\0" (0x00004550).
+        let pe_sig = rd_u32(pe_off);
+        emit!(" pe_sig=0x"); emit_hex!(pe_sig);
+        if pe_sig != 0x4550 {
+            emit!(" BAD_PE_SIG"); reply_blob(&buf[..i]); return;
+        }
+
+        // 3. COFF header (20 bytes) at pe_off+4. Optional header follows.
+        let coff_off = pe_off + 4;
+        let opt_hdr_size = rd_u16(coff_off + 16);
+        let opt_off = coff_off + 20;
+        let magic = rd_u16(opt_off);
+        emit!(" opt_magic=0x"); emit_hex!(magic as u32);
+        emit!(" opt_size="); emit_dec!(opt_hdr_size);
+
+        // 4. Data directories: PE32 (magic 0x10B) — directories start at
+        //    opt_off + 96. PE32+ (magic 0x20B) — opt_off + 112. CLR
+        //    runtime header is directory index 14 (offset = base + 14*8).
+        let dirs_off = if magic == 0x10B { opt_off + 96 } else { opt_off + 112 };
+        let cli_dir_off = dirs_off + 14 * 8;
+        let cli_rva = rd_u32(cli_dir_off);
+        let cli_size = rd_u32(cli_dir_off + 4);
+        emit!(" cli_rva=0x"); emit_hex!(cli_rva);
+        emit!(" cli_size="); emit_dec!(cli_size);
+        if cli_rva == 0 {
+            emit!(" NO_CLI_DIR"); reply_blob(&buf[..i]); return;
+        }
+
+        // 5. Resolve CLI RVA to file offset by walking section headers.
+        // Number of sections is at coff_off+2.
+        let n_sec = rd_u16(coff_off + 2) as u32;
+        let sec_table = opt_off + opt_hdr_size as u32;
+        let rva_to_off = |rva: u32| -> u32 {
+            for s in 0..n_sec {
+                let s_off = sec_table + s * 40;
+                let s_va = rd_u32(s_off + 12);
+                let s_size = rd_u32(s_off + 8);
+                let s_rawoff = rd_u32(s_off + 20);
+                if rva >= s_va && rva < s_va + s_size {
+                    return rva - s_va + s_rawoff;
+                }
+            }
+            0
+        };
+        let cli_off = rva_to_off(cli_rva);
+        emit!(" cli_off=0x"); emit_hex!(cli_off);
+        if cli_off == 0 {
+            emit!(" CLI_RVA_UNRESOLVED"); reply_blob(&buf[..i]); return;
+        }
+
+        // 6. CLI header — Metadata directory at offset 8 in CLI header
+        //    (RVA, size).
+        let md_rva = rd_u32(cli_off + 8);
+        let md_size = rd_u32(cli_off + 12);
+        let md_off = rva_to_off(md_rva);
+        emit!(" md_off=0x"); emit_hex!(md_off);
+        emit!(" md_size="); emit_dec!(md_size);
+        if md_off == 0 {
+            emit!(" MD_UNRESOLVED"); reply_blob(&buf[..i]); return;
+        }
+
+        // 7. Metadata root: signature 0x424A5342 ("BSJB").
+        let md_sig = rd_u32(md_off);
+        emit!(" md_sig=0x"); emit_hex!(md_sig);
+        if md_sig != 0x424A5342 {
+            emit!(" BAD_MD_SIG"); reply_blob(&buf[..i]); return;
+        }
+
+        // Skip version-string (length at md_off+12, padded to 4).
+        let vlen = rd_u32(md_off + 12);
+        let pad_vlen = (vlen + 3) & !3u32;
+        let post_vstr = md_off + 16 + pad_vlen;
+        // Flags(2) + StreamCount(2) at post_vstr.
+        let n_streams = rd_u16(post_vstr + 2) as u32;
+        emit!(" streams="); emit_dec!(n_streams);
+
+        // 8. Iterate stream headers, find #~ (tables) and #Strings.
+        let mut sh_off = post_vstr + 4;
+        let mut tables_off: u32 = 0;
+        let mut strings_off: u32 = 0;
+        let mut strings_size: u32 = 0;
+        for _ in 0..n_streams {
+            let s_off = rd_u32(sh_off);
+            let s_size = rd_u32(sh_off + 4);
+            // Read NUL-terminated name (up to 32 bytes, padded to 4).
+            let name_start = sh_off + 8;
+            let mut nm = [0u8; 16];
+            let mut nl = 0;
+            for k in 0..16 {
+                let b = *base.add((name_start + k as u32) as usize);
+                if b == 0 { break; }
+                nm[nl] = b; nl += 1;
+            }
+            let pad_nl = ((nl as u32 + 1 + 3) & !3u32) as usize;
+            sh_off = name_start + pad_nl as u32;
+            if &nm[..nl] == b"#~" || &nm[..nl] == b"#-" {
+                tables_off = md_off + s_off;
+            } else if &nm[..nl] == b"#Strings" {
+                strings_off = md_off + s_off;
+                strings_size = s_size;
+            }
+        }
+        emit!(" tables_off=0x"); emit_hex!(tables_off);
+        emit!(" strings_off=0x"); emit_hex!(strings_off);
+        emit!(" strings_size="); emit_dec!(strings_size);
+
+        if tables_off == 0 || strings_off == 0 {
+            emit!(" MISSING_STREAM"); reply_blob(&buf[..i]); return;
+        }
+
+        // 9. Tables stream header: u32 reserved, u8 major, u8 minor,
+        //    u8 heap_sizes, u8 reserved, u64 valid_mask, u64 sorted_mask,
+        //    then u32 row counts for each set bit in valid_mask.
+        let valid_lo = rd_u32(tables_off + 8);
+        let valid_hi = rd_u32(tables_off + 12);
+        emit!(" valid_lo=0x"); emit_hex!(valid_lo);
+        emit!(" valid_hi=0x"); emit_hex!(valid_hi);
+
+        // Count rows for table 0x02 = TypeDef. Iterate set bits 0..table_idx
+        // to find offset.
+        let mut row_off = tables_off + 24;
+        let mut typedef_rows: u32 = 0;
+        for tbl in 0..64u32 {
+            let mask = if tbl < 32 { (valid_lo >> tbl) & 1 } else { (valid_hi >> (tbl - 32)) & 1 };
+            if mask == 0 { continue; }
+            let rows = rd_u32(row_off);
+            if tbl == 0x02 {
+                typedef_rows = rows;
+                break;
+            }
+            row_off += 4;
+        }
+        emit!(" typedef_rows="); emit_dec!(typedef_rows);
+
+        // 10. Read first 64 bytes of strings heap (skip the leading NUL).
+        emit!(" strings_head=\"");
+        for k in 1..64u32 {
+            if k >= strings_size { break; }
+            let b = *base.add((strings_off + k) as usize);
+            if b == 0 {
+                if i < buf.len() { buf[i] = b'|'; i += 1; }
+            } else if (32..127).contains(&b) {
+                if i < buf.len() { buf[i] = b; i += 1; }
+            } else {
+                if i < buf.len() { buf[i] = b'.'; i += 1; }
+            }
+        }
+        emit!("\"");
+
+        reply_blob(&buf[..i]);
+    }
+}
+
+unsafe fn log_tagged(tag: &[u8], p: u32) {
+    let mb = wasp_get_mem_base();
+    let mut buf = [0u8; 600];
+    let mut i = 0;
+    for &c in b"[" { buf[i] = c; i += 1; }
+    for &c in tag { buf[i] = c; i += 1; }
+    for &c in b"] p=" { buf[i] = c; i += 1; }
+    i = format_decimal(&mut buf, i, p as u64);
+    for &c in b" raw=\"" { buf[i] = c; i += 1; }
+    if p != 0 {
+        let abs_raw = p as *const u8;
+        for k in 0..64u32 {
+            let b = *abs_raw.add(k as usize);
+            if b == 0 { break; }
+            if i >= buf.len() - 16 { break; }
+            buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+            i += 1;
+        }
+    }
+    for &c in b"\" mb+p=\"" { buf[i] = c; i += 1; }
+    if p != 0 {
+        let abs_mb = mb.wrapping_add(p) as *const u8;
+        for k in 0..64u32 {
+            let b = *abs_mb.add(k as usize);
+            if b == 0 { break; }
+            if i >= buf.len() - 4 { break; }
+            buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+            i += 1;
+        }
+    }
+    for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+    debug_print(buf.as_ptr() as u32, i as u32);
+}
+
+#[no_mangle] pub extern "C" fn wasp_log_request_open(p: u32) { unsafe { log_tagged(b"REQ_OPEN", p); } }
+#[no_mangle] pub extern "C" fn wasp_log_bundled_get(p: u32) { unsafe { log_tagged(b"BUND_GET", p); } }
+#[no_mangle] pub extern "C" fn wasp_log_name_new(p: u32)    { unsafe { log_tagged(b"NAME_NEW", p); } }
+
+/// 3-arg entry trace for `mono_class_load_from_name(image, name_space,
+/// name)`. Image is opaque (just print as decimal); name_space and
+/// name are C strings dereferenced via mb. Wired in 30_merge.sh via
+/// inject_arg3_trace.py.
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn wasp_log_class_load(image: u32, ns_rel: u32, name_rel: u32) {
+    unsafe {
+        let mb = wasp_get_mem_base();
+        let mut buf = [0u8; 320];
+        let mut i = 0;
+        for &c in b"[CLASS_LOAD] image=" { buf[i] = c; i += 1; }
+        i = format_decimal(&mut buf, i, image as u64);
+        for &c in b" ns=\"" { buf[i] = c; i += 1; }
+        if ns_rel != 0 {
+            let p = mb.wrapping_add(ns_rel) as *const u8;
+            let mut k = 0;
+            while k < 128 {
+                let b = *p.add(k); if b == 0 { break; }
+                if i >= buf.len() - 4 { break; }
+                buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                i += 1; k += 1;
+            }
+        }
+        for &c in b"\" name=\"" { buf[i] = c; i += 1; }
+        if name_rel != 0 {
+            let p = mb.wrapping_add(name_rel) as *const u8;
+            let mut k = 0;
+            while k < 128 {
+                let b = *p.add(k); if b == 0 { break; }
+                if i >= buf.len() - 4 { break; }
+                buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                i += 1; k += 1;
+            }
+        }
+        for &c in b"\"" { buf[i] = c; i += 1; }
+        debug_print(buf.as_ptr() as u32, i as u32);
+    }
+}
+
+/// Replacement for monoeg_g_strdup_printf. Mono's load_corlib path
+/// uses this with a single `%s` (e.g. "%s.dll") to build the corlib
+/// filename. Our environment's printf returns zero-filled buffers
+/// (root cause unclear — likely wasi-stub'd write/syscall path),
+/// breaking the filename and causing mono_assembly_request_open to
+/// receive an empty string. This replacement handles the common
+/// "<prefix>%s<suffix>" format directly.
+///
+/// Args (mono ABI):
+///   fmt_rel  — dotnet-relative (mem_base + fmt_rel = absolute) C string
+///   va_rel   — dotnet-relative pointer to the va_args buffer; the
+///              first 4 bytes hold the FIRST var-arg (a string ptr,
+///              also dotnet-relative).
+/// Returns the dotnet-relative offset of a malloc'd, NUL-terminated
+/// formatted string.
+#[no_mangle]
+pub extern "C" fn wasp_g_strdup_printf(fmt_rel: u32, va_rel: u32) -> u32 {
+    unsafe {
+        let mb = wasp_get_mem_base();
+        let fmt = mb.wrapping_add(fmt_rel) as *const u8;
+        let mut flen = 0usize;
+        while *fmt.add(flen) != 0 { flen += 1; if flen > 4096 { break; } }
+        let va_base = mb.wrapping_add(va_rel) as *const u32;
+        // Pass 1: compute output length.
+        let mut out_len = 0usize;
+        let mut va_idx = 0usize;
+        let mut i = 0usize;
+        while i < flen {
+            if *fmt.add(i) != b'%' || i + 1 >= flen {
+                out_len += 1; i += 1; continue;
+            }
+            // Skip flags / width / precision / length (very loose).
+            let mut j = i + 1;
+            while j < flen {
+                let c = *fmt.add(j);
+                if c == b'%' || c == b's' || c == b'd' || c == b'u' || c == b'x'
+                   || c == b'X' || c == b'p' || c == b'c' || c == b'i' { break; }
+                j += 1;
+            }
+            if j >= flen { out_len += j - i; i = j; continue; }
+            let conv = *fmt.add(j);
+            match conv {
+                b'%' => { out_len += 1; }
+                b's' => {
+                    let arg_rel = *va_base.add(va_idx); va_idx += 1;
+                    if arg_rel != 0 {
+                        let p = mb.wrapping_add(arg_rel) as *const u8;
+                        let mut k = 0; while *p.add(k) != 0 { k += 1; if k > 4096 { break; } }
+                        out_len += k;
+                    } else { out_len += 6; }
+                }
+                b'd' | b'i' | b'u' | b'x' | b'X' | b'p' => { out_len += 11; va_idx += 1; }
+                b'c' => { out_len += 1; va_idx += 1; }
+                _ => { out_len += j - i + 1; }
+            }
+            i = j + 1;
+        }
+        let buf = mono_embed::malloc(out_len + 1) as *mut u8;
+        if buf.is_null() { return 0; }
+        // Pass 2: write.
+        va_idx = 0; i = 0; let mut o = 0usize;
+        while i < flen {
+            if *fmt.add(i) != b'%' || i + 1 >= flen {
+                *buf.add(o) = *fmt.add(i); o += 1; i += 1; continue;
+            }
+            let mut j = i + 1;
+            while j < flen {
+                let c = *fmt.add(j);
+                if c == b'%' || c == b's' || c == b'd' || c == b'u' || c == b'x'
+                   || c == b'X' || c == b'p' || c == b'c' || c == b'i' { break; }
+                j += 1;
+            }
+            if j >= flen {
+                let mut k = i;
+                while k < j { *buf.add(o) = *fmt.add(k); o += 1; k += 1; }
+                i = j; continue;
+            }
+            let conv = *fmt.add(j);
+            match conv {
+                b'%' => { *buf.add(o) = b'%'; o += 1; }
+                b's' => {
+                    let arg_rel = *va_base.add(va_idx); va_idx += 1;
+                    if arg_rel != 0 {
+                        let p = mb.wrapping_add(arg_rel) as *const u8;
+                        let mut k = 0;
+                        while *p.add(k) != 0 {
+                            *buf.add(o) = *p.add(k); o += 1; k += 1;
+                            if k > 4096 { break; }
+                        }
+                    } else { for &c in b"(null)" { *buf.add(o) = c; o += 1; } }
+                }
+                b'd' | b'i' => {
+                    let v = *va_base.add(va_idx) as i32; va_idx += 1;
+                    let mut tmp = [0u8; 16]; let mut ti = 0;
+                    let neg = v < 0;
+                    let mut n = if neg { (-(v as i64)) as u64 } else { v as u64 };
+                    if n == 0 { tmp[0] = b'0'; ti = 1; }
+                    while n > 0 { tmp[ti] = b'0' + (n % 10) as u8; n /= 10; ti += 1; }
+                    if neg { *buf.add(o) = b'-'; o += 1; }
+                    while ti > 0 { ti -= 1; *buf.add(o) = tmp[ti]; o += 1; }
+                }
+                b'u' => {
+                    let mut n = *va_base.add(va_idx) as u64; va_idx += 1;
+                    let mut tmp = [0u8; 16]; let mut ti = 0;
+                    if n == 0 { tmp[0] = b'0'; ti = 1; }
+                    while n > 0 { tmp[ti] = b'0' + (n % 10) as u8; n /= 10; ti += 1; }
+                    while ti > 0 { ti -= 1; *buf.add(o) = tmp[ti]; o += 1; }
+                }
+                b'x' | b'X' | b'p' => {
+                    let mut n = *va_base.add(va_idx) as u64; va_idx += 1;
+                    let mut tmp = [0u8; 16]; let mut ti = 0;
+                    if n == 0 { tmp[0] = b'0'; ti = 1; }
+                    while n > 0 {
+                        let nib = (n & 0xF) as u8;
+                        tmp[ti] = if nib < 10 { b'0' + nib }
+                                   else if conv == b'X' { b'A' + nib - 10 }
+                                   else { b'a' + nib - 10 };
+                        n >>= 4; ti += 1;
+                    }
+                    while ti > 0 { ti -= 1; *buf.add(o) = tmp[ti]; o += 1; }
+                }
+                b'c' => { *buf.add(o) = (*va_base.add(va_idx) & 0xFF) as u8; va_idx += 1; o += 1; }
+                _ => {
+                    let mut k = i;
+                    while k <= j { *buf.add(o) = *fmt.add(k); o += 1; k += 1; }
+                }
+            }
+            i = j + 1;
+        }
+        *buf.add(o) = 0;
+        // One-line log.
+        let mut log = [0u8; 320]; let mut li = 0;
+        for &c in b"[printf] fmt=\"" { log[li] = c; li += 1; }
+        let mut k2 = 0;
+        while k2 < flen && li < 100 {
+            let b = *fmt.add(k2);
+            log[li] = if (32..127).contains(&b) { b } else { b'.' };
+            li += 1; k2 += 1;
+        }
+        for &c in b"\" out=\"" { log[li] = c; li += 1; }
+        let mut k3 = 0;
+        while k3 < o && li < 280 {
+            let b = *buf.add(k3);
+            log[li] = if (32..127).contains(&b) { b } else { b'.' };
+            li += 1; k3 += 1;
+        }
+        for &c in b"\"" { log[li] = c; li += 1; }
+        debug_print(log.as_ptr() as u32, li as u32);
+        (buf as u32).wrapping_sub(mb)
+    }
+}
+
+/// Generic string-pointer logger. Logs the first 32 bytes at both
+/// addressing conventions: `p` raw (absolute) and `mb+p` (mem_base
+/// relative). One of the two must hold the actual C string mono
+/// passed; comparing both pins down which convention this fn uses.
 #[no_mangle]
 pub extern "C" fn wasp_log_str_ptr(p: u32) {
     unsafe {
         let mb = wasp_get_mem_base();
-        let mut buf = [0u8; 400];
+        let mut buf = [0u8; 600];
         let mut i = 0;
         for &c in b"[trace] p=" { buf[i] = c; i += 1; }
         i = format_decimal(&mut buf, i, p as u64);
-        for &c in b" hex=" { buf[i] = c; i += 1; }
+        // raw[p] view
+        for &c in b" raw_ascii=\"" { buf[i] = c; i += 1; }
         if p != 0 {
-            let abs = mb.wrapping_add(p) as *const u8;
-            for k in 0..32u32 {
-                let b = *abs.add(k as usize);
-                let hi = (b >> 4) & 0xF;
-                let lo = b & 0xF;
-                if i + 3 > buf.len() { break; }
-                buf[i] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
-                buf[i+1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
-                buf[i+2] = b' ';
-                i += 3;
-            }
-            for &c in b"| ascii=\"" { if i < buf.len() { buf[i]=c; i+=1; } }
+            let abs_raw = p as *const u8;
             for k in 0..64u32 {
-                let b = *abs.add(k as usize);
+                let b = *abs_raw.add(k as usize);
+                if b == 0 { break; }
+                if i >= buf.len() - 16 { break; }
+                buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                i += 1;
+            }
+        }
+        for &c in b"\" mb+p_ascii=\"" { buf[i] = c; i += 1; }
+        if p != 0 {
+            let abs_mb = mb.wrapping_add(p) as *const u8;
+            for k in 0..64u32 {
+                let b = *abs_mb.add(k as usize);
                 if b == 0 { break; }
                 if i >= buf.len() - 4 { break; }
                 buf[i] = if (32..127).contains(&b) { b } else { b'.' };
                 i += 1;
             }
-            for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
         }
+        for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
         debug_print(buf.as_ptr() as u32, i as u32);
     }
 }
@@ -576,13 +1009,17 @@ pub extern "C" fn canister_init() {
         mono_embed::__wasm_call_ctors();
     }
     print(b"[wasp-dotnet] canister_init: __wasm_call_ctors done");
-    // Register all 34 BCLs here. canister_init's 1T-instruction budget
-    // (vs 50B per update message) is the only place we can fit the
-    // scalar dn_simdhash insert loop end-to-end. Without this, no
-    // single update can register a single BCL post-table-grow.
-    // BCL registration deferred to register_chunk (asyncify-chunked) —
-    // canister_init's 1T budget is insufficient for all 34 BCLs in
-    // scalar dn_simdhash mode.
+    // Pre-register corelib (BUILTIN_BCL[0]) here. The 1T canister_init
+    // budget covers it comfortably; per-update 50B does not. Advance
+    // BUILTIN_REG_IDX so register_chunk picks up at index 1 for the
+    // remaining 33 BCLs (each small enough to fit one-per-message).
+    unsafe {
+        let (n, b) = BUILTIN_BCL[0];
+        print(b"[wasp-dotnet] canister_init: pre-register corelib");
+        add1(n, b);
+        BUILTIN_REG_IDX = 1;
+        print(b"[wasp-dotnet] canister_init: corelib registered");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +1095,97 @@ unsafe fn simd_map_by_str_mut() -> &'static mut BTreeMap<(u32, Vec<u8>), u32> {
 struct AsmMap(UnsafeCell<Option<BTreeMap<Vec<u8>, u32>>>);
 unsafe impl Sync for AsmMap {}
 static ASM_MAP: AsmMap = AsmMap(UnsafeCell::new(None));
+
+/// Shadow registry for the bundled-resources lookup. Keyed by the
+/// bare assembly name (no NUL); value is the mb-relative pointer to a
+/// `MonoBundledAssemblyResource` struct allocated in mono's heap.
+/// Populated from `add1`; consulted by `wasp_bundled_resource_get`
+/// which replaces `bundled_resources_get_assembly_resource` post-merge
+/// (mono's dn_simdhash bundled-resources table is unreliable in our
+/// build, so we maintain a parallel store).
+struct WaspResources(UnsafeCell<Option<BTreeMap<Vec<u8>, u32>>>);
+unsafe impl Sync for WaspResources {}
+static WASP_RESOURCES: WaspResources = WaspResources(UnsafeCell::new(None));
+
+unsafe fn wasp_resources_mut() -> &'static mut BTreeMap<Vec<u8>, u32> {
+    let slot = &mut *WASP_RESOURCES.0.get();
+    if slot.is_none() { *slot = Some(BTreeMap::new()); }
+    slot.as_mut().unwrap_unchecked()
+}
+
+/// Replacement body for mono's `bundled_resources_get_assembly_resource`.
+/// `id_rel` is mb-relative (mono's standard pointer convention after
+/// multi-memory-lowering). Reads the C string at `mb + id_rel`,
+/// normalises (strip `.dll`/`.webcil`/`.wasm` then re-add `.dll`),
+/// looks up in `WASP_RESOURCES`, and returns the resource struct's
+/// mb-relative pointer (or 0 on miss).
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn wasp_bundled_resource_get(id_rel: u32) -> u32 {
+    unsafe {
+        let mb = wasp_get_mem_base();
+        let id_abs = mb.wrapping_add(id_rel) as *const u8;
+        let mut name = Vec::new();
+        let mut i = 0usize;
+        loop {
+            let b = *id_abs.add(i);
+            if b == 0 { break; }
+            name.push(b);
+            i += 1;
+            if i > 256 { break; }
+        }
+        // key_from_id semantics: strip known extensions, re-add .dll
+        for ext in &[b".dll" as &[u8], b".webcil", b".wasm"] {
+            if name.ends_with(ext) {
+                name.truncate(name.len() - ext.len());
+                break;
+            }
+        }
+        name.extend_from_slice(b".dll");
+        let result = wasp_resources_mut().get(&name).copied().unwrap_or(0);
+        let mut buf = [0u8; 320];
+        let mut k = 0;
+        for &c in b"[wasp_get] " { buf[k] = c; k += 1; }
+        let nm = if name.len() < 60 { name.len() } else { 60 };
+        let mut j = 0;
+        while j < nm { buf[k] = name[j]; k += 1; j += 1; }
+        for &c in b" -> " { buf[k] = c; k += 1; }
+        if result == 0 {
+            for &c in b"NULL" { buf[k] = c; k += 1; }
+        } else {
+            for &c in b"OK rel=" { buf[k] = c; k += 1; }
+            k = format_decimal(&mut buf, k, result as u64);
+            // Dump struct fields and first 8 bytes at data ptr to
+            // verify mono will see valid PE bytes.
+            let s = mb.wrapping_add(result) as *const u32;
+            let type_v = *s.add(0);
+            let name_v = *s.add(4);   // assembly.name @ offset 16
+            let data_v = *s.add(5);   // assembly.data @ offset 20
+            let size_v = *s.add(6);   // assembly.size @ offset 24
+            for &c in b" type=" { buf[k] = c; k += 1; }
+            k = format_decimal(&mut buf, k, type_v as u64);
+            for &c in b" size=" { buf[k] = c; k += 1; }
+            k = format_decimal(&mut buf, k, size_v as u64);
+            for &c in b" data_rel=" { buf[k] = c; k += 1; }
+            k = format_decimal(&mut buf, k, data_v as u64);
+            for &c in b" hdr=" { buf[k] = c; k += 1; }
+            let dp = mb.wrapping_add(data_v) as *const u8;
+            for q in 0..8usize {
+                let b = *dp.add(q);
+                let hi = (b >> 4) & 0xF;
+                let lo = b & 0xF;
+                buf[k] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 }; k += 1;
+                buf[k] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 }; k += 1;
+                buf[k] = b' '; k += 1;
+            }
+            // Use name_v in a side log too (if non-zero).
+            for &c in b"name@" { buf[k] = c; k += 1; }
+            k = format_decimal(&mut buf, k, name_v as u64);
+        }
+        debug_print(buf.as_ptr() as u32, k as u32);
+        result
+    }
+}
 
 unsafe fn asm_map_mut() -> &'static mut BTreeMap<Vec<u8>, u32> {
     let slot = &mut *ASM_MAP.0.get();
@@ -1056,6 +1584,32 @@ unsafe fn add1(name_src: &[u8], bytes_src: &[u8]) {
     let bytes_off = dotnet_mem_offset(bytes);
     let rc = mono_embed::mono_wasm_add_assembly(
         name_off, bytes_off, bytes_src.len() as i32);
+    // ALSO populate WASP_RESOURCES so wasp_bundled_resource_get can
+    // bypass mono's broken dn_simdhash bundled-resources lookup. Build
+    // a MonoBundledAssemblyResource (40 bytes) in mono heap and store
+    // its mb-relative offset keyed by the bare name (without trailing
+    // NUL). Mono's bundled_resources_get_assembly_resource (patched) will
+    // be replaced to call wasp_bundled_resource_get which reads from
+    // this map.
+    {
+        let res = mono_embed::malloc(40) as *mut u32;
+        let name_off_u32 = name_off as u32;
+        let data_off_u32 = bytes_off as u32;
+        *res.add(0) = 1;                          // type = MONO_BUNDLED_ASSEMBLY
+        *res.add(1) = name_off_u32;               // id (mb-relative)
+        *res.add(2) = 458;                         // hash (mono's constant)
+        *res.add(3) = 0;                           // free_data
+        *res.add(4) = name_off_u32;               // name (mb-relative)
+        *res.add(5) = data_off_u32;               // data (mb-relative)
+        *res.add(6) = bytes_src.len() as u32;     // size
+        *res.add(7) = 0;                           // pdb1
+        *res.add(8) = 0;                           // pdb2
+        *res.add(9) = 0;                           // padding
+        let res_rel = (res as u32).wrapping_sub(wasp_get_mem_base());
+        // Strip trailing NUL from key for consistent lookup
+        let key: Vec<u8> = name_src.iter().take_while(|&&b| b != 0).copied().collect();
+        wasp_resources_mut().insert(key, res_rel);
+    }
     let mb_after = wasp_get_mem_base();
     let mut buf = [0u8; 192];
     let mut bi = 0;
@@ -1188,8 +1742,9 @@ pub extern "C" fn canister_update_boot_mono() {
         // triggers but cached HEAPU8 views are not updated). By
         // pre-growing, we hope to keep the dn_simdhash rehash from
         // triggering memory.grow during table init.
-        print(b"[wasp-boot] pre-grow heap by 32MiB");
-        let _ = core::arch::wasm32::memory_grow(0, 512);
+        // pre-grow disabled — it shifts mb mid-flight; canister_init's
+        // 256MiB pre-grow should already provide enough headroom.
+        print(b"[wasp-boot] pre-grow disabled");
         print(b"[wasp-boot] setenv");
         // Mono code does `global.get 7 + arg` to dereference; pointers
         // must be dotnet-relative (caller subtracts DOTNET_MEMORY_BASE).
@@ -1605,11 +2160,16 @@ pub(crate) const DOTNET_MEMORY_BASE: u32 = 2_752_512;
 /// base, which shifts every time fn 5236's grow wrapper runs). Body
 /// is replaced post-merge by `scripts/patch_fn_to_global_get.py` with
 /// a single `global.get 7` instruction.
+///
+/// `#[inline(never)]` + `black_box` are CRITICAL: without them LLVM
+/// inlines the constant return at every call site and the post-merge
+/// patch becomes dead code (no callers ever execute the patched body).
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn wasp_get_g7() -> u32 {
-    // Placeholder — patched post-merge. Returns the static initial
-    // value as a fallback so unpatched builds at least try to function.
-    DOTNET_MEMORY_BASE
+    static mut G7_SENTINEL: u32 = 0;
+    unsafe { core::ptr::write_volatile(&raw mut G7_SENTINEL, 0xC7DE0007); }
+    core::hint::black_box(DOTNET_MEMORY_BASE)
 }
 
 /// Distinct from g7: this returns the multi-memory-lowering mem_base
@@ -1618,12 +2178,16 @@ pub extern "C" fn wasp_get_g7() -> u32 {
 /// 30_merge.sh. Needed for asyncify's buffer pointer math: asyncify's
 /// lowered code reads buffer fields via `mem_base + ptr`, so the ptr
 /// we pass MUST be `abs - mem_base` (not `abs - g7`).
+///
+/// Same inlining concern as `wasp_get_g7` — `#[inline(never)]` +
+/// `black_box` are required so call sites actually issue a `call`
+/// to this function (whose body the post-merge patch replaces).
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn wasp_get_mem_base() -> u32 {
-    // Distinct sentinel write so ICF doesn't merge with wasp_get_g7.
     static mut MEM_BASE_SENTINEL: u32 = 0;
     unsafe { core::ptr::write_volatile(&raw mut MEM_BASE_SENTINEL, 0xDEADBEEF); }
-    DOTNET_MEMORY_BASE
+    core::hint::black_box(DOTNET_MEMORY_BASE)
 }
 
 #[inline]
