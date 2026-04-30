@@ -550,15 +550,26 @@ unsafe fn log_tagged(tag: &[u8], p: u32) {
 #[no_mangle] pub extern "C" fn wasp_log_name_new(p: u32)    { unsafe { log_tagged(b"NAME_NEW", p); } }
 
 /// 3-arg entry trace for `mono_class_load_from_name(image, name_space,
-/// name)`. Image is opaque (just print as decimal); name_space and
-/// name are C strings dereferenced via mb. Wired in 30_merge.sh via
-/// inject_arg3_trace.py.
+/// name)`. Image is mb-relative (mono pointer convention). Dumps both
+/// the args AND key MonoImage fields (raw_data, name, TypeDef row
+/// count, heap_strings pointer) so we can compare mono's view of the
+/// image with our wasp-side PE walker.
+///
+/// MonoImage layout on wasm32 (release/10.0, see metadata-internals.h):
+///   8:   char *raw_data
+///   12:  u32 raw_data_len
+///   20:  char *name
+///   56:  char *raw_metadata
+///   60:  u32 raw_metadata_len
+///   64:  MonoStreamHeader heap_strings { data: ptr@0, size: u32@4 }
+///   128: MonoTableInfo tables[]; one entry = 24 bytes;
+///        tables[TYPEDEF=2].rows = low 24 bits of word at +180
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn wasp_log_class_load(image: u32, ns_rel: u32, name_rel: u32) {
     unsafe {
         let mb = wasp_get_mem_base();
-        let mut buf = [0u8; 320];
+        let mut buf = [0u8; 600];
         let mut i = 0;
         for &c in b"[CLASS_LOAD] image=" { buf[i] = c; i += 1; }
         i = format_decimal(&mut buf, i, image as u64);
@@ -585,6 +596,201 @@ pub extern "C" fn wasp_log_class_load(image: u32, ns_rel: u32, name_rel: u32) {
             }
         }
         for &c in b"\"" { buf[i] = c; i += 1; }
+
+        // Dump the MonoImage struct fields. `image` is mb-relative.
+        if image != 0 {
+            let img = mb.wrapping_add(image) as *const u32;
+            let raw_data_rel = core::ptr::read_unaligned(img.add(2));        // +8
+            let raw_data_len = core::ptr::read_unaligned(img.add(3));        // +12
+            let name_rel_img = core::ptr::read_unaligned(img.add(5));        // +20
+            let raw_meta_rel = core::ptr::read_unaligned(img.add(14));       // +56
+            let strings_data_rel = core::ptr::read_unaligned(img.add(16));   // +64
+            let strings_size = core::ptr::read_unaligned(img.add(17));       // +68
+            let typedef_word: u32 = core::ptr::read_unaligned(
+                (mb.wrapping_add(image).wrapping_add(180)) as *const u32);
+            let typedef_rows = typedef_word & 0x00FF_FFFF;
+
+            for &c in b" | img.raw_data_rel=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, raw_data_rel as u64);
+            for &c in b" len=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, raw_data_len as u64);
+            for &c in b" name_rel=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, name_rel_img as u64);
+            // Read first 32 bytes of the name string at mb+name_rel_img
+            for &c in b" name=\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+            if name_rel_img != 0 {
+                let np = mb.wrapping_add(name_rel_img) as *const u8;
+                for k in 0..40usize {
+                    let b = *np.add(k); if b == 0 { break; }
+                    if i >= buf.len() - 4 { break; }
+                    buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                    i += 1;
+                }
+            }
+            for &c in b"\" raw_meta_rel=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, raw_meta_rel as u64);
+            for &c in b" strings_rel=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, strings_data_rel as u64);
+            for &c in b" strings_size=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, strings_size as u64);
+            for &c in b" typedef_rows=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, typedef_rows as u64);
+            // tables[] is at offset 132 (was 128 before u64 alignment
+            // padding shift). tables[TYPEDEF=2] starts at 132+2*24=180.
+            // Within MonoTableInfo: base@0 (ptr), rows_word@4 where low
+            // 24 bits = rows, upper 8 = row_size.
+            let img_base = mb.wrapping_add(image) as *const u8;
+            let td_base_rel: u32 = core::ptr::read_unaligned(img_base.add(180) as *const u32);
+            let td_rows_word: u32 = core::ptr::read_unaligned(img_base.add(184) as *const u32);
+            let td_rows = td_rows_word & 0x00FF_FFFF;
+            let td_row_size = (td_rows_word >> 24) & 0xFF;
+            for &c in b" td.base_rel=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, td_base_rel as u64);
+            for &c in b" td.rows=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, td_rows as u64);
+            for &c in b" td.row_size=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            i = format_decimal(&mut buf, i, td_row_size as u64);
+
+            // Read TypeDef row 1 (TypeDef[0] = <Module>, [1] = first
+            // real type, expected System.Object). Layout when no large
+            // heaps: u32 flags, u16 name_idx, u16 ns_idx, u16 extends,
+            // u16 fields, u16 methods. With heap_sizes hint bits set,
+            // indexes can be u32.
+            if td_base_rel != 0 && td_rows >= 2 {
+                // row_size 18 => u32 strings heap indexes:
+                //   flags @ 0..4, name @ 4..8, ns @ 8..12,
+                //   extends @ 12..14, fields @ 14..16, methods @ 16..18.
+                let row_abs = mb.wrapping_add(td_base_rel).wrapping_add(td_row_size) as *const u8;
+                let flags: u32 = core::ptr::read_unaligned(row_abs as *const u32);
+                let name_idx: u32 = core::ptr::read_unaligned(row_abs.add(4) as *const u32);
+                let ns_idx: u32 = core::ptr::read_unaligned(row_abs.add(8) as *const u32);
+                for &c in b" td[1].flags=" { if i < buf.len() { buf[i] = c; i += 1; } }
+                i = format_decimal(&mut buf, i, flags as u64);
+                for &c in b" name_idx=" { if i < buf.len() { buf[i] = c; i += 1; } }
+                i = format_decimal(&mut buf, i, name_idx as u64);
+                for &c in b" ns_idx=" { if i < buf.len() { buf[i] = c; i += 1; } }
+                i = format_decimal(&mut buf, i, ns_idx as u64);
+
+                let strings_data_abs = mb.wrapping_add(strings_data_rel) as *const u8;
+                for &c in b" name=\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+                let np = strings_data_abs.add(name_idx as usize);
+                for k in 0..40 {
+                    let b = *np.add(k); if b == 0 { break; }
+                    if i >= buf.len() - 4 { break; }
+                    buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                    i += 1;
+                }
+                for &c in b"\" ns=\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+                let np2 = strings_data_abs.add(ns_idx as usize);
+                for k in 0..40 {
+                    let b = *np2.add(k); if b == 0 { break; }
+                    if i >= buf.len() - 4 { break; }
+                    buf[i] = if (32..127).contains(&b) { b } else { b'.' };
+                    i += 1;
+                }
+                for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+            }
+
+            // Scan strings heap for ALL "Object\0" occurrences (CIL
+            // strings heap supports suffix-sharing, so a type name's
+            // index may point INSIDE a longer string).
+            for &c in b" Object_offsets=[" { if i < buf.len() { buf[i] = c; i += 1; } }
+            let strings_data_abs = mb.wrapping_add(strings_data_rel) as *const u8;
+            let needle = b"Object";
+            let mut object_offsets = [0u32; 16];
+            let mut n_offsets = 0usize;
+            let mut off = 0usize;
+            let max = strings_size as usize;
+            while off + needle.len() < max && n_offsets < 16 {
+                let mut matched = true;
+                for k in 0..needle.len() {
+                    if *strings_data_abs.add(off + k) != needle[k] { matched = false; break; }
+                }
+                if matched && *strings_data_abs.add(off + needle.len()) == 0 {
+                    object_offsets[n_offsets] = off as u32;
+                    if n_offsets > 0 && i < buf.len() { buf[i] = b','; i += 1; }
+                    i = format_decimal(&mut buf, i, off as u64);
+                    n_offsets += 1;
+                }
+                off += 1;
+            }
+            for &c in b"]" { if i < buf.len() { buf[i] = c; i += 1; } }
+
+            // Now find any TypeDef row whose name_idx matches ANY of
+            // those Object offsets.
+            for &c in b" obj_match=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            let mut found_row = u32::MAX;
+            let mut found_idx = u32::MAX;
+            if td_base_rel != 0 && n_offsets > 0 {
+                let mut r = 0u32;
+                'outer: while r < td_rows {
+                    let row_p = mb.wrapping_add(td_base_rel)
+                        .wrapping_add(td_row_size.wrapping_mul(r)) as *const u8;
+                    let nidx: u32 = core::ptr::read_unaligned(row_p.add(4) as *const u32);
+                    let mut k = 0;
+                    while k < n_offsets {
+                        if nidx == object_offsets[k] {
+                            found_row = r;
+                            found_idx = nidx;
+                            break 'outer;
+                        }
+                        k += 1;
+                    }
+                    r += 1;
+                }
+            }
+            if found_row == u32::MAX {
+                for &c in b"NONE" { if i < buf.len() { buf[i] = c; i += 1; } }
+            } else {
+                i = format_decimal(&mut buf, i, found_row as u64);
+                for &c in b"@idx=" { if i < buf.len() { buf[i] = c; i += 1; } }
+                i = format_decimal(&mut buf, i, found_idx as u64);
+            }
+
+            // (Object_rows[] block removed — superseded by obj_match
+            // logic above which scans against ALL Object offsets.)
+
+            // Also: scan strings heap for "System\0" — the namespace.
+            for &c in b" System_at=" { if i < buf.len() { buf[i] = c; i += 1; } }
+            let sys_needle = b"System";
+            let mut sys_found = u32::MAX;
+            let mut soff = 0usize;
+            while soff + sys_needle.len() < strings_size as usize {
+                let mut m = true;
+                for k in 0..sys_needle.len() {
+                    if *strings_data_abs.add(soff + k) != sys_needle[k] { m = false; break; }
+                }
+                if m && *strings_data_abs.add(soff + sys_needle.len()) == 0 {
+                    sys_found = soff as u32;
+                    break;
+                }
+                soff += 1;
+            }
+            if sys_found == u32::MAX {
+                for &c in b"NONE" { if i < buf.len() { buf[i] = c; i += 1; } }
+            } else {
+                i = format_decimal(&mut buf, i, sys_found as u64);
+            }
+            // First few bytes of strings heap to verify it looks real
+            for &c in b" strings_head=\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+            if strings_data_rel != 0 {
+                let sp = mb.wrapping_add(strings_data_rel) as *const u8;
+                for k in 1..48usize {
+                    let b = *sp.add(k);
+                    if i >= buf.len() - 4 { break; }
+                    if b == 0 {
+                        buf[i] = b'|';
+                    } else if (32..127).contains(&b) {
+                        buf[i] = b;
+                    } else {
+                        buf[i] = b'.';
+                    }
+                    i += 1;
+                }
+            }
+            for &c in b"\"" { if i < buf.len() { buf[i] = c; i += 1; } }
+        }
+
         debug_print(buf.as_ptr() as u32, i as u32);
     }
 }
