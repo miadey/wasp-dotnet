@@ -193,6 +193,12 @@ public sealed class IcServer : IServer
             req.ContentLength = 0;
         }
 
+        // RDG-generated body resolvers gate on IHttpRequestBodyDetectionFeature.
+        // DefaultHttpContext doesn't auto-populate it from the headers, so JSON
+        // body binding ends up in the "missing body" path and silently 400s.
+        httpCtx.Features.Set<IHttpRequestBodyDetectionFeature>(
+            new IcRequestBodyDetectionFeature(canHaveBody: icReq.Body.Length > 0));
+
         // Pre-size the response body stream so we can read it back after dispatch.
         httpCtx.Response.Body = new MemoryStream();
 
@@ -241,6 +247,12 @@ public sealed class IcServer : IServer
     }
 
     // ─── Internal adapter ─────────────────────────────────────────────────────
+
+    private sealed class IcRequestBodyDetectionFeature : IHttpRequestBodyDetectionFeature
+    {
+        public IcRequestBodyDetectionFeature(bool canHaveBody) => CanHaveBody = canHaveBody;
+        public bool CanHaveBody { get; }
+    }
 
     // Erases the TContext generic so the static Dispatch thunks can hold a
     // single non-generic reference to the application.

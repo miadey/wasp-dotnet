@@ -83,6 +83,52 @@ matching without the link-generation machinery.
 
 ---
 
+## RDG body binding (typed parameter) — read manually instead
+
+```csharp
+// Don't:  AOT-trims JsonSerializer.DeserializeAsync<Note>(PipeReader, ...) →
+//         EE_MissingMethod at runtime
+app.MapPost("/note", (Note n) => $"got {n.Title}");
+
+// Do:     manual read + deserialize via the typed JsonTypeInfo
+app.MapPost("/note", async (HttpContext ctx) =>
+{
+    using var sr = new StreamReader(ctx.Request.Body);
+    var json = await sr.ReadToEndAsync();
+    var note = JsonSerializer.Deserialize(json, NoteJsonContext.Default.Note);
+    return note is null ? Results.BadRequest() : Results.Text($"got {note.Title}");
+});
+```
+
+The .NET 10 `RequestDelegateGenerator` emits body-binding code that calls
+`JsonSerializer.DeserializeAsync<T>(PipeReader, JsonTypeInfo<T>, CancellationToken)`
+through a `Func<>` indirection the AOT trimmer can't follow. The closed
+generic instantiation gets trimmed and the canister returns 500 with
+`EE_MissingMethod`. Reading the body and deserializing via the source-gen
+typed `JsonTypeInfo` directly is AOT-clean and recommended.
+
+Source-gen result writes (`Results.Json(value, JsonTypeInfo)`) and string
+returns work as expected; only typed-parameter body binding is affected.
+
+## JsonSerializerContext setup
+
+`WebApplication.CreateEmptyBuilder` does not register `JsonOptions` with the
+default reflection resolver, so source-gen contexts must be wired explicitly:
+
+```csharp
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(Note))]
+[JsonSerializable(typeof(object))]  // RDG asks for typeof(object) at startup
+internal partial class MyJsonContext : JsonSerializerContext { }
+
+builder.Services.ConfigureHttpJsonOptions(o =>
+    o.SerializerOptions.TypeInfoResolver = MyJsonContext.Default);
+```
+
+The `typeof(object)` entry is required: the RDG calls
+`JsonSerializerOptions.GetTypeInfo(typeof(object))` once during
+`MapPost(...)` setup, and a missing entry crashes the resolver.
+
 ## Verification
 
 A canister that exercises a banned path returns:

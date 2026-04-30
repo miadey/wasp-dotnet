@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <NativeLib>Shared</NativeLib>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <RootNamespace>WaspSample.AspNetCoreEndpoints</RootNamespace>
+    <AssemblyName>AspNetCoreEndpoints</AssemblyName>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <SelfContained>true</SelfContained>
+    <NoWarn>$(NoWarn);IL2026;IL3050;CA2255</NoWarn>
+    <IlcLlvmTarget>wasm32-wasi</IlcLlvmTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.7.0-preview00010" />
+    <PackageReference Include="runtime.linux-x64.Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-alpha.1.25162.1" />
+    <ProjectReference Include="..\..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+    <ProjectReference Include="..\..\Wasp.AspNetCore\Wasp.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\Wasp.AspNetCore.SourceGenerator\Wasp.AspNetCore.SourceGenerator.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <TrimmerRootAssembly Include="AspNetCoreEndpoints" />
+    <TrimmerRootAssembly Include="Wasp.IcCdk" />
+    <TrimmerRootAssembly Include="Wasp.AspNetCore" />
+    <UnmanagedEntryPointsAssembly Include="AspNetCoreEndpoints" />
+    <UnmanagedEntryPointsAssembly Include="Wasp.AspNetCore" />
+  </ItemGroup>
+
+  <Target Name="StripWasmComponentTypeWit" BeforeTargets="LinkNativeLlvm">
+    <ItemGroup>
+      <WasmComponentTypeWit Remove="@(WasmComponentTypeWit)" />
+    </ItemGroup>
+  </Target>
+
+  <Import Project="..\..\Wasp.AspNetCore\Wasp.AspNetCore.targets" />
+
+</Project>
