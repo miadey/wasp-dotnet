@@ -1,0 +1,30 @@
+<Project>
+
+  <!-- Wasp.AspNetCore consumer setup. Import from a leaf canister csproj:
+       <Import Project="..\..\Wasp.AspNetCore\Wasp.AspNetCore.targets" />.
+       Provides an IlcReference glob over the AspNet shared framework and an
+       IlcArg substitution= pointing at this package's ILLink.Substitutions.xml
+       (Directory.Exists, PhysicalFileProvider ctor — see UNSUPPORTED.md).
+       Consumer remains responsible for: FrameworkReference Microsoft.AspNetCore.App,
+       ProjectReferences to Wasp.IcCdk + Wasp.AspNetCore, TrimmerRootAssembly +
+       UnmanagedEntryPointsAssembly entries, and the standard NativeAOT-LLVM csproj
+       knobs (NativeLib=Shared, RuntimeIdentifier=wasi-wasm, IlcLlvmTarget=wasm32-wasi).
+  -->
+
+  <PropertyGroup>
+    <_WaspAspNetCoreDir>$(MSBuildThisFileDirectory)</_WaspAspNetCoreDir>
+    <_WaspAspNetCoreSubstitutions>$(_WaspAspNetCoreDir)ILLink.Substitutions.xml</_WaspAspNetCoreSubstitutions>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- AspNet impl IL (linux-x64 paths; the IL is platform-independent;
+         wasi-wasm runtime pack does not exist). Glob picks up any installed
+         Microsoft.AspNetCore.App version. -->
+    <IlcReference Include="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/*.dll" />
+
+    <!-- Cross-assembly trim-time substitutions. Embedded substitutions in the
+         consumer assembly are rejected (IL2101); pass via substitution arg. -->
+    <IlcArg Include="$([MSBuild]::Escape('--substitution='))$(_WaspAspNetCoreSubstitutions)" />
+  </ItemGroup>
+
+</Project>

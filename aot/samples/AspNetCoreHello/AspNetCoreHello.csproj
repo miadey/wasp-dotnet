@@ -14,17 +14,9 @@
     <PublishTrimmed>true</PublishTrimmed>
     <TrimMode>partial</TrimMode>
     <SelfContained>true</SelfContained>
-    <NoWarn>$(NoWarn);IL2026;IL3050</NoWarn>
+    <NoWarn>$(NoWarn);IL2026;IL3050;CA2255</NoWarn>
     <IlcLlvmTarget>wasm32-wasi</IlcLlvmTarget>
   </PropertyGroup>
-
-  <ItemGroup>
-    <!-- Cross-assembly trim-time substitutions for framework methods that
-         hit the missing canister filesystem. Embedding via EmbeddedResource
-         is rejected (IL2101) because consumer assemblies can't substitute
-         types in referenced framework dlls; pass the xml directly to ilc. -->
-    <IlcArg Include="$([MSBuild]::Escape('--substitution='))$(MSBuildProjectDirectory)/ILLink.Substitutions.xml" />
-  </ItemGroup>
 
   <ItemGroup>
     <!-- Microsoft.AspNetCore.App must be referenced directly here, even though
@@ -49,14 +41,8 @@
     </ItemGroup>
   </Target>
 
-  <!-- NativeAOT-LLVM doesn't ship Microsoft.AspNetCore.App.Runtime.wasi-wasm, so
-       the framework reference resolves at C# compile time but the impl dlls aren't
-       fed to ilc, causing "Failed to load assembly Microsoft.AspNetCore.Hosting.*"
-       when ilc walks IcServer's metadata. The IL is platform-independent, so pass
-       the linux-x64 impl dlls (present in the SDK's shared framework directory)
-       directly via <IlcReference>. -->
-  <ItemGroup>
-    <IlcReference Include="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/10.0.7/*.dll" />
-  </ItemGroup>
+  <!-- Pulls in the AspNet shared-framework IlcReference glob and the trim-time
+       substitutions xml for filesystem-hostile framework methods. -->
+  <Import Project="..\..\Wasp.AspNetCore\Wasp.AspNetCore.targets" />
 
 </Project>
