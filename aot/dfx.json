@@ -34,6 +34,21 @@
     "blazorchat": {
       "type": "assets",
       "source": ["samples/BlazorChat/bin/Release/net10.0/publish/wwwroot"]
+    },
+    "aspnetcorehello": {
+      "type": "custom",
+      "wasm": "samples/AspNetCoreHello/AspNetCoreHello.canister.wasm",
+      "candid": "samples/AspNetCoreHello/aspnetcorehello.did",
+      "build": []
+    }
+  },
+  "networks": {
+    "local": {
+      "type": "ephemeral",
+      "bind": "127.0.0.1:4944",
+      "replica": {
+        "subnet_type": "system"
+      }
     }
   },
   "defaults": {

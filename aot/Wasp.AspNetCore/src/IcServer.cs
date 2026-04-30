@@ -33,6 +33,13 @@ public sealed class IcServer : IServer
 
     private IHttpApplication<object>? _app;
 
+    /// <summary>
+    /// Optional hook for the consumer canister to surface why module init
+    /// failed; if set, IcServer.Dispatch returns it as a 500 body so the
+    /// failure is visible via curl instead of opaque trap.
+    /// </summary>
+    public static string? InitFailureMessage { get; set; }
+
     /// <inheritdoc />
     public IFeatureCollection Features { get; } = new FeatureCollection();
 
@@ -68,10 +75,27 @@ public sealed class IcServer : IServer
     {
         try
         {
+            // Always upgrade queries to update (must come before any other
+            // path so even error states upgrade — non-certified query
+            // responses get rejected by the IC gateway with "response
+            // verification error", which surfaces as a 503 to the client).
+            //
+            // ASP.NET Core's pipeline easily blows past the 5B instruction
+            // limit for queries. Per-route certified queries are M5 (#61).
+            if (!isUpdate)
+            {
+                Reply.Bytes(CandidHttp.EncodeResponse(IcHttpResponse.Upgrading()));
+                return;
+            }
+
             if (_instance?._app is not { } app)
             {
-                throw new InvalidOperationException(
-                    "IcServer.Dispatch called before StartAsync — IcServer is not initialised.");
+                // Init failed — surface a 500 with InitFailureMessage if the
+                // consumer set one, plus the full exception trace.
+                var msg = "IcServer.Dispatch: app not registered.\n\n"
+                    + (InitFailureMessage ?? "(no init failure recorded)");
+                Reply.Bytes(CandidHttp.EncodeResponse(IcHttpResponse.Text(msg, 500)));
+                return;
             }
 
             // 1. Read and decode the IC HTTP gateway Candid request.
