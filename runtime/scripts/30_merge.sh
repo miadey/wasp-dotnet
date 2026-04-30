@@ -97,6 +97,15 @@ with tempfile.TemporaryDirectory() as td:
 EOF
 fi
 
+# [0.5/8] expose internal mono helpers wasp_class_from_name needs to
+# call back into. Without these exports, wasm-merge can't resolve our
+# Rust-side `extern "C" { fn mono_class_get_checked(...) }` import.
+echo "[0.5/8] expose internal mono helpers needed by wasp_class_from_name"
+DOTNET_PRE2=$(mktemp -t wasp-dotnet-pre2.XXXXXX).wasm
+trap 'rm -f "$OUT_MERGED" "$OUT_LOWERED" "$OUT_CONST" "$OUT_RENAMED" "$DOTNET_PRE" "$DOTNET_PRE2"' EXIT
+python3 "$RUNTIME/scripts/inject_export.py" "$DOTNET_PRE" "$DOTNET_PRE2" "mono_class_get_checked"
+DOTNET_PRE="$DOTNET_PRE2"
+
 echo "[1/5] wasm-merge wasp_canister(as 'env') + dotnet.native(as 'dotnet')"
 wasm-merge \
     "$CANISTER_WASM" env \
@@ -269,12 +278,17 @@ WSP_TOK=$(grep -oE "\(func \\\$wasp_g_strdup_printf \(;[0-9]+;\)" "$WAT" | head 
 WSP_FN=$(echo "$WSP_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 WBR_TOK=$(grep -oE "\(func \\\$wasp_bundled_resource_get \(;[0-9]+;\)" "$WAT" | head -1)
 WBR_FN=$(echo "$WBR_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+MCFN_TOK=$(grep -oE "\(func \\\$mono_class_from_name_checked \(;[0-9]+;\)" "$WAT" | head -1)
+MCFN_FN=$(echo "$MCFN_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
+WCFN_TOK=$(grep -oE "\(func \\\$wasp_class_from_name \(;[0-9]+;\)" "$WAT" | head -1)
+WCFN_FN=$(echo "$WCFN_TOK" | grep -oE '\(;[0-9]+;\)' | tr -dc '[:digit:]')
 echo "  resolved mono_has_pdb_checksum fn idx = $PDB_FN"
 echo "  resolved bundled_resources_get_assembly_resource fn idx = $BRG_FN"
 echo "  resolved monoeg_g_print fn idx = $GP_FN, wasp_log_g_print = $WLG_FN"
 echo "  resolved wasp_probe_bundled_get fn idx = $WPBG_FN"
 echo "  resolved monoeg_g_strdup_printf fn idx = $SP_FN, wasp_g_strdup_printf = $WSP_FN"
 echo "  resolved wasp_bundled_resource_get fn idx = $WBR_FN"
+echo "  resolved mono_class_from_name_checked fn idx = $MCFN_FN, wasp_class_from_name = $WCFN_FN"
 rm -f "$WAT"
 
 [ -n "$G7_FN" ] || { echo "  could not resolve g7 (g7=$G7_FN)"; exit 1; }
@@ -345,6 +359,18 @@ if [ -n "$BRG_FN" ] && [ -n "$WBR_FN" ]; then
     python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$PATCH_INPUT" "$OUT_WBR" "$BRG_FN" "$WBR_FN"
     PATCH_INPUT="$OUT_WBR"
     echo "  patched bundled_resources_get_assembly_resource ($BRG_FN) → wasp_bundled_resource_get ($WBR_FN)"
+fi
+
+# Replace mono_class_from_name_checked with wasp_class_from_name, which
+# does direct TypeDef iteration (mono's name-cache uses dn_simdhash
+# which silently drops inserts in our build). Our impl finds the
+# matching row, computes the metadata token, and calls back into
+# mono_class_get_checked to construct the MonoClass.
+if [ -n "$MCFN_FN" ] && [ -n "$WCFN_FN" ]; then
+    OUT_WCFN=$(mktemp -t wasp-wcfn.XXXXXX).wasm
+    python3 "$RUNTIME/scripts/patch_fn_to_call.py" "$PATCH_INPUT" "$OUT_WCFN" "$MCFN_FN" "$WCFN_FN"
+    PATCH_INPUT="$OUT_WCFN"
+    echo "  patched mono_class_from_name_checked ($MCFN_FN) → wasp_class_from_name ($WCFN_FN)"
 fi
 
 cp "$PATCH_INPUT" "$OUT_P1C"

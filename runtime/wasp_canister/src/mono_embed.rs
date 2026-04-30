@@ -234,4 +234,11 @@ extern "C" {
     pub fn wasp_dn_simdhash_insert_original(
         table: u32, key: u32, hash: u32, value: u32, mode: u32,
     ) -> u32;
+
+    /// Construct (or fetch from cache) a MonoClass by metadata token.
+    /// `token` for a TypeDef row N is `0x02000000 | (N + 1)`. Used by
+    /// `wasp_class_from_name` after we locate the matching row via
+    /// direct TypeDef iteration, so we don't need to construct a
+    /// MonoClass struct ourselves — mono builds it on demand.
+    pub fn mono_class_get_checked(image: u32, token: u32, error: u32) -> u32;
 }

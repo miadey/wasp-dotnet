@@ -566,6 +566,99 @@ unsafe fn log_tagged(tag: &[u8], p: u32) {
 ///        tables[TYPEDEF=2].rows = low 24 bits of word at +180
 #[no_mangle]
 #[inline(never)]
+/// Replacement for `mono_class_from_name_checked(image, ns, name, error)`.
+/// Mono's name-cache (dn_simdhash) silently drops inserts in our
+/// build, so by-name class lookup always misses. Instead, do direct
+/// TypeDef iteration to find the matching (ns, name) pair, then call
+/// `mono_class_get_checked` with the resulting metadata token to let
+/// mono build the MonoClass struct itself.
+///
+/// Token format: TypeDef N (1-based row) → 0x02000000 | N.
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn wasp_class_from_name(image: u32, ns_rel: u32, name_rel: u32, error: u32) -> u32 {
+    unsafe {
+        let mb = wasp_get_mem_base();
+        if image == 0 || ns_rel == 0 || name_rel == 0 { return 0; }
+        // Read input ns + name (NUL-terminated, mb-relative).
+        let ns_p = mb.wrapping_add(ns_rel) as *const u8;
+        let name_p = mb.wrapping_add(name_rel) as *const u8;
+        let mut ns_len = 0usize;
+        while *ns_p.add(ns_len) != 0 { ns_len += 1; if ns_len > 256 { return 0; } }
+        let mut name_len = 0usize;
+        while *name_p.add(name_len) != 0 { name_len += 1; if name_len > 256 { return 0; } }
+        // Read MonoImage struct fields needed: heap_strings@64
+        // (data ptr, mb-relative), tables[TYPEDEF=2] starting at 132+48=180.
+        let img = mb.wrapping_add(image) as *const u32;
+        let strings_data_rel: u32 = core::ptr::read_unaligned(img.add(16));   // +64
+        let td_base_rel: u32 = core::ptr::read_unaligned(
+            (mb.wrapping_add(image).wrapping_add(180)) as *const u32);
+        let td_rows_word: u32 = core::ptr::read_unaligned(
+            (mb.wrapping_add(image).wrapping_add(184)) as *const u32);
+        let td_rows = td_rows_word & 0x00FF_FFFF;
+        let td_row_size = (td_rows_word >> 24) & 0xFF;
+        if td_base_rel == 0 || td_rows == 0 || strings_data_rel == 0 {
+            return 0;
+        }
+        let strings_data_abs = mb.wrapping_add(strings_data_rel) as *const u8;
+        // Iterate TypeDef rows, skip row 0 (<Module>). Layout (row_size=18,
+        // u32 string indexes): flags@0..4, name@4..8, ns@8..12, ...
+        let mut r: u32 = 1;
+        let mut found_row: u32 = u32::MAX;
+        while r < td_rows {
+            let row_p = mb.wrapping_add(td_base_rel)
+                .wrapping_add(td_row_size.wrapping_mul(r)) as *const u8;
+            let nidx: u32 = core::ptr::read_unaligned(row_p.add(4) as *const u32);
+            let nsidx: u32 = core::ptr::read_unaligned(row_p.add(8) as *const u32);
+            // Compare name + ns to input.
+            let name_s = strings_data_abs.add(nidx as usize);
+            let mut ok = true;
+            for k in 0..name_len {
+                if *name_s.add(k) != *name_p.add(k) { ok = false; break; }
+            }
+            if ok && *name_s.add(name_len) == 0 {
+                let ns_s = strings_data_abs.add(nsidx as usize);
+                let mut ok2 = true;
+                for k in 0..ns_len {
+                    if *ns_s.add(k) != *ns_p.add(k) { ok2 = false; break; }
+                }
+                if ok2 && *ns_s.add(ns_len) == 0 {
+                    found_row = r;
+                    break;
+                }
+            }
+            r += 1;
+        }
+        // Log the lookup.
+        let mut buf = [0u8; 200];
+        let mut i = 0;
+        for &c in b"[wasp_cls] " { if i < buf.len() { buf[i] = c; i += 1; } }
+        for k in 0..ns_len { if i < buf.len() { buf[i] = *ns_p.add(k); i += 1; } }
+        if i < buf.len() { buf[i] = b'.'; i += 1; }
+        for k in 0..name_len { if i < buf.len() { buf[i] = *name_p.add(k); i += 1; } }
+        for &c in b" -> " { if i < buf.len() { buf[i] = c; i += 1; } }
+        if found_row == u32::MAX {
+            for &c in b"NOT_FOUND" { if i < buf.len() { buf[i] = c; i += 1; } }
+            debug_print(buf.as_ptr() as u32, i as u32);
+            return 0;
+        }
+        let token: u32 = 0x02000000 | (found_row + 1);
+        for &c in b"row=" { if i < buf.len() { buf[i] = c; i += 1; } }
+        i = format_decimal(&mut buf, i, found_row as u64);
+        for &c in b" tok=0x" { if i < buf.len() { buf[i] = c; i += 1; } }
+        for s in (0..32u32).step_by(4).rev() {
+            let n = ((token >> s) & 0xF) as u8;
+            if i < buf.len() {
+                buf[i] = if n < 10 { b'0' + n } else { b'a' + n - 10 };
+                i += 1;
+            }
+        }
+        debug_print(buf.as_ptr() as u32, i as u32);
+        // Hand off to mono to actually construct the MonoClass.
+        mono_embed::mono_class_get_checked(image, token, error)
+    }
+}
+
 pub extern "C" fn wasp_log_class_load(image: u32, ns_rel: u32, name_rel: u32) {
     unsafe {
         let mb = wasp_get_mem_base();
