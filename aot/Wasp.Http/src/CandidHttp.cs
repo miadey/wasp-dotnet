@@ -11,7 +11,7 @@ namespace Wasp.Http;
 //
 // Future iterations (post-Phase 2) will replace this with source-gen
 // codecs derived from arbitrary C# record types.
-internal static class CandidHttp
+public static class CandidHttp
 {
     // ─── Type-table opcodes (SLEB128 negatives, byte form) ────────────────
     private const byte CODE_OPT     = 0x6E; // -18

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Wasp.AspNetCore</RootNamespace>
+    <AssemblyName>Wasp.AspNetCore</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>Wasp.AspNetCore</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Description>ASP.NET Core IServer adapter for IC canisters. Routes IC HTTP gateway requests through the full ASP.NET Core middleware pipeline via IcServer.</Description>
+    <!-- NativeAOT-LLVM, NativeLib, RuntimeIdentifier, and IlcLlvmTarget are consumer-side knobs;
+         set them in the leaf canister csproj, not here. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+    <ProjectReference Include="..\Wasp.Http\Wasp.Http.csproj" />
+  </ItemGroup>
+
+</Project>
