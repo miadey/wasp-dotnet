@@ -1,5 +1,9 @@
-// wasi-stub: replace `wasi_snapshot_preview1` imports in a wasm module with
-// local function stubs. Two modes per import:
+// wasi-stub: replace WASI imports in a wasm module with local function stubs.
+// Matches both Preview 1 (`wasi_snapshot_preview1`) and Preview 2 component
+// imports (any module starting with `wasi:`, e.g. `wasi:clocks/...@0.2.0`).
+// ICP only allows `ic0` imports, so all WASI imports must be stubbed away.
+//
+// Two modes per import:
 //
 //   * "trap"  — function body is `unreachable` (canister traps if called)
 //   * "noop"  — function body returns zeros for every result type (silent
@@ -20,7 +24,13 @@ use walrus::{
     FunctionBuilder, FunctionId, Module, ValType,
 };
 
-const WASI_MODULE: &str = "wasi_snapshot_preview1";
+const WASI_MODULE_P1: &str = "wasi_snapshot_preview1";
+
+fn is_wasi_module(name: &str) -> bool {
+    // Preview 1 (single module name) OR Preview 2 component imports
+    // (`wasi:clocks/monotonic-clock@0.2.0`, `wasi:io/poll@0.2.0`, etc.)
+    name == WASI_MODULE_P1 || name.starts_with("wasi:")
+}
 
 fn parse_args() -> Result<(String, String, HashSet<String>)> {
     let args: Vec<String> = std::env::args().collect();
@@ -40,31 +50,35 @@ fn parse_args() -> Result<(String, String, HashSet<String>)> {
     Ok((args[1].clone(), args[2].clone(), trap))
 }
 
-fn build_stub(module: &mut Module, params: &[ValType], results: &[ValType], trap: bool) -> FunctionId {
+fn build_stub(module: &mut Module, name: &str, params: &[ValType], results: &[ValType], trap: bool) -> FunctionId {
     let mut builder = FunctionBuilder::new(&mut module.types, params, results);
     let mut body = builder.func_body();
-    if trap {
+
+    // Specific imports need non-zero returns or noreturn-trap semantics.
+    // wasi-libc's preopen enumeration calls fd_prestat_get repeatedly until
+    // it gets BADF (8) — returning 0 makes it think every fd is a preopen
+    // and corrupts state. proc_exit is [[noreturn]] in C; if our stub returns
+    // instead of trapping, callers (e.g. wasi-libc's _Exit) execute in
+    // undefined state and eventually hit `unreachable` deep in the call
+    // stack with no useful diagnostic.
+    let force_trap = trap || matches!(name, "proc_exit" | "proc_raise");
+    let force_badf = matches!(name, "fd_prestat_get");
+
+    if force_trap {
         body.unreachable();
+    } else if force_badf && results.len() == 1 && matches!(results[0], ValType::I32) {
+        // EBADF (8): signals "this fd is not a preopen, stop walking."
+        body.const_(Value::I32(8));
     } else {
         // Push a zero of the correct type for every result so the function
         // type-checks without doing anything observable.
         for r in results {
             match r {
-                ValType::I32 => {
-                    body.const_(Value::I32(0));
-                }
-                ValType::I64 => {
-                    body.const_(Value::I64(0));
-                }
-                ValType::F32 => {
-                    body.const_(Value::F32(0.0));
-                }
-                ValType::F64 => {
-                    body.const_(Value::F64(0.0));
-                }
+                ValType::I32 => { body.const_(Value::I32(0)); }
+                ValType::I64 => { body.const_(Value::I64(0)); }
+                ValType::F32 => { body.const_(Value::F32(0.0)); }
+                ValType::F64 => { body.const_(Value::F64(0.0)); }
                 _ => {
-                    // Reference types — bail to a trap; noop semantics
-                    // aren't meaningful for ref types here.
                     body.unreachable();
                     break;
                 }
@@ -79,10 +93,11 @@ fn main() -> Result<()> {
     let (input, output, trap_set) = parse_args()?;
     let mut module = Module::from_file(&input).with_context(|| format!("read {input}"))?;
 
-    // Collect (import_id, function_id, name, type_id) for every wasi import.
+    // Collect (import_id, function_id, name, type_id) for every wasi import
+    // (Preview 1 or Preview 2 component model).
     let mut targets = Vec::new();
     for imp in module.imports.iter() {
-        if imp.module == WASI_MODULE {
+        if is_wasi_module(&imp.module) {
             if let walrus::ImportKind::Function(fid) = imp.kind {
                 let ty_id = module.funcs.get(fid).ty();
                 targets.push((imp.id(), fid, imp.name.clone(), ty_id));
@@ -91,7 +106,7 @@ fn main() -> Result<()> {
     }
 
     if targets.is_empty() {
-        eprintln!("wasi-stub: no {WASI_MODULE} imports found in {input}");
+        eprintln!("wasi-stub: no wasi_snapshot_preview1 or wasi:* imports found in {input}");
     }
 
     let mut stubbed = 0usize;
@@ -102,7 +117,7 @@ fn main() -> Result<()> {
             let ty = module.types.get(ty_id);
             (ty.params().to_vec(), ty.results().to_vec())
         };
-        let stub_fid = build_stub(&mut module, &params, &results, trap_this);
+        let stub_fid = build_stub(&mut module, &name, &params, &results, trap_this);
         // Redirect every reference to old_fid → stub_fid.
         replace_func_refs(&mut module, old_fid, stub_fid);
         // Drop the import (its function is now an orphan; walrus keeps it

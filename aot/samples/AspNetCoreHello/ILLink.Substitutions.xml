@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<linker>
+  <!-- Trim-time method-body replacement.
+       Background: ASP.NET Core's HostApplicationBuilder always creates a
+       PhysicalFileProvider for ContentRoot. PhysicalFileProvider.ctor calls
+       Directory.Exists(root); if false, throws DirectoryNotFoundException.
+       On a canister there is no real filesystem — wasi-stub returns EBADF for
+       all preopens, so Directory.Exists returns false, and the exception
+       propagates out of the [ModuleInitializer], trapping the canister.
+
+       Stubbing Directory.Exists to return true lets PhysicalFileProvider
+       construct successfully. The provider is never actually read in our
+       hello sample (no static files, no Razor — that's M2/M3 territory),
+       so the lie is harmless here.
+
+       When M2 (Razor SSR) needs real wwwroot reads, replace the file
+       provider with an embedded-resource one (issue #53) instead. -->
+  <assembly fullname="System.Private.CoreLib">
+    <type fullname="System.IO.Directory">
+      <method signature="System.Boolean Exists(System.String)" body="stub" value="true" />
+    </type>
+  </assembly>
+
+  <!-- Stub the entire PhysicalFileProvider ctor chain. The ctor calls
+       Path.GetFullPath, regex setup, and a Lazy<PhysicalFilesWatcher> all
+       of which can fail in subtle ways on canister. We never actually read
+       static files in the hello sample, so a no-op ctor is fine. M2 (#52)
+       replaces the file provider entirely with an embedded-resource one. -->
+  <assembly fullname="Microsoft.Extensions.FileProviders.Physical">
+    <!-- Class is in namespace Microsoft.Extensions.FileProviders (NOT .Physical
+         despite the assembly name); ExclusionFilters is in the .Physical sub. -->
+    <type fullname="Microsoft.Extensions.FileProviders.PhysicalFileProvider">
+      <method signature="System.Void .ctor(System.String)" body="stub" />
+      <method signature="System.Void .ctor(System.String,Microsoft.Extensions.FileProviders.Physical.ExclusionFilters)" body="stub" />
+    </type>
+  </assembly>
+</linker>
