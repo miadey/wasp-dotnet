@@ -129,6 +129,56 @@ The `typeof(object)` entry is required: the RDG calls
 `JsonSerializerOptions.GetTypeInfo(typeof(object))` once during
 `MapPost(...)` setup, and a missing entry crashes the resolver.
 
+## Authentication / Authorization
+
+The full `AddAuthentication()` stack pulls in `Microsoft.AspNetCore.DataProtection.KeyManagement.XmlKeyManager`, which has a parameterless `KeyManagementOptions..ctor()` that the `wasm32-wasi` trimmer breaks (`TimeSpan.FromMilliseconds(Int64)` gets removed). The canister traps at `Host.StartAsync` with:
+
+```
+System.Reflection.TargetInvocationException
+   at Microsoft.Extensions.Options.OptionsFactory.Create(...)
+   at Microsoft.AspNetCore.DataProtection.KeyManagement.XmlKeyManager..ctor(...)
+```
+
+**Workaround that works today:**
+
+1. Skip `AddAuthentication()`. Add a custom middleware that reads the cookie/header/principal source and sets `ctx.User = new ClaimsPrincipal(...)` directly.
+2. Use `AddAuthorizationBuilder().SetDefaultPolicy(...).RequireAuthenticatedUser()` for the authz side — `AddAuthorizationCore` doesn't pull DataProtection.
+3. Replace the default `IAuthorizationMiddlewareResultHandler` with one that writes 401/403 directly. The default tries `ctx.ChallengeAsync()` which needs `IAuthenticationService` (not registered).
+
+```csharp
+internal sealed class IcAuthMiddlewareResultHandler : IAuthorizationMiddlewareResultHandler
+{
+    public async Task HandleAsync(RequestDelegate next, HttpContext ctx,
+        AuthorizationPolicy policy, PolicyAuthorizationResult result)
+    {
+        if (result.Forbidden) { ctx.Response.StatusCode = 403; return; }
+        if (result.Challenged) { ctx.Response.StatusCode = 401; return; }
+        await next(ctx);
+    }
+}
+
+builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, IcAuthMiddlewareResultHandler>();
+```
+
+The result: `[Authorize]` / `.RequireAuthorization()` works, `UseAuthorization()` middleware runs, but no DataProtection in the graph. See `samples/AspNetCoreApi/Program.cs` (#51) for the end-to-end pattern.
+
+## IResult return shape — write to ctx.Response directly under heavy trimming
+
+Some configurations of the .NET 10 `RequestDelegateGenerator` interceptor and the trimmer produce a build where the `IResult.ExecuteAsync` path is reachable but its terminal write to `ctx.Response.Body` is no-op'd (the canister returns the correct status code but `content-length: 0`). The repro is fragile — the same source, rebuilt with a tiny addition (e.g. one `Reply.Print` call), produces a working binary. When this bites, switch the handler from the `Delegate`-typed `MapPost("/x", (...) => Results.Text(...))` shape to the `RequestDelegate`-typed shape and write the response stream directly:
+
+```csharp
+RequestDelegate saveHandler = async ctx =>
+{
+    /* read body, deserialize, etc */
+    ctx.Response.StatusCode = 200;
+    ctx.Response.ContentType = "text/plain; charset=utf-8";
+    await ctx.Response.WriteAsync($"saved '{note.Title}'");
+};
+api.MapPost("/save", saveHandler);
+```
+
+This bypasses RDG entirely; the AOT compiler treats it as a plain delegate call. AOT-stable across trim configurations.
+
 ## Verification
 
 A canister that exercises a banned path returns:

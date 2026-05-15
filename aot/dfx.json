@@ -46,6 +46,12 @@
       "wasm": "samples/AspNetCoreEndpoints/AspNetCoreEndpoints.canister.wasm",
       "candid": "samples/AspNetCoreEndpoints/aspnetcoreendpoints.did",
       "build": []
+    },
+    "aspnetcoreapi": {
+      "type": "custom",
+      "wasm": "samples/AspNetCoreApi/AspNetCoreApi.canister.wasm",
+      "candid": "samples/AspNetCoreApi/aspnetcoreapi.did",
+      "build": []
     }
   },
   "networks": {
