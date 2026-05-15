@@ -111,55 +111,27 @@ public static class RazorOnIcCanister
                 return Task.CompletedTask;
             });
 
-            // Two endpoints, two paths:
-            //
-            //   GET /            — hand-written HTML via ctx.Response.WriteAsync.
-            //                      AOT-stable, ships today. The equivalent of
-            //                      what App.razor would output if Razor SSR
-            //                      worked.
-            //   GET /razor       — renders the App.razor component via
-            //                      HtmlRenderer (Microsoft.AspNetCore.Components.Web).
-            //                      Currently 500s with NRE in
-            //                      StaticHtmlRenderer.RenderCore due to AOT-trim
-            //                      of Razor renderer internals. Kept as the
-            //                      target shape for M2 follow-up work.
-            //                      See UNSUPPORTED.md > Razor SSR for details.
-
-            RequestDelegate handWrittenHomepage = async ctx =>
+            // Render <App> via Razor's HtmlRenderer. This works because
+            // Wasp.AspNetCore.targets substitutes a Mono.Cecil-rewritten
+            // Microsoft.AspNetCore.Components.dll that fixes the
+            // NativeAOT-LLVM struct-copy miscompilation in
+            // RenderTreeFrameArrayBuilder.Append*. See UNSUPPORTED.md
+            // > Razor SSR for the diagnosis.
+            RequestDelegate razorHomepage = async ctx =>
             {
-                var count = _counter.Value;
+                var renderer = ctx.RequestServices.GetRequiredService<HtmlRenderer>();
+                var html = await renderer.Dispatcher.InvokeAsync(async () =>
+                {
+                    var output = await renderer.RenderComponentAsync<App>();
+                    return output.ToHtmlString();
+                });
                 ctx.Response.StatusCode = 200;
                 ctx.Response.ContentType = "text/html; charset=utf-8";
-                await ctx.Response.WriteAsync($@"<!DOCTYPE html>
-<html lang=""en""><head><meta charset=""utf-8""/><title>RazorOnIc - Blazor SSR on ICP</title></head>
-<body style=""font-family: system-ui; max-width: 640px; margin: 2rem auto; padding: 0 1rem;"">
-<h1 style=""color: #2563eb;"">RazorOnIc</h1>
-<p>ASP.NET Core SSR rendered inside an ICP canister.</p>
-<p>Counter value: <strong style=""font-size: 2rem; color: #16a34a;"">{count}</strong></p>
-<form method=""post"" action=""/counter/bump""><button type=""submit"" style=""padding: 0.5rem 1rem; font-size: 1rem;"">Bump counter</button></form>
-<hr/>
-<small>
-  This page was rendered server-side inside a WebAssembly canister on the Internet Computer.
-  The count is persisted via <code>StableCell&lt;int&gt;</code> and survives canister upgrades.
-  View source — there is no <code>_blazor.js</code>, no client-side WebAssembly.
-</small>
-<p><small><a href=""/razor"">/razor</a> — same page rendered via Razor's HtmlRenderer (currently AOT-blocked).</small></p>
-</body></html>");
+                await ctx.Response.WriteAsync(html);
             };
 
-            RequestDelegate razorRenderedHomepage = async ctx =>
-            {
-                // STRUCT LAYOUT PROBE — verify whether [FieldOffset(16)] string
-                // survives a write/read round-trip on wasm32-wasi.
-                var probe = Components.StructLayoutProbe.Run();
-                ctx.Response.StatusCode = 200;
-                ctx.Response.ContentType = "text/plain; charset=utf-8";
-                await ctx.Response.WriteAsync("=== StructLayout probe ===\n" + probe);
-            };
-
-            app.MapGet("/", handWrittenHomepage);
-            app.MapGet("/counter", handWrittenHomepage);
-            app.MapGet("/razor", razorRenderedHomepage);
+            app.MapGet("/", razorHomepage);
+            app.MapGet("/counter", razorHomepage);
 
             app.StartAsync().GetAwaiter().GetResult();
         }

@@ -179,11 +179,11 @@ api.MapPost("/save", saveHandler);
 
 This bypasses RDG entirely; the AOT compiler treats it as a plain delegate call. AOT-stable across trim configurations.
 
-## Razor SSR (M2 work-in-progress) — **root-caused: NativeAOT-LLVM wasm32-wasi struct-copy bug**
+## Razor SSR — **FIXED** via Mono.Cecil IL weaver
 
-The full `Microsoft.AspNetCore.Components` stack AOT-compiles to wasm32-wasi and runs inside the canister. The framework's service graph resolves, route discovery works, components instantiate, headers come back correct (`blazor-enhanced-nav: allow`, `content-type: text/html; charset=utf-8`). **Every part of the pipeline runs.**
+Razor Components Static SSR via `HtmlRenderer.RenderComponentAsync<TComponent>().ToHtmlString()` works end-to-end inside the canister. See `samples/RazorOnIc` for a working sample: `GET /` is rendered server-side by Razor's `HtmlRenderer`, the counter value comes from `StableCell<int>`, form POST bumps + persists.
 
-What does not work today is rendering output to HTML. **Root cause: NativeAOT-LLVM compiling for wasm32-wasi loses `string` fields at `[FieldOffset(16)]` when a struct with `[StructLayout(LayoutKind.Explicit)]` is constructed via object-initializer + struct-copy assignment.**
+This section documents the bug that had to be worked around. **Root cause: NativeAOT-LLVM compiling for wasm32-wasi loses `string` fields at `[FieldOffset(16)]` when a struct with `[StructLayout(LayoutKind.Explicit)]` is constructed via object-initializer + struct-copy assignment.**
 
 ### Reproduction
 
@@ -240,27 +240,28 @@ Pattern B (struct copy): str16=(null)  ✗  obj24=OB-0  ✓
 
 `<h1>Hello</h1>` Razor component renders as `<></>` because both writes (element name + text) are lost in the struct copy.
 
-### Workaround in `samples/RazorOnIc`
+### Fix shipped: `shared/tools/Wasp.RenderTreeWeaver`
 
-The sample's `/` endpoint hand-writes HTML via `ctx.Response.WriteAsync(...)`. Counter state + form POST + `StableCell<int>` survives canister upgrade — all the user-facing functionality works. The `<App />` Razor component is shipped as documentation of the *intended* pattern; `/razor` wires it via `HtmlRenderer` and demonstrates the bug.
-
-### Fix paths
-
-This bug needs to be fixed in dotnet/runtime's NativeAOT-LLVM codegen, OR worked around in our build pipeline by rewriting `RenderTreeFrameArrayBuilder.Append*` IL to use in-place mutation:
+A Mono.Cecil-based IL weaver in `shared/tools/Wasp.RenderTreeWeaver` rewrites the 8 broken `Append*` methods on `Microsoft.AspNetCore.Components.RenderTree.RenderTreeFrameArrayBuilder` to use the in-place pattern:
 
 ```csharp
 public void AppendElement(int sequence, string elementName)
 {
-    ...
-    ref var slot = ref _items[_itemsInUse++];
+    if (_itemsInUse == _items.Length) GrowBuffer(_items.Length * 2);
+    ref var slot = ref _items[_itemsInUse];
+    _itemsInUse++;
     slot = default;
-    slot.SequenceField = sequence;
     slot.FrameTypeField = RenderTreeFrameType.Element;
+    slot.SequenceField = sequence;
     slot.ElementNameField = elementName;
 }
 ```
 
-This is implementable as a post-build Mono.Cecil IL weaver invoked from our `Wasp.AspNetCore.targets` against the framework's `Microsoft.AspNetCore.Components.dll` before ILC consumes it.
+`Wasp.AspNetCore.targets` excludes the framework's `Microsoft.AspNetCore.Components.dll` from `IlcReference` and substitutes the woven `Wasp.AspNetCore/Vendor/Microsoft.AspNetCore.Components.dll`. `samples/RazorOnIc/build-and-deploy.sh` runs the weaver as a pre-step (idempotent — only re-weaves if the input or weaver source changed). IL is verified clean via `ilverify`.
+
+The methods covered: `AppendElement`, `AppendText`, `AppendMarkup`, `AppendAttribute`, `AppendComponent`, `AppendElementReferenceCapture`, `AppendComponentReferenceCapture`, `AppendRegion`. Two methods (`AppendComponentRenderMode`, `AppendNamedEvent`) have signatures that don't match the weaver's mapping table and are skipped — they're only exercised by render modes / named events that the M2 sample doesn't use, but adding them is mechanical when needed.
+
+**This is a workaround.** The proper fix belongs in dotnet/runtime's NativeAOT-LLVM codegen for wasm32-wasi: struct-copy assignment via `stelem.any` (or local-temp-then-copy) should preserve `string` fields at `[FieldOffset(16)]` exactly like other reference fields.
 
 ## DataProtection — registration short-circuit
 

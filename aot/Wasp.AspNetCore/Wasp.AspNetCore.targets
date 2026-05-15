@@ -19,8 +19,20 @@
   <ItemGroup>
     <!-- AspNet impl IL (linux-x64 paths; the IL is platform-independent;
          wasi-wasm runtime pack does not exist). Glob picks up any installed
-         Microsoft.AspNetCore.App version. -->
-    <IlcReference Include="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/*.dll" />
+         Microsoft.AspNetCore.App version. The Components.dll is excluded
+         here because we substitute a Mono.Cecil-rewritten copy below — see
+         UNSUPPORTED.md > Razor SSR for the bug it works around. -->
+    <IlcReference Include="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/*.dll"
+                  Exclude="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/Microsoft.AspNetCore.Components.dll" />
+
+    <!-- Vendored woven Microsoft.AspNetCore.Components.dll. The framework
+         version of RenderTreeFrameArrayBuilder.AppendElement/Text/Markup/etc.
+         uses struct-copy assignment which NativeAOT-LLVM wasm32-wasi
+         miscompiles (loses string field at [FieldOffset(16)]). This vendored
+         copy has those Append* methods rewritten via Mono.Cecil to use
+         in-place mutation, which the compiler handles correctly.
+         Build via shared/tools/Wasp.RenderTreeWeaver. -->
+    <IlcReference Include="$(_WaspAspNetCoreDir)Vendor\Microsoft.AspNetCore.Components.dll" />
 
     <!-- Cross-assembly trim-time substitutions. Embedded substitutions in the
          consumer assembly are rejected (IL2101); pass via substitution arg. -->

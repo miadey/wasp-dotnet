@@ -1,6 +1,23 @@
-@* Single root component for HtmlRenderer-based SSR. Plain elements,
-   minimal attributes — the renderer's RenderAttributes path NRE's on
-   some attribute shapes under heavy trim. *@
-<h1>RazorOnIc — Blazor SSR on ICP</h1>
-<p>Counter value: @RazorOnIcCanister.GetCount()</p>
-<p>This page was rendered server-side by HtmlRenderer inside a WebAssembly canister.</p>
+@* App.razor — rendered server-side by HtmlRenderer inside an ICP canister.
+   The Mono.Cecil-rewritten RenderTreeFrameArrayBuilder (see Wasp.AspNetCore/
+   Vendor/) lets the AppendElement/Text/Markup pattern work on wasm32-wasi. *@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>RazorOnIc - Blazor SSR on ICP</title>
+</head>
+<body style="font-family: system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem;">
+    <h1 style="color: #2563eb;">RazorOnIc</h1>
+    <p>This page is server-rendered by <strong>Razor's <code>HtmlRenderer</code></strong>, inside a WebAssembly canister on the Internet Computer.</p>
+    <p>Counter value: <strong style="font-size: 2rem; color: #16a34a;">@RazorOnIcCanister.GetCount()</strong></p>
+    <form method="post" action="/counter/bump">
+        <button type="submit" style="padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer;">Bump counter</button>
+    </form>
+    <hr />
+    <small>
+        Counter is persisted via <code>StableCell&lt;int&gt;</code> and survives canister upgrades.
+        View source — there is no <code>_blazor.js</code>, no client-side WebAssembly hydration.
+    </small>
+</body>
+</html>

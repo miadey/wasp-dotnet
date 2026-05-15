@@ -10,14 +10,9 @@ public sealed class CodeOnlyHello : ComponentBase
 {
     protected override void BuildRenderTree(RenderTreeBuilder builder)
     {
-        // Test layout-bug hypothesis:
-        //   Markup uses MarkupContentField (offset 16, same slot as
-        //   ElementNameField). If markup renders correctly but elements
-        //   render with empty names, the struct's ref-field layout is
-        //   broken in *one direction* (write or read).
-        builder.AddMarkupContent(0, "<p>markup test: should appear if string fields work</p>");
-        builder.OpenElement(1, "h1");
-        builder.AddContent(2, "text inside h1");
+        builder.OpenElement(0, "h1");
+        builder.AddContent(1, "Hello from CodeOnlyHello (woven framework DLL test)");
         builder.CloseElement();
+        builder.AddMarkupContent(2, "<p>Markup test: this should appear via AppendMarkup.</p>");
     }
 }
