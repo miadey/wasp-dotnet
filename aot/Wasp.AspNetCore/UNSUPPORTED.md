@@ -179,22 +179,88 @@ api.MapPost("/save", saveHandler);
 
 This bypasses RDG entirely; the AOT compiler treats it as a plain delegate call. AOT-stable across trim configurations.
 
-## Razor SSR (M2 work-in-progress)
+## Razor SSR (M2 work-in-progress) — **root-caused: NativeAOT-LLVM wasm32-wasi struct-copy bug**
 
-The full `Microsoft.AspNetCore.Components` stack — including `AddRazorComponents()`, the route discovery, the `EndpointHtmlRenderer`, and `HtmlRenderer` (from `Microsoft.AspNetCore.Components.Web`) — **AOT-compiles to wasm32-wasi** and runs inside the canister.  All the moving parts wire up: the framework's service graph resolves, the route table builds, components instantiate, headers come back correctly (e.g. `blazor-enhanced-nav: allow`).
+The full `Microsoft.AspNetCore.Components` stack AOT-compiles to wasm32-wasi and runs inside the canister. The framework's service graph resolves, route discovery works, components instantiate, headers come back correct (`blazor-enhanced-nav: allow`, `content-type: text/html; charset=utf-8`). **Every part of the pipeline runs.**
 
-What does **not** work today:
+What does not work today is rendering output to HTML. **Root cause: NativeAOT-LLVM compiling for wasm32-wasi loses `string` fields at `[FieldOffset(16)]` when a struct with `[StructLayout(LayoutKind.Explicit)]` is constructed via object-initializer + struct-copy assignment.**
 
-1. **`StaticHtmlRenderer.RenderCore` NREs at the HTML write phase.** The renderer instantiates the component and walks the render tree, then dies in `RenderCore(int, TextWriter, ArrayRange<RenderTreeFrame>, int)` with a bare `NullReferenceException` (no specific field — appears to be a static cache the trimmer dropped). Confirmed with both `app.MapRazorComponents<App>()` AND `HtmlRenderer.RenderComponentAsync<App>().ToHtmlString()`. Survives even with `[DynamicDependency(All, typeof(App))]` on the entry point.
+### Reproduction
 
-2. **`EndpointResponseBufferingFeature` doesn't flush back through our `IHttpResponseBodyFeature`.** When `MapRazorComponents` is used, the framework's enhanced-nav streaming feature wraps our body feature with its own buffering layer, then on completion does not write the buffered bytes back to the outer feature. So even if (1) were fixed, the body would still arrive empty.
+Two write patterns on a struct with overlapping reference fields at offset 16:
 
-**Workaround in `samples/RazorOnIc`:** the sample's `/` endpoint hand-writes the HTML via `ctx.Response.WriteAsync(...)`. The `<App />` Razor component is shipped alongside as documentation of the intended pattern, and `/razor` is wired to render it via `HtmlRenderer` (returns 500 today). Form POST + `StableCell<int>` work end-to-end through the hand-written path: bumping the counter does POST → 303 → GET, and the count survives canister upgrade.
+```csharp
+[StructLayout(LayoutKind.Explicit, Pack = 4)]
+internal struct LayoutProbeFrame
+{
+    [FieldOffset(0)]  internal int IntField0;
+    [FieldOffset(16)] internal string StringField16;
+    [FieldOffset(24)] internal object ObjectField24;
+}
 
-**Fix paths under investigation (M2 follow-up):**
-- Aggressive `TrimmerRootDescriptor` over `Microsoft.AspNetCore.Components.HtmlRendering.Infrastructure` to preserve the field metadata that's getting dropped.
-- A hand-rolled minimal Razor renderer (`Wasp.AspNetCore.Razor.SsrLite`) that bypasses `StaticHtmlRenderer` and walks `RenderTreeFrame[]` directly.
-- Replace `EndpointResponseBufferingFeature` with our own simpler feature via a `RazorComponentsServiceOptions` config or a custom middleware that strips the buffering.
+// Pattern A — in-place mutation:
+arr[i].StringField16 = "A-0";        // reads back "A-0" ✓
+
+// Pattern B — struct-copy via object initializer:
+arr[i] = new LayoutProbeFrame
+{
+    IntField0 = 100,
+    StringField16 = "B-0",            // reads back as (null) ✗
+    ObjectField24 = (object)"OB-0",   // reads back as "OB-0" ✓
+};
+```
+
+The `object` field at offset 24 survives. Only the **string at offset 16 inside an object-initializer struct copy** is lost. Verified live in `samples/RazorOnIc/Components/StructLayoutProbe.cs`.
+
+### Why this breaks Razor
+
+`Microsoft.AspNetCore.Components.RenderTree.RenderTreeFrameArrayBuilder` builds the render tree using exactly this broken pattern:
+
+```csharp
+public void AppendElement(int sequence, string elementName)
+{
+    ...
+    _items[_itemsInUse++] = new RenderTreeFrame
+    {
+        SequenceField = sequence,
+        FrameTypeField = RenderTreeFrameType.Element,
+        ElementNameField = elementName,   // ← offset 16 string, lost
+    };
+}
+```
+
+Same pattern in `AppendText` (TextContentField), `AppendMarkup` (MarkupContentField), `AppendAttribute` (AttributeNameField). So every element's name, every text node's content, every attribute's name is null in the render tree. Rendering produces `<></>` for `<h1></h1>` and NREs when the renderer hits a downstream code path that doesn't tolerate null (e.g. `HtmlEncoder.Encode` on string fields, or attribute name compares).
+
+### Sample output
+
+```
+Pattern A (in-place): str16=A-0       ✓
+Pattern B (struct copy): str16=(null)  ✗  obj24=OB-0  ✓
+```
+
+`<h1>Hello</h1>` Razor component renders as `<></>` because both writes (element name + text) are lost in the struct copy.
+
+### Workaround in `samples/RazorOnIc`
+
+The sample's `/` endpoint hand-writes HTML via `ctx.Response.WriteAsync(...)`. Counter state + form POST + `StableCell<int>` survives canister upgrade — all the user-facing functionality works. The `<App />` Razor component is shipped as documentation of the *intended* pattern; `/razor` wires it via `HtmlRenderer` and demonstrates the bug.
+
+### Fix paths
+
+This bug needs to be fixed in dotnet/runtime's NativeAOT-LLVM codegen, OR worked around in our build pipeline by rewriting `RenderTreeFrameArrayBuilder.Append*` IL to use in-place mutation:
+
+```csharp
+public void AppendElement(int sequence, string elementName)
+{
+    ...
+    ref var slot = ref _items[_itemsInUse++];
+    slot = default;
+    slot.SequenceField = sequence;
+    slot.FrameTypeField = RenderTreeFrameType.Element;
+    slot.ElementNameField = elementName;
+}
+```
+
+This is implementable as a post-build Mono.Cecil IL weaver invoked from our `Wasp.AspNetCore.targets` against the framework's `Microsoft.AspNetCore.Components.dll` before ILC consumes it.
 
 ## DataProtection — registration short-circuit
 

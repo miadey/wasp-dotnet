@@ -46,6 +46,7 @@ public static class RazorOnIcCanister
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Routes))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Components.Layout.MainLayout))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Components.CodeOnlyHello))]
     [DynamicDependency("FromMilliseconds(System.Int64)", typeof(TimeSpan))]
     [ModuleInitializer]
     internal static void Init()
@@ -66,12 +67,22 @@ public static class RazorOnIcCanister
 
             builder.Services.AddRoutingCore();
             // HtmlRenderer from Microsoft.AspNetCore.Components.Web — renders
-            // a Razor component to a string. No EndpointResponseBufferingFeature
-            // (which silently swallows writes on our IServer impl), no enhanced
-            // navigation, no streaming SSR. Plain HTML out.
+            // a Razor component to a string. StaticHtmlRenderer's ctor reads:
+            //   _htmlEncoder = serviceProvider.GetService<HtmlEncoder>() ?? HtmlEncoder.Default;
+            //   _javaScriptEncoder = serviceProvider.GetService<JavaScriptEncoder>() ?? JavaScriptEncoder.Default;
+            // If neither service resolution nor the .Default static returns
+            // a value, the field stays null and Encode() NREs in RenderCore.
+            // Bind the ABSTRACT types explicitly so GetService<HtmlEncoder>()
+            // succeeds. (AddSingleton(instance) without a type arg binds by
+            // runtime type which is the concrete DefaultHtmlEncoder subclass,
+            // not the abstract base.)
             builder.Services.AddLogging();
-            builder.Services.AddWebEncoders(); // HtmlEncoder.Default + friends
-            builder.Services.AddSingleton(System.Text.Encodings.Web.HtmlEncoder.Default);
+            builder.Services.AddSingleton<System.Text.Encodings.Web.HtmlEncoder>(
+                System.Text.Encodings.Web.HtmlEncoder.Default);
+            builder.Services.AddSingleton<System.Text.Encodings.Web.JavaScriptEncoder>(
+                System.Text.Encodings.Web.JavaScriptEncoder.Default);
+            builder.Services.AddSingleton<System.Text.Encodings.Web.UrlEncoder>(
+                System.Text.Encodings.Web.UrlEncoder.Default);
             builder.Services.AddScoped<HtmlRenderer>();
             builder.WebHost.UseIcCanister();
 
@@ -138,15 +149,12 @@ public static class RazorOnIcCanister
 
             RequestDelegate razorRenderedHomepage = async ctx =>
             {
-                var renderer = ctx.RequestServices.GetRequiredService<HtmlRenderer>();
-                var html = await renderer.Dispatcher.InvokeAsync(async () =>
-                {
-                    var output = await renderer.RenderComponentAsync<App>();
-                    return output.ToHtmlString();
-                });
+                // STRUCT LAYOUT PROBE — verify whether [FieldOffset(16)] string
+                // survives a write/read round-trip on wasm32-wasi.
+                var probe = Components.StructLayoutProbe.Run();
                 ctx.Response.StatusCode = 200;
-                ctx.Response.ContentType = "text/html; charset=utf-8";
-                await ctx.Response.WriteAsync(html);
+                ctx.Response.ContentType = "text/plain; charset=utf-8";
+                await ctx.Response.WriteAsync("=== StructLayout probe ===\n" + probe);
             };
 
             app.MapGet("/", handWrittenHomepage);
