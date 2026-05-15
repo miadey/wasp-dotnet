@@ -1,15 +1,16 @@
-@* App.razor — rendered server-side by HtmlRenderer inside an ICP canister.
-   The Mono.Cecil-rewritten RenderTreeFrameArrayBuilder (see Wasp.AspNetCore/
-   Vendor/) lets the AppendElement/Text/Markup pattern work on wasm32-wasi. *@
+@* App.razor — rendered server-side by Blazor Static SSR (via Razor's
+   HtmlRenderer) inside an ICP canister. The Mono.Cecil-rewritten
+   RenderTreeFrameArrayBuilder (Wasp.AspNetCore/Vendor/) lets the
+   AppendElement/Text/Markup pattern work on wasm32-wasi. *@
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <title>RazorOnIc - Blazor SSR on ICP</title>
+    <title>Blazor SSR on ICP</title>
 </head>
 <body style="font-family: system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem;">
-    <h1 style="color: #2563eb;">RazorOnIc</h1>
-    <p>This page is server-rendered by <strong>Razor's <code>HtmlRenderer</code></strong>, inside a WebAssembly canister on the Internet Computer.</p>
+    <h1 style="color: #2563eb;">Blazor SSR on ICP</h1>
+    <p>This page is server-rendered by <strong>Blazor Static SSR</strong> (Razor's <code>HtmlRenderer</code>), inside a WebAssembly canister on the Internet Computer.</p>
     <p>Counter value: <strong style="font-size: 2rem; color: #16a34a;">@RazorOnIcCanister.GetCount()</strong></p>
     <form method="post" action="/counter/bump">
         <button type="submit" style="padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer;">Bump counter</button>
