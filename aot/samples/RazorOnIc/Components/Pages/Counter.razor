@@ -1,0 +1,16 @@
+@page "/"
+@page "/counter"
+
+<h2>Counter</h2>
+
+<p>Server-rendered count: <strong>@count</strong></p>
+
+<form method="post" action="/counter/bump">
+    <button type="submit">Bump</button>
+</form>
+
+<p>This page is server-rendered (SSR) inside an ICP canister. View source — there is no <code>_blazor.js</code> and no client-side wasm. The count is stored in <code>StableCell&lt;int&gt;</code>; bumping it survives canister upgrades.</p>
+
+@code {
+    private int count = RazorOnIcCanister.GetCount();
+}

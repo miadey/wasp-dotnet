@@ -123,10 +123,16 @@ public sealed class IcServer : IServer
                 processingException = ex;
             }
             app.DisposeContext(ctx, processingException);
-            if (processingException is not null) throw processingException;
+            if (processingException is not null)
+            {
+                // Preserve the original stack trace rather than the bare
+                // `throw processingException;` which resets it.
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                    .Capture(processingException).Throw();
+            }
 
             // 4. Translate the ASP.NET Core response back to an IC HttpResponse.
-            var icResp = BuildIcResponse(httpCtx.Response);
+            var icResp = BuildIcResponse(httpCtx, httpCtx.Response);
 
             // 5. Reply with Candid-encoded HttpResponse.
             Reply.Bytes(CandidHttp.EncodeResponse(icResp));
@@ -134,8 +140,11 @@ public sealed class IcServer : IServer
         catch (Exception ex)
         {
             // Surface failures as a 500 rather than trapping, mirroring
-            // WaspHttp.Dispatch (WaspHttp.cs lines 73–108).
-            var msg = "Wasp.AspNetCore internal error: " + ex.Message;
+            // WaspHttp.Dispatch (WaspHttp.cs lines 73–108). Body includes
+            // the full stack trace so middleware bugs are debuggable from
+            // a single curl.
+            var msg = "Wasp.AspNetCore internal error: " + ex.GetType().FullName + ": " + ex.Message
+                + (ex.StackTrace is { } st ? "\n" + st : "");
             Reply.Print("[wasp.aspnetcore] " + msg);
             try
             {
@@ -199,19 +208,53 @@ public sealed class IcServer : IServer
         httpCtx.Features.Set<IHttpRequestBodyDetectionFeature>(
             new IcRequestBodyDetectionFeature(canHaveBody: icReq.Body.Length > 0));
 
-        // Pre-size the response body stream so we can read it back after dispatch.
-        httpCtx.Response.Body = new MemoryStream();
+        // Provide a single MemoryStream-backed IHttpResponseBodyFeature so
+        // writes through Response.Body, Response.BodyWriter, and result writers
+        // (Razor's HttpResponseStreamWriter, EndpointResponseBufferingFeature)
+        // all converge on the same buffer. Use the framework's
+        // StreamResponseBodyFeature so the PipeWriter behavior matches what
+        // ASP.NET Core middleware expects.
+        var responseBuffer = new MemoryStream();
+        httpCtx.Features.Set<IHttpResponseBodyFeature>(new IcResponseBodyFeature(responseBuffer));
+        // Track the buffer separately so BuildIcResponse can find it even if
+        // a middleware/handler swaps the feature (e.g. Razor SSR's
+        // EndpointResponseBufferingFeature does this for buffering output).
+        httpCtx.Items["__icResponseBuffer"] = responseBuffer;
 
         return httpCtx;
     }
 
-    private static IcHttpResponse BuildIcResponse(AspHttpResponse aspResp)
+    private static IcHttpResponse BuildIcResponse(HttpContext httpCtx, AspHttpResponse aspResp)
     {
-        // Read the response body bytes.
+        // Read the response body bytes. The IcResponseBodyFeature we installed
+        // in BuildHttpContext owns the MemoryStream; every write (via Body,
+        // BodyWriter, or third-party result writers) lands there.
         byte[] body = Array.Empty<byte>();
-        if (aspResp.Body is MemoryStream ms)
+        // Flush the current body feature's pipe writer first — a middleware
+        // (e.g. Razor's EndpointResponseBufferingFeature) may have wrapped
+        // our feature and the writes need to be drained before we read.
+        try
+        {
+            httpCtx.Response.BodyWriter.FlushAsync().AsTask().GetAwaiter().GetResult();
+        }
+        catch { /* writer already completed — fine */ }
+        // Our stable handle on the response buffer, established in
+        // BuildHttpContext. Middlewares can swap the feature; the buffer
+        // doesn't move.
+        if (httpCtx.Items["__icResponseBuffer"] is MemoryStream buf && buf.Length > 0)
+        {
+            body = buf.ToArray();
+        }
+        else if (aspResp.Body is MemoryStream ms && ms.Length > 0)
         {
             body = ms.ToArray();
+        }
+        else if (aspResp.Body is Stream s && s.CanSeek && s.Length > 0)
+        {
+            s.Position = 0;
+            using var copy = new MemoryStream();
+            s.CopyTo(copy);
+            body = copy.ToArray();
         }
 
         // Convert response headers to the IC flat key-value list.
@@ -253,6 +296,36 @@ public sealed class IcServer : IServer
         public IcRequestBodyDetectionFeature(bool canHaveBody) => CanHaveBody = canHaveBody;
         public bool CanHaveBody { get; }
     }
+
+    // MemoryStream-backed response body feature. PipeWriter is created with
+    // StreamPipeWriterOptions so writes auto-flush to the underlying stream
+    // on FlushAsync (the framework convention).
+    internal sealed class IcResponseBodyFeature : IHttpResponseBodyFeature
+    {
+        public MemoryStream Buffer { get; }
+        public Stream Stream { get; }
+        public System.IO.Pipelines.PipeWriter Writer { get; }
+
+        public IcResponseBodyFeature(MemoryStream buffer)
+        {
+            Buffer = buffer;
+            Stream = buffer;
+            Writer = System.IO.Pipelines.PipeWriter.Create(
+                buffer,
+                new System.IO.Pipelines.StreamPipeWriterOptions(leaveOpen: true));
+        }
+
+        public Task StartAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task SendFileAsync(string path, long offset, long? count, CancellationToken ct = default)
+            => throw new NotSupportedException("SendFile is not supported on canister.");
+        public Task CompleteAsync()
+        {
+            Writer.Complete();
+            return Task.CompletedTask;
+        }
+        public void DisableBuffering() { }
+    }
+
 
     // Erases the TContext generic so the static Dispatch thunks can hold a
     // single non-generic reference to the application.

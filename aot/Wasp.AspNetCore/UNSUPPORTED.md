@@ -179,6 +179,39 @@ api.MapPost("/save", saveHandler);
 
 This bypasses RDG entirely; the AOT compiler treats it as a plain delegate call. AOT-stable across trim configurations.
 
+## Razor SSR (M2 work-in-progress)
+
+The full `Microsoft.AspNetCore.Components` stack — including `AddRazorComponents()`, the route discovery, the `EndpointHtmlRenderer`, and `HtmlRenderer` (from `Microsoft.AspNetCore.Components.Web`) — **AOT-compiles to wasm32-wasi** and runs inside the canister.  All the moving parts wire up: the framework's service graph resolves, the route table builds, components instantiate, headers come back correctly (e.g. `blazor-enhanced-nav: allow`).
+
+What does **not** work today:
+
+1. **`StaticHtmlRenderer.RenderCore` NREs at the HTML write phase.** The renderer instantiates the component and walks the render tree, then dies in `RenderCore(int, TextWriter, ArrayRange<RenderTreeFrame>, int)` with a bare `NullReferenceException` (no specific field — appears to be a static cache the trimmer dropped). Confirmed with both `app.MapRazorComponents<App>()` AND `HtmlRenderer.RenderComponentAsync<App>().ToHtmlString()`. Survives even with `[DynamicDependency(All, typeof(App))]` on the entry point.
+
+2. **`EndpointResponseBufferingFeature` doesn't flush back through our `IHttpResponseBodyFeature`.** When `MapRazorComponents` is used, the framework's enhanced-nav streaming feature wraps our body feature with its own buffering layer, then on completion does not write the buffered bytes back to the outer feature. So even if (1) were fixed, the body would still arrive empty.
+
+**Workaround in `samples/RazorOnIc`:** the sample's `/` endpoint hand-writes the HTML via `ctx.Response.WriteAsync(...)`. The `<App />` Razor component is shipped alongside as documentation of the intended pattern, and `/razor` is wired to render it via `HtmlRenderer` (returns 500 today). Form POST + `StableCell<int>` work end-to-end through the hand-written path: bumping the counter does POST → 303 → GET, and the count survives canister upgrade.
+
+**Fix paths under investigation (M2 follow-up):**
+- Aggressive `TrimmerRootDescriptor` over `Microsoft.AspNetCore.Components.HtmlRendering.Infrastructure` to preserve the field metadata that's getting dropped.
+- A hand-rolled minimal Razor renderer (`Wasp.AspNetCore.Razor.SsrLite`) that bypasses `StaticHtmlRenderer` and walks `RenderTreeFrame[]` directly.
+- Replace `EndpointResponseBufferingFeature` with our own simpler feature via a `RazorComponentsServiceOptions` config or a custom middleware that strips the buffering.
+
+## DataProtection — registration short-circuit
+
+`Microsoft.AspNetCore.DataProtection.XmlKeyManager` doesn't AOT-compile cleanly to wasm32-wasi: `KeyManagementOptions..ctor()`'s field initializer references `TimeSpan.FromMilliseconds(long)` which the trimmer drops. `KeyManagementOptionsSetup.Configure` then NREs on the empty-options instance. Anything that calls `AddDataProtection()` transitively (any of `AddAuthentication`, `AddRazorComponents`, `AddAntiforgery`) dies at `Host.StartAsync`.
+
+The library ships a fix:
+
+1. **`Wasp.AspNetCore.UseIcDataProtection()`** — call BEFORE the first framework call that triggers data protection. Pre-registers `IDataProtectionProvider` and `IKeyManager` with no-op implementations. `AddDataProtection` then uses `TryAddSingleton` and our registrations win.
+
+2. **ILLink substitutions** baked into the package:
+   - `KeyManagementOptions..ctor()` → stubbed (empty body).
+   - `KeyManagementOptionsSetup.Configure` → stubbed (no-op).
+   - `AntiforgeryOptionsSetup.Configure` → stubbed (calls `SHA256.HashData` to derive a cookie name, not supported on wasm). Consumer must `services.Configure<AntiforgeryOptions>(o => o.Cookie.Name = "...")` instead.
+   - `PersistentServicesRegistry.RegisterForPersistence` / `RestoreStateAsync` → stubbed (hashes types via `SHA256.HashData` — not needed for SSR-only).
+
+These are loaded automatically by every project that imports `Wasp.AspNetCore.targets`.
+
 ## Verification
 
 A canister that exercises a banned path returns:

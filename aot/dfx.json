@@ -52,6 +52,12 @@
       "wasm": "samples/AspNetCoreApi/AspNetCoreApi.canister.wasm",
       "candid": "samples/AspNetCoreApi/aspnetcoreapi.did",
       "build": []
+    },
+    "razoronic": {
+      "type": "custom",
+      "wasm": "samples/RazorOnIc/RazorOnIc.canister.wasm",
+      "candid": "samples/RazorOnIc/razoronic.did",
+      "build": []
     }
   },
   "networks": {

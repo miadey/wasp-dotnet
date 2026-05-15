@@ -1,0 +1,11 @@
+@* Route table — discovered by assembly scan. *@
+<Router AppAssembly="@typeof(WaspSample.RazorOnIc.RazorOnIcCanister).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" DefaultLayout="@typeof(Layout.MainLayout)" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="@typeof(Layout.MainLayout)">
+            <p>not found</p>
+        </LayoutView>
+    </NotFound>
+</Router>

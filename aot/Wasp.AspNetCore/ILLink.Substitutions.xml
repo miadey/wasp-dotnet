@@ -34,4 +34,49 @@
       <method signature="System.Void .ctor(System.String,Microsoft.Extensions.FileProviders.Physical.ExclusionFilters)" body="stub" />
     </type>
   </assembly>
+
+  <!-- DataProtection KeyManagementOptions..ctor() — pulled in transitively by
+       AddAuthentication (#51 finding) and AddRazorComponents (#54 finding).
+       The ctor's field initializers reference TimeSpan.FromMilliseconds(long),
+       which the trimmer removes (only the (double) overload survives in the
+       reachable graph). Result: ILC marks the ctor "will always throw"; service
+       graph resolution at Host.StartAsync trips Arg_TargetInvocationException.
+       Stubbing the ctor leaves the type with all-default fields. Safe as long
+       as we don't *use* data protection (no encrypted cookies, no antiforgery
+       tokens), which is fine for canister apps — there's no shared secret to
+       protect anyway. -->
+  <assembly fullname="Microsoft.AspNetCore.DataProtection">
+    <type fullname="Microsoft.AspNetCore.DataProtection.KeyManagement.KeyManagementOptions">
+      <method signature="System.Void .ctor()" body="stub" />
+    </type>
+    <!-- KeyManagementOptionsSetup.Configure reads fields on the
+         options instance that our ctor stub left null (AuthenticatedEncryptor
+         configuration, key escrow sinks, etc.) and NullRefs at startup.
+         No-op the configure pass; we don't use DataProtection anyway. -->
+    <type fullname="Microsoft.AspNetCore.DataProtection.Internal.KeyManagementOptionsSetup">
+      <method signature="System.Void Configure(Microsoft.AspNetCore.DataProtection.KeyManagement.KeyManagementOptions)" body="stub" />
+    </type>
+  </assembly>
+
+  <!-- AntiforgeryOptionsSetup.Configure → ComputeCookieName → SHA256.HashData,
+       which is unsupported on wasm32-wasi (PlatformNotSupportedException).
+       Stubbing Configure leaves AntiforgeryOptions at defaults; consumer must
+       set Cookie.Name themselves via services.Configure<AntiforgeryOptions>. -->
+  <assembly fullname="Microsoft.AspNetCore.Antiforgery">
+    <type fullname="Microsoft.AspNetCore.Antiforgery.AntiforgeryOptionsSetup">
+      <method signature="System.Void Configure(Microsoft.AspNetCore.Antiforgery.AntiforgeryOptions)" body="stub" />
+    </type>
+  </assembly>
+
+  <!-- PersistentServicesRegistry is hit on every Razor render via
+       EndpointHtmlRenderer.InitializeStandardComponentServicesAsync. Its
+       ComputeKey calls SHA256.HashData. M2 (SSR-only) does not need persistent
+       component state — that's an M3 thing (WASM hydration). No-op the
+       Register/Restore methods. -->
+  <assembly fullname="Microsoft.AspNetCore.Components">
+    <type fullname="Microsoft.AspNetCore.Components.Infrastructure.PersistentServicesRegistry">
+      <method signature="System.Void RegisterForPersistence(Microsoft.AspNetCore.Components.PersistentComponentState)" body="stub" />
+      <method signature="System.Threading.Tasks.Task RestoreStateAsync(Microsoft.AspNetCore.Components.Infrastructure.IPersistentComponentStateStore)" body="stub" />
+    </type>
+  </assembly>
 </linker>
