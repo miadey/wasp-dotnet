@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.JSInterop;
 using Wasp.IcCdk;
 
 namespace Wasp.AspNetCore.Blazor.Server;
@@ -140,13 +141,24 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
         var clientProxy = new IcClientProxy(_transport);
         var circuitClientProxy = new CircuitClientProxy(clientProxy, _transport.ConnectionId);
 
-        // ComponentDescriptor deserialization needs the framework's internal
-        // ServerComponentDeserializer; wiring it through is a separate
-        // sub-task (see file header). For the first end-to-end pass an
-        // empty descriptor list lets CircuitHost be constructed cleanly —
-        // the user just won't see any components rendered until UpdateRootComponents
-        // is forwarded too.
-        var components = (IReadOnlyList<ComponentDescriptor>)Array.Empty<ComponentDescriptor>();
+        // Deserialize the inbound component records. The framework's
+        // IServerComponentDeserializer is registered by
+        // AddInteractiveServerComponents and is the canonical path —
+        // it's now public in our vendored Components.Server.dll after
+        // the Cecil weaver.
+        var deserializer = _services.GetRequiredService<IServerComponentDeserializer>();
+        IReadOnlyList<ComponentDescriptor> components;
+        if (!deserializer.TryDeserializeComponentDescriptorCollection(
+                serializedComponentRecords, out var descriptorList))
+        {
+            // Empty descriptor list — blazor.web.js will follow up with
+            // UpdateRootComponents to add components dynamically.
+            components = Array.Empty<ComponentDescriptor>();
+        }
+        else
+        {
+            components = descriptorList;
+        }
 
         var user = new ClaimsPrincipal(new ClaimsIdentity());
         var store = new NoopPersistentComponentStateStore();
@@ -169,10 +181,13 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
     public Task UpdateRootComponents(string serializedComponentOperations, string applicationState)
     {
         // CircuitHost.UpdateRootComponents takes a RootComponentOperationBatch +
-        // IClearableStore. Deserializing the batch requires the framework's
-        // internal Json reader. Stubbed — components added by StartCircuit's
-        // initial descriptor list will render; dynamic add/remove not yet
-        // supported. Tracked in M4.S7 demo work.
+        // IClearableStore. IClearableStore lives in
+        // Microsoft.AspNetCore.Components.Endpoints (NOT Components.Server)
+        // and our weaver only widened the .Server assembly. Wiring this
+        // requires a second weaver pass on Components.Endpoints.dll OR
+        // hand-rolling the JSON-array deserialization. Components defined
+        // by StartCircuit's initial descriptor list still render; only
+        // dynamic add/remove is missing. Tracked in #71 follow-up.
         return Task.CompletedTask;
     }
 
@@ -201,15 +216,9 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
     public ValueTask BeginInvokeDotNetFromJS(
         string callId, string assemblyName, string methodIdentifier, long dotNetObjectId, string argsJson)
     {
-        // Routes through RemoteJSRuntime.BeginInvokeDotNetFromJS, not
-        // CircuitHost directly. Need to fish out the JSRuntime from the
-        // circuit's service scope. Tracked in M4.S7 demo work — without
-        // this, no click handler fires.
-        throw new NotImplementedException(
-            "BeginInvokeDotNetFromJS: routes through RemoteJSRuntime on the circuit's service scope. " +
-            "Sketch: var js = _circuit.Services.GetRequiredService<IJSRuntime>(); " +
-            "((RemoteJSRuntime)js).BeginInvokeDotNetFromJS(...). " +
-            "Needs IJSRuntime → RemoteJSRuntime cast which only works post-AOT; tracked in M4.S7.");
+        EnsureCircuit();
+        return new ValueTask(_circuit!.BeginInvokeDotNetFromJS(
+            callId, assemblyName, methodIdentifier, dotNetObjectId, argsJson));
     }
 
     public ValueTask EndInvokeJSFromDotNet(long asyncHandle, bool succeeded, string arguments)

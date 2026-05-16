@@ -88,13 +88,21 @@
                 'backendCanisterId and gatewayUrl before any /_blazor ' +
                 'WebSocket is opened.');
         }
-        if (typeof window.IcWebSocket !== 'function') {
+        // The bundled ic-websocket.umd.js exposes the module as
+        // window.IcWebSocketModule (IIFE global name). Unwrap to the
+        // IcWebSocket constructor. window.IcWebSocket is also accepted
+        // for projects that expose it directly.
+        var IcWS = window.IcWebSocket
+            || (window.IcWebSocketModule && window.IcWebSocketModule.IcWebSocket)
+            || (window.IcWebSocketModule && window.IcWebSocketModule.default && window.IcWebSocketModule.default.IcWebSocket);
+        if (typeof IcWS !== 'function') {
             throw new Error(
-                '[ic-ws-blazor] window.IcWebSocket missing — load the ' +
-                'ic-websocket-js UMD bundle before this adapter.');
+                '[ic-ws-blazor] IcWebSocket constructor not found — load ' +
+                'the ic-websocket-js UMD bundle (window.IcWebSocketModule) ' +
+                'before this adapter.');
         }
         console.debug('[ic-ws-blazor] intercepting', url, '-> IC canister', cfg.backendCanisterId);
-        return new window.IcWebSocket({
+        return new IcWS({
             canisterId: cfg.backendCanisterId,
             gatewayUrl: cfg.gatewayUrl,
             host: cfg.icHost || 'https://icp-api.io',
