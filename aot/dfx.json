@@ -33,7 +33,9 @@
     },
     "blazorchat": {
       "type": "assets",
-      "source": ["samples/BlazorChat/bin/Release/net10.0/publish/wwwroot"]
+      "source": [
+        "samples/BlazorChat/bin/Release/net10.0/publish/wwwroot"
+      ]
     },
     "aspnetcorehello": {
       "type": "custom",
@@ -67,8 +69,12 @@
     },
     "circuitonic_assets": {
       "type": "assets",
-      "source": ["samples/CircuitOnIc/bin/Release/net10.0/wasi-wasm/asset-canister"],
-      "dependencies": ["circuitonic"]
+      "source": [
+        "samples/CircuitOnIc/asset-canister"
+      ],
+      "dependencies": [
+        "circuitonic"
+      ]
     }
   },
   "networks": {
