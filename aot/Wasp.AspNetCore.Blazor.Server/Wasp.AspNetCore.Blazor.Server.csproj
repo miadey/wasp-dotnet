@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Wasp.AspNetCore.Blazor.Server</RootNamespace>
+    <AssemblyName>Wasp.AspNetCore.Blazor.Server</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>Wasp.AspNetCore.Blazor.Server</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Description>Hosts Blazor's CircuitHost (InteractiveServer render mode) on an IC canister, replacing SignalR transport with Wasp.WebSockets over the IC-WebSocket protocol. Skeleton only — see docs/m4-blazor-server-on-canister.md.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+    <ProjectReference Include="..\Wasp.AspNetCore\Wasp.AspNetCore.csproj" />
+    <ProjectReference Include="..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
+  </ItemGroup>
+
+</Project>

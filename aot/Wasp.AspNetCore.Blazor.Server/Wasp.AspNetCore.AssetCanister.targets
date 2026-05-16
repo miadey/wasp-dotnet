@@ -1,0 +1,83 @@
+<Project>
+
+  <!-- Wasp.AspNetCore.AssetCanister.targets — MSBuild glue for the
+       two-canister Blazor Server topology (M4.S6).
+
+       Topology:
+
+         /samples/CircuitOnIc/
+           backend.csproj           ← compiled to wasm, hosts CircuitHost
+           wwwroot/
+             index.html             ← static shell
+             ic-ws-blazor-adapter.js  (copied from package)
+             ic-websocket.umd.js    (bundled at restore time)
+             _framework/
+               blazor.web.js        (copied from Microsoft.AspNetCore.Components.Web)
+
+       Build outputs to:
+         bin/$(Configuration)/$(TargetFramework)/asset-canister/
+
+       Then `dfx deploy` consumes:
+         dfx.json → "circuitonic_assets": { "type": "assets", "source": [...] }
+
+       Import from a consuming canister csproj alongside the Blazor.Server
+       targets:
+
+         <PropertyGroup>
+           <WaspAssetCanisterEnabled>true</WaspAssetCanisterEnabled>
+           <WaspAssetCanisterBackendId>rrkah-fqaaa-aaaaa-aaaaq-cai</WaspAssetCanisterBackendId>
+           <WaspAssetCanisterGateway>wss://gateway.icws.io</WaspAssetCanisterGateway>
+         </PropertyGroup>
+
+         <Import Project="..\..\Wasp.AspNetCore.Blazor.Server\Wasp.AspNetCore.AssetCanister.targets" />
+
+  -->
+
+  <PropertyGroup>
+    <_WaspAssetSourceDir>$(MSBuildThisFileDirectory)</_WaspAssetSourceDir>
+    <_WaspAssetOutputDir>$(OutputPath)asset-canister</_WaspAssetOutputDir>
+    <WaspAssetCanisterEnabled Condition="'$(WaspAssetCanisterEnabled)' == ''">false</WaspAssetCanisterEnabled>
+  </PropertyGroup>
+
+  <!-- The shipped IC-WS shim. Copied as-is — works for every Blazor Server
+       canister regardless of which backend canister id is configured. -->
+  <ItemGroup>
+    <WaspAssetCanisterStaticFile Include="$(_WaspAssetSourceDir)wwwroot\ic-ws-blazor-adapter.js" />
+  </ItemGroup>
+
+  <!-- Per-canister bootstrap script. Emits a tiny <script> that populates
+       window.IcWsBlazorConfig with this canister's backend id before
+       blazor.web.js loads. -->
+  <Target Name="EmitWaspAssetBootstrap"
+          Condition="'$(WaspAssetCanisterEnabled)' == 'true'"
+          BeforeTargets="CopyWaspAssetCanister">
+    <Error Condition="'$(WaspAssetCanisterBackendId)' == ''"
+           Text="WaspAssetCanisterBackendId must be set when WaspAssetCanisterEnabled=true. Use the canister id of the backend (CircuitHost) canister, e.g. rrkah-fqaaa-aaaaa-aaaaq-cai." />
+    <Error Condition="'$(WaspAssetCanisterGateway)' == ''"
+           Text="WaspAssetCanisterGateway must be set when WaspAssetCanisterEnabled=true. Use the URL of an ic-websocket-gateway, e.g. wss://gateway.icws.io." />
+    <MakeDir Directories="$(_WaspAssetOutputDir)" />
+    <WriteLinesToFile File="$(_WaspAssetOutputDir)\ic-ws-blazor-config.js"
+                      Overwrite="true"
+                      Lines="window.IcWsBlazorConfig = { backendCanisterId: '$(WaspAssetCanisterBackendId)', gatewayUrl: '$(WaspAssetCanisterGateway)', icHost: '$(WaspAssetCanisterIcHost)' || 'https://icp-api.io' }%3B" />
+  </Target>
+
+  <Target Name="CopyWaspAssetCanister"
+          Condition="'$(WaspAssetCanisterEnabled)' == 'true'"
+          AfterTargets="Build">
+    <MakeDir Directories="$(_WaspAssetOutputDir)" />
+    <Copy SourceFiles="@(WaspAssetCanisterStaticFile)"
+          DestinationFolder="$(_WaspAssetOutputDir)"
+          SkipUnchangedFiles="true" />
+    <!-- Project-local wwwroot/* (index.html, app.css, etc.) -->
+    <ItemGroup>
+      <_ProjectAssetFile Include="$(MSBuildProjectDirectory)\wwwroot\**\*.*"
+                        Exclude="$(MSBuildProjectDirectory)\wwwroot\bin\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ProjectAssetFile)"
+          DestinationFiles="@(_ProjectAssetFile -> '$(_WaspAssetOutputDir)\%(RecursiveDir)%(FileName)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Message Importance="high"
+             Text="[Wasp.AssetCanister] Asset canister source ready at $(_WaspAssetOutputDir). Add to dfx.json:&#xA;&quot;circuitonic_assets&quot;: { &quot;type&quot;: &quot;assets&quot;, &quot;source&quot;: [&quot;$(_WaspAssetOutputDir)&quot;] }" />
+  </Target>
+
+</Project>

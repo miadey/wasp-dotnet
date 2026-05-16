@@ -1,0 +1,48 @@
+<Project>
+
+  <!-- Wasp.AspNetCore.Blazor.Server consumer setup. Import from a leaf
+       canister csproj alongside Wasp.AspNetCore.targets:
+
+         <Import Project="..\..\Wasp.AspNetCore\Wasp.AspNetCore.targets" />
+         <Import Project="..\..\Wasp.AspNetCore.Blazor.Server\Wasp.AspNetCore.Blazor.Server.targets" />
+
+       Substitutes the framework Microsoft.AspNetCore.Components.Server.dll
+       with a Mono.Cecil-rewritten copy from Vendor/. The rewrite (see
+       shared/tools/Wasp.CircuitHostWeaver) promotes the entire
+       Microsoft.AspNetCore.Components.Server.* namespace from `internal`
+       to `public` so Wasp.AspNetCore.Blazor.Server can construct
+       CircuitHost / CircuitClientProxy / CircuitFactory from outside the
+       defining assembly without vendoring the source tree.
+
+       Build the vendored DLL via:
+         dotnet run --project shared/tools/Wasp.CircuitHostWeaver -- \
+           /usr/local/share/dotnet/shared/Microsoft.AspNetCore.App/10.0.*/Microsoft.AspNetCore.Components.Server.dll \
+           aot/Wasp.AspNetCore.Blazor.Server/Vendor/Microsoft.AspNetCore.Components.Server.dll
+  -->
+
+  <PropertyGroup>
+    <_WaspBlazorServerDir>$(MSBuildThisFileDirectory)</_WaspBlazorServerDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Exclude the framework copy from the AOT compiler's reference set so
+         it can't shadow our vendored version. Wasp.AspNetCore.targets
+         already injects an IlcReference glob over the shared framework;
+         this exclusion runs AFTER that glob via the Remove metadata. -->
+    <IlcReference Remove="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/Microsoft.AspNetCore.Components.Server.dll" />
+    <IlcReference Remove="/usr/local/share/dotnet/shared/Microsoft.AspNetCore.App/*/Microsoft.AspNetCore.Components.Server.dll" />
+
+    <!-- Vendored copy with internals widened to public. -->
+    <IlcReference Include="$(_WaspBlazorServerDir)Vendor\Microsoft.AspNetCore.Components.Server.dll"
+                  Condition="Exists('$(_WaspBlazorServerDir)Vendor\Microsoft.AspNetCore.Components.Server.dll')" />
+  </ItemGroup>
+
+  <!-- Build-time sanity check: warn (not error — the file may be absent on
+       a fresh clone before the weaver runs) when the vendored DLL is
+       missing. -->
+  <Target Name="_WaspBlazorServerVendorWarning" BeforeTargets="ResolveReferences">
+    <Warning Condition="!Exists('$(_WaspBlazorServerDir)Vendor\Microsoft.AspNetCore.Components.Server.dll')"
+             Text="Wasp.AspNetCore.Blazor.Server: Vendor/Microsoft.AspNetCore.Components.Server.dll not found. Run shared/tools/Wasp.CircuitHostWeaver to generate it before AOT-compiling a canister that uses InteractiveServer render mode." />
+  </Target>
+
+</Project>
