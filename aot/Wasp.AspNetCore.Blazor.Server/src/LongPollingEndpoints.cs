@@ -38,6 +38,26 @@ public static class LongPollingEndpoints
         if (endpoints is null) throw new ArgumentNullException(nameof(endpoints));
         if (registry is null) throw new ArgumentNullException(nameof(registry));
 
+        // Blazor's client boot sequence fetches /_blazor/initializers
+        // BEFORE negotiate, expecting a JSON array of additional JS init
+        // module URLs. We don't have any — return []. If this endpoint
+        // 404s, blazor.web.js calls response.json() on the "not found"
+        // body and throws "Unexpected end of JSON input".
+        endpoints.MapPost(pattern + "/initializers", async (HttpContext ctx) =>
+        {
+            ctx.Response.StatusCode = 200;
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync("[]");
+        }).DisableAntiforgery();
+
+        // Some Blazor clients GET /_blazor/initializers too.
+        endpoints.MapGet(pattern + "/initializers", async (HttpContext ctx) =>
+        {
+            ctx.Response.StatusCode = 200;
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync("[]");
+        });
+
         // SignalR negotiate. We only advertise LongPolling — Blazor's client
         // honors the order and picks the first transport it supports, so this
         // bypasses the WebSocket/SSE fallback dance.
@@ -84,10 +104,17 @@ public static class LongPollingEndpoints
                 {
                     conn.Transport.HandleInbound(bytes);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // Bad framing from client — drop the connection.
+                    // Surface the actual error so the client log is
+                    // diagnosable. Bytes are dumped (max 256) as hex.
+                    int dumpLen = Math.Min(bytes.Length, 256);
+                    var hex = new System.Text.StringBuilder(dumpLen * 2);
+                    for (int i = 0; i < dumpLen; i++) hex.Append(bytes[i].ToString("x2"));
                     ctx.Response.StatusCode = 400;
+                    ctx.Response.ContentType = "text/plain";
+                    await ctx.Response.WriteAsync(
+                        $"{ex.GetType().Name}: {ex.Message}\nfirst {dumpLen}/{bytes.Length} bytes: {hex}");
                     return;
                 }
             }
@@ -98,6 +125,11 @@ public static class LongPollingEndpoints
         // entry is already a complete length-prefixed frame the client can
         // split). Returns empty body immediately if nothing is queued;
         // blazor.web.js re-polls on its own cadence.
+        //
+        // We buffer to a byte[] first so ContentLength is set BEFORE the
+        // response is committed — without it the framework picks chunked
+        // transfer encoding which the IC HTTP gateway buffers strangely
+        // (browser sees content-length: 0 even when bytes were written).
         endpoints.MapGet(pattern, async (HttpContext ctx) =>
         {
             string? id = ctx.Request.Query["id"];
@@ -113,14 +145,19 @@ public static class LongPollingEndpoints
                 return;
             }
 
-            ctx.Response.StatusCode = 200;
-            ctx.Response.ContentType = "application/octet-stream";
-
-            // Concatenate every queued frame. Each frame already carries
-            // its own length prefix from BlazorPackWriter / SendRawFrame.
+            using var ms = new MemoryStream();
             while (conn.Outbound.TryDequeue(out var frame))
             {
-                await ctx.Response.Body.WriteAsync(frame);
+                ms.Write(frame, 0, frame.Length);
+            }
+            var bytes = ms.ToArray();
+
+            ctx.Response.StatusCode = 200;
+            ctx.Response.ContentType = "application/octet-stream";
+            ctx.Response.ContentLength = bytes.Length;
+            if (bytes.Length > 0)
+            {
+                await ctx.Response.Body.WriteAsync(bytes);
             }
         }).DisableAntiforgery();
 

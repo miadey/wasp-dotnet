@@ -206,21 +206,30 @@ public sealed class IcCircuitTransport : IIcCircuitTransport
 
     private static void ValidateHandshake(ReadOnlySpan<byte> jsonBytes)
     {
-        // Cheap protocol check without bringing in System.Text.Json: ensure
-        // the bytes mention "messagepack". blazor.web.js will not send any
-        // other protocol after we shim the WebSocket; this guard fires only
-        // if a misconfigured client connects directly.
-        const string needle = "messagepack";
-        for (int i = 0; i + needle.Length <= jsonBytes.Length; i++)
+        // Blazor Server's SignalR client sends `{"protocol":"blazorpack",
+        // "version":1}` — `blazorpack` is its MessagePack-derived hub
+        // protocol (a subset of msgpack with Hub-specific framing, which
+        // BlazorPackReader/Writer handle). Plain SignalR clients send
+        // `messagepack`; accept either so we don't surprise non-Blazor
+        // SignalR consumers.
+        if (Contains(jsonBytes, "blazorpack")) return;
+        if (Contains(jsonBytes, "messagepack")) return;
+        throw new FormatException(
+            "SignalR handshake must advertise 'blazorpack' (Blazor Server) or 'messagepack'");
+
+        static bool Contains(ReadOnlySpan<byte> hay, string needle)
         {
-            bool match = true;
-            for (int j = 0; j < needle.Length; j++)
+            for (int i = 0; i + needle.Length <= hay.Length; i++)
             {
-                if (jsonBytes[i + j] != (byte)needle[j]) { match = false; break; }
+                bool match = true;
+                for (int j = 0; j < needle.Length; j++)
+                {
+                    if (hay[i + j] != (byte)needle[j]) { match = false; break; }
+                }
+                if (match) return true;
             }
-            if (match) return;
+            return false;
         }
-        throw new FormatException("SignalR handshake did not advertise the 'messagepack' protocol");
     }
 
     private static readonly byte[] PingFrame = BuildPingFrame();

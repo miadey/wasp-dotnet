@@ -47,6 +47,20 @@ public sealed class BlazorMarkerMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        // Only the SSR root needs marker injection. /_blazor SignalR
+        // endpoints and /_framework/* static files should pass straight
+        // through — wrapping their responses through the buffered stream
+        // can break content-length and chunked-encoding accounting on
+        // the IC HTTP gateway path.
+        var path = context.Request.Path.Value;
+        if (path is not null &&
+            (path.StartsWith("/_blazor", StringComparison.OrdinalIgnoreCase) ||
+             path.StartsWith("/_framework", StringComparison.OrdinalIgnoreCase)))
+        {
+            await _next(context);
+            return;
+        }
+
         // Capture the response body so we can append the marker after the
         // upstream renderer writes its HTML.
         var originalStream = context.Response.Body;

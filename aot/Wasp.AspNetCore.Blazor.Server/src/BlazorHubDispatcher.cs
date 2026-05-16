@@ -62,6 +62,33 @@ public static class BlazorHubDispatcher
 
         var args = message.Args;
         var invocationId = message.InvocationId;
+        try
+        {
+            await DispatchCore(hub, args, invocationId, message.Target, completionSink);
+        }
+        catch (Exception ex)
+        {
+            // Surface failures back to the client as an error Completion so
+            // it isn't left hanging on `await connection.invoke(...)`. Only
+            // possible if the inbound message carries an invocationId.
+            if (invocationId is not null && completionSink is not null)
+            {
+                completionSink(BlazorPackWriter.WriteCompletionError(
+                    invocationId, $"{ex.GetType().Name}: {ex.Message}"));
+            }
+            // Bubble for visibility in canister logs.
+            throw;
+        }
+    }
+
+    private static async ValueTask DispatchCore(
+        IBlazorHubFacade hub,
+        object?[] args,
+        string? invocationId,
+        string target,
+        Action<byte[]>? completionSink)
+    {
+        var message = new IcCircuitInboundMessage(target, args, invocationId);
         switch (message.Target)
         {
             case "StartCircuit":
