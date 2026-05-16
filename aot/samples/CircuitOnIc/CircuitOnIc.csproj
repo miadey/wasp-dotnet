@@ -26,6 +26,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Embed blazor.web.js so the backend canister can serve it from
+         /_framework/blazor.web.js — single-canister setup, no cross-
+         origin dance. LogicalName matches the URL prefix our
+         EmbeddedStaticFiles handler maps. -->
+    <EmbeddedResource Include="wwwroot\_framework\blazor.web.js"
+                      LogicalName="wwwroot/_framework/blazor.web.js" />
+  </ItemGroup>
+
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.7.0-preview00010" />
     <PackageReference Include="runtime.linux-x64.Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-alpha.1.25162.1" />

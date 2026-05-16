@@ -130,6 +130,11 @@ public static class Program
             //   DELETE /_blazor?id=...     close
             app.MapWaspBlazorLongPolling(_registry);
 
+            // Serve blazor.web.js (and any other wwwroot/* embedded
+            // resources) so the page is self-contained — no cross-origin
+            // script loading from a separate asset canister.
+            app.MapWaspEmbeddedStaticFiles(typeof(Program).Assembly);
+
             // Serve the SSR shell. NOT calling .AddInteractiveServerRenderMode()
             // because it wires ServerComponentSerializer which needs JSON
             // reflection (PNS on wasm32-wasi). We emit our own marker via

@@ -1,20 +1,20 @@
 @* M4.S7 — bypass <Router>/<Routes> (which trips an AOT struct-copy bug
    in StaticHtmlRenderer.RenderAttributes when reading reference-typed
    attribute values like NotFoundPage Type / AppAssembly). Render Counter
-   inline. blazor.web.js still picks up the <!--Blazor:server--> markers
+   inline. blazor.web.js picks up the <!--Blazor:server--> markers
    emitted by BlazorMarkerMiddleware and hydrates this component over the
-   SignalR Long Polling transport. *@
+   SignalR Long Polling transport.
+
+   Static assets (blazor.web.js etc.) are served by the asset canister
+   (cross-origin with CORS *). The /_blazor SignalR endpoints are on the
+   backend canister, same origin as this page. *@
 <!DOCTYPE html>
 <html lang="en">
 
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <base href="/" />
     <title>Blazor Server on IC — Counter</title>
-    <link rel="stylesheet" href="lib/bootstrap/dist/css/bootstrap.min.css" />
-    <link rel="stylesheet" href="app.css" />
-    <link rel="icon" type="image/png" href="favicon.png" />
     <HeadOutlet />
 </head>
 
@@ -25,18 +25,35 @@
     <Counter />
 
     <hr />
-    <small>Server-rendered shell + <code>blazor.web.js</code> from the asset canister. SignalR transport is pinned to <code>HttpTransportType.LongPolling</code> (value 4) so the client never tries WebSocket. <code>/_blazor/negotiate</code>, <code>/_blazor</code> POST (send), and <code>/_blazor</code> GET (poll) are all routed to the backend canister's <code>http_request_update</code>.</small>
+    <small>SignalR transport pinned to <code>HttpTransportType.LongPolling</code> (value 4). <code>/_blazor/negotiate</code>, POST <code>/_blazor</code> (send), and GET <code>/_blazor</code> (poll) all route to this canister's <code>http_request_update</code>.</small>
 
-    <script src="_framework/blazor.web.js" autostart="false"></script>
+    <script src="/_framework/blazor.web.js" autostart="false"></script>
     <script>
+      // Override fetch to trace every /_blazor request for diagnostics.
+      const origFetch = window.fetch;
+      window.fetch = async function(input, init) {
+        const url = typeof input === 'string' ? input : input.url;
+        if (url && url.includes('/_blazor')) {
+          console.log('[wasp] FETCH', init?.method || 'GET', url);
+          try {
+            const resp = await origFetch(input, init);
+            console.log('[wasp] FETCH resp', url, resp.status, 'ct=' + resp.headers.get('content-type'), 'cl=' + resp.headers.get('content-length'));
+            return resp;
+          } catch (e) {
+            console.log('[wasp] FETCH err', url, e.message);
+            throw e;
+          }
+        }
+        return origFetch(input, init);
+      };
+
       // HttpTransportType: 1=WebSockets, 2=ServerSentEvents, 4=LongPolling.
-      // Pinning to 4 because canisters can't host real WebSockets; SSE
-      // would require IcServer to honor streaming_strategy callbacks
-      // (separate work item).
       Blazor.start({
         circuit: {
           configureSignalR: builder => {
-            builder.withUrl('/_blazor', { transport: 4 });
+            builder
+              .withUrl('/_blazor', { transport: 4 })
+              .configureLogging(1);  // LogLevel.Trace
           }
         }
       });
