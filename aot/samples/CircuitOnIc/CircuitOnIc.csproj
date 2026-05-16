@@ -12,7 +12,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <UseSystemResourceKeys>true</UseSystemResourceKeys>
     <PublishTrimmed>true</PublishTrimmed>
-    <TrimMode>partial</TrimMode>
+    <TrimMode>full</TrimMode>
     <SelfContained>true</SelfContained>
     <NoWarn>$(NoWarn);IL2026;IL3050;CA2255;RAZORSDK1006</NoWarn>
     <IlcLlvmTarget>wasm32-wasi</IlcLlvmTarget>
