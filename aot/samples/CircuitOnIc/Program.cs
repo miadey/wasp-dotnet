@@ -90,6 +90,14 @@ public static class Program
             // RequireAntiforgeryToken metadata.
             app.UseAntiforgery();
 
+            // Wasp marker middleware — appends <!--Blazor:server,...-->
+            // comments to SSR HTML responses so blazor.web.js opens the
+            // /_blazor WebSocket back to the canister. See
+            // Wasp.AspNetCore.Blazor.Server/src/BlazorMarkerMiddleware.cs
+            // and gh issue #73 for why we hand-roll this instead of
+            // using the framework's ServerComponentSerializer.
+            app.UseWaspBlazorMarker();
+
             // Serve the static SSR shell so the FIRST request returns HTML
             // with our IC-WS shim baked in. Subsequent interaction goes
             // over the WS channel via the asset canister's blazor.web.js.
