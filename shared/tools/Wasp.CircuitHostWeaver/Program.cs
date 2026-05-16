@@ -64,10 +64,19 @@ using var assembly = AssemblyDefinition.ReadAssembly(inputPath, new ReaderParame
 
 var module = assembly.MainModule;
 
-string[] targetNamespacePrefixes =
-{
-    "Microsoft.AspNetCore.Components.Server",
-};
+string[] targetNamespacePrefixes = rewriteTypeNameHash
+    ? new[] {
+        // When weaving Components.Endpoints.dll, widen visibility on the
+        // internal types we need to construct from outside (IClearableStore,
+        // RootComponentOperationBatch, ComponentMarker, etc.). Without this
+        // CircuitHubFacade.UpdateRootComponents can't call CircuitHost's
+        // internal-typed signature.
+        "Microsoft.AspNetCore.Components.Endpoints",
+        "Microsoft.AspNetCore.Components.Infrastructure",
+    }
+    : new[] {
+        "Microsoft.AspNetCore.Components.Server",
+    };
 
 int typesPromoted = 0;
 int membersPromoted = 0;
