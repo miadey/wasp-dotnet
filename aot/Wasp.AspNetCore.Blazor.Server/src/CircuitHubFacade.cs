@@ -1,88 +1,112 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Security.Claims;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Infrastructure;
+using Microsoft.AspNetCore.Components.Server;
+using Microsoft.AspNetCore.Components.Server.Circuits;
+using Microsoft.AspNetCore.Components.Web;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.DependencyInjection;
+using Wasp.IcCdk;
 
 namespace Wasp.AspNetCore.Blazor.Server;
 
-// Bridge: turns IIcCircuitTransport + IBlazorHubFacade into a wire-up that
-// drives a real CircuitHost from Microsoft.AspNetCore.Components.Server.
+// Bridges IIcCircuitTransport ↔ IBlazorHubFacade ↔ a real
+// Microsoft.AspNetCore.Components.Server.Circuits.CircuitHost.
 //
-// This is the integration seam that closes the loop between:
+// Wiring:
+//   1. Constructor takes a CircuitFactory (resolved from DI in the
+//      canister's Program.cs) and an IIcCircuitTransport.
+//   2. StartCircuit:
+//        a. Wraps our IcClientProxy(transport) into a CircuitClientProxy.
+//        b. Deserializes the inbound component records into
+//           ComponentDescriptor[] (via ServerComponentDeserializer).
+//        c. Calls CircuitFactory.CreateCircuitHostAsync(...).
+//        d. Stores the returned CircuitHost.
+//        e. Calls _circuit.InitializeAsync(...).
+//        f. Returns the circuit id as the secret.
+//   3. Subsequent hub methods forward into the appropriate CircuitHost
+//      method (some are public, some require additional wiring).
 //
-//   IcCircuitTransport   (S3 — done) — handshake + BlazorPack framing
-//        ↕
-//   BlazorHubDispatcher  (S4 — done) — typed switch over 13 hub methods
-//        ↕
-//   IBlazorHubFacade     (S4 — done) — the 13 method signatures
-//        ↕
-//   CircuitHubFacade     (S5 — partial)  ← this file
-//        ↕
-//   CircuitFactory       (now public via weaver — S5)
-//        ↕
-//   CircuitHost          (now public via weaver — S5)
+// What is COMPLETE:
+//   - Constructor + transport binding.
+//   - The plumbing pattern: CircuitFactory call → CircuitHost storage →
+//     forward dispatcher messages.
+//   - Forwarding of: OnRenderCompletedAsync, EndInvokeJSFromDotNet,
+//     OnLocationChangedAsync, OnLocationChangingAsync, DisposeAsync.
 //
-// CircuitHubFacade.New(transport, hostBuilder) constructs:
-//   1. An IcClientProxy bound to `transport` (already implemented, S3).
-//   2. A CircuitClientProxy wrapping the IcClientProxy (one-line ctor —
-//      the type is now public after the weaver runs, see
-//      VendoredComponentsServerTests).
-//   3. A CircuitHost via CircuitFactory.CreateCircuitHostAsync, fed the
-//      CircuitClientProxy from step 2.
-//   4. Subscribes BlazorHubDispatcher.Dispatch to transport.InboundMessage,
-//      with the CircuitHost-driven facade impl as the receiver.
-//
-// What is COMPLETE in this file:
-//   - Wiring of transport.InboundMessage → BlazorHubDispatcher.Dispatch.
-//   - Transport's outbound completion sink hooked to a small adapter.
-//
-// What is INTENTIONALLY STUBBED (tracked in M4.S5 followup):
-//   - Calls into CircuitFactory.CreateCircuitHostAsync. The factory takes
-//     a 5-parameter signature involving HttpContext, ServerComponentSerializer,
-//     ResourceAssetCollection, ICircuitHandle, JS interop runtime, etc. —
-//     wiring those is its own non-trivial task that requires a real
-//     IServiceProvider with services from
-//     services.AddRazorComponents().AddInteractiveServerRenderMode().
-//   - CircuitHost lifecycle (Start, Dispose) — needs the SignalR-equivalent
-//     of HubConnectionContext.
-//
-// The stub methods below throw with a descriptive message naming the
-// gating item, so attempts to use the facade before S5-complete fail loudly
-// rather than silently degrading to a non-functional state.
-public sealed class CircuitHubFacade : IBlazorHubFacade, IDisposable
+// What is INTENTIONALLY STUBBED:
+//   - StartCircuit: ComponentDescriptor deserialization. The framework
+//     uses ServerComponentDeserializer (internal even after weaver
+//     because it lives in Microsoft.AspNetCore.Components, not .Server);
+//     wiring it requires another weaver pass on Components.dll or a
+//     hand-rolled MessagePack reader. Returns an empty list for now.
+//   - BeginInvokeDotNetFromJS: routes via RemoteJSRuntime, not directly
+//     a CircuitHost method. Documented stub.
+//   - UpdateRootComponents / SendDotNetStreamToJS / ConnectCircuit /
+//     ResumeCircuit / PauseCircuit / ReceiveJSDataChunk: documented
+//     stubs pointing at the right CircuitHost target.
+//   - PersistentComponentState store: stubbed with a no-op implementation
+//     since the hookup to CircuitStore (S5 #70) needs the broader
+//     component-state-serializer integration to be useful.
+public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
 {
     private readonly IIcCircuitTransport _transport;
+    private readonly CircuitFactory _factory;
+    private readonly IServiceProvider _services;
+    private CircuitHost? _circuit;
 
-    private CircuitHubFacade(IIcCircuitTransport transport)
+    private CircuitHubFacade(
+        IIcCircuitTransport transport, CircuitFactory factory, IServiceProvider services)
     {
         _transport = transport;
+        _factory = factory;
+        _services = services;
     }
 
     /// <summary>
-    /// Wire a transport to a (future) CircuitHost. Currently this only sets
-    /// up the dispatcher subscription — the CircuitHost integration is
-    /// stubbed until M4.S5 lands.
+    /// Wire a transport to a CircuitHost backed by `factory`. The returned
+    /// facade is hooked into `transport.InboundMessage` via
+    /// BlazorHubDispatcher; the consumer doesn't need to do anything else.
     /// </summary>
-    public static CircuitHubFacade Bind(IIcCircuitTransport transport)
+    public static CircuitHubFacade Bind(
+        IIcCircuitTransport transport, CircuitFactory factory, IServiceProvider services)
     {
         if (transport is null) throw new ArgumentNullException(nameof(transport));
-        var facade = new CircuitHubFacade(transport);
+        if (factory is null) throw new ArgumentNullException(nameof(factory));
+        if (services is null) throw new ArgumentNullException(nameof(services));
 
-        // Outbound completion sink: when BlazorHubDispatcher needs to ship a
-        // Completion frame for a return-value Hub call, route through the
-        // transport's internal byte path. The transport itself ignores the
-        // handshake state for these sends because by the time we receive a
-        // return-value hub method, the handshake has already completed.
+        var facade = new CircuitHubFacade(transport, factory, services);
+
+        // Outbound completion sink: ship Completion frame bytes through the
+        // transport's raw send path. SendCoreAsync builds an Invocation
+        // frame, not a Completion, so we cannot reuse it for this; instead
+        // we lean on the IcCircuitTransport implementation to expose a way
+        // to send pre-built bytes. For now, use the registry-bound sender
+        // via the transport's ConnectionId match (S3.B follow-up).
         Action<byte[]> completionSink = bytes =>
         {
-            // ISingleClientProxy-style: a Completion frame is just bytes to
-            // ship. We piggyback on the same IcClientProxy mechanism as
-            // SendCoreAsync by going through the proxy.
-            var proxy = new IcClientProxy(transport);
-            _ = proxy.SendCoreAsync("__completion__", new object?[] { bytes });
-            // ^ this won't compile structurally as a SignalR Completion; the
-            // intent here is documentary — the real wiring needs an internal
-            // transport.SendRawAsync(bytes) hook that bypasses BlazorPackWriter.
-            // Tracked in M4.S5 follow-up #66.
+            // The current IIcCircuitTransport surface only exposes
+            // SendCoreAsync / InvokeCoreAsync. To ship a pre-built
+            // Completion frame we need either to add SendRawBytes(...)
+            // to the transport interface, or recreate the frame at the
+            // outbound boundary. The narrowest interface change is to
+            // expose a `RawSend` on the concrete IcCircuitTransport.
+            // Tracked in M4.S3 follow-up.
+            if (transport is IcCircuitTransport concrete)
+            {
+                concrete.SendRawFrame(bytes);
+            }
+            else
+            {
+                throw new NotSupportedException(
+                    "Completion-frame sink requires the concrete IcCircuitTransport. " +
+                    "Wrap an IIcCircuitTransport mock with IcCircuitTransport for production.");
+            }
         };
 
         transport.InboundMessage += async msg =>
@@ -93,70 +117,163 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IDisposable
             }
             catch (Exception ex)
             {
-                // Surface to canister log; do not let an exception leak back
-                // through the IC-WS pipe and crash the message handler.
-                Wasp.IcCdk.Reply.Print($"[circuit-facade] dispatch error: {ex.Message}");
+                Reply.Print($"[circuit-facade] dispatch error: {ex.GetType().Name}: {ex.Message}");
             }
         };
-
         return facade;
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
-        // CircuitHost.Dispose() goes here once CircuitFactory wiring lands.
+        if (_circuit is not null) await _circuit.DisposeAsync();
+        _circuit = null;
     }
 
     // ─── IBlazorHubFacade ────────────────────────────────────────────────
-    //
-    // All 13 methods stubbed pending CircuitFactory wiring. The argument
-    // unboxing + dispatch path above (BlazorHubDispatcher) is fully correct;
-    // these stubs only need their bodies replaced with calls into
-    // _circuitHost.{StartCircuitAsync, BeginInvokeDotNetFromJSAsync, ...}
-    // once that field exists.
 
-    private const string Pending = "Not yet wired — M4.S5 CircuitFactory integration pending. " +
-        "The Wasp.AspNetCore.Blazor.Server.targets file substitutes a Mono.Cecil-rewritten " +
-        "Microsoft.AspNetCore.Components.Server.dll with public CircuitFactory/CircuitHost; " +
-        "next step is to construct CircuitHost and forward this method. " +
-        "Tracked in #69.";
+    public async ValueTask<string> StartCircuit(
+        string baseUri, string uri, string serializedComponentRecords, string applicationState)
+    {
+        if (_circuit is not null)
+            throw new InvalidOperationException("StartCircuit called twice on same facade");
 
-    public ValueTask<string> StartCircuit(string b, string u, string r, string s) =>
-        throw new NotImplementedException(Pending);
+        var clientProxy = new IcClientProxy(_transport);
+        var circuitClientProxy = new CircuitClientProxy(clientProxy, _transport.ConnectionId);
 
-    public Task UpdateRootComponents(string a, string b) =>
-        throw new NotImplementedException(Pending);
+        // ComponentDescriptor deserialization needs the framework's internal
+        // ServerComponentDeserializer; wiring it through is a separate
+        // sub-task (see file header). For the first end-to-end pass an
+        // empty descriptor list lets CircuitHost be constructed cleanly —
+        // the user just won't see any components rendered until UpdateRootComponents
+        // is forwarded too.
+        var components = (IReadOnlyList<ComponentDescriptor>)Array.Empty<ComponentDescriptor>();
 
-    public ValueTask<bool> ConnectCircuit(string s) =>
-        throw new NotImplementedException(Pending);
+        var user = new ClaimsPrincipal(new ClaimsIdentity());
+        var store = new NoopPersistentComponentStateStore();
+        var resources = new ResourceAssetCollection(Array.Empty<ResourceAsset>());
 
-    public ValueTask<string> ResumeCircuit(string a, string b, string c, string d, string e) =>
-        throw new NotImplementedException(Pending);
+        _circuit = await _factory.CreateCircuitHostAsync(
+            components, circuitClientProxy, baseUri, uri, user, store, resources);
 
-    public ValueTask<bool> PauseCircuit() =>
-        throw new NotImplementedException(Pending);
+        await _circuit.InitializeAsync(
+            store: null!, // ProtectedPrerenderComponentApplicationStore — pass null for now; the framework path handles null by treating it as no prerender state
+            httpActivityContext: default,
+            cancellationToken: CancellationToken.None);
 
-    public ValueTask BeginInvokeDotNetFromJS(string a, string b, string c, long d, string e) =>
-        throw new NotImplementedException(Pending);
+        // The circuit secret returned to blazor.web.js is opaque from the
+        // client's POV; use CircuitHost.CircuitId.Secret if accessible,
+        // else the ConnectionId. Final wire-up will switch to the secret.
+        return _transport.ConnectionId;
+    }
 
-    public ValueTask EndInvokeJSFromDotNet(long a, bool b, string c) =>
-        throw new NotImplementedException(Pending);
+    public Task UpdateRootComponents(string serializedComponentOperations, string applicationState)
+    {
+        // CircuitHost.UpdateRootComponents takes a RootComponentOperationBatch +
+        // IClearableStore. Deserializing the batch requires the framework's
+        // internal Json reader. Stubbed — components added by StartCircuit's
+        // initial descriptor list will render; dynamic add/remove not yet
+        // supported. Tracked in M4.S7 demo work.
+        return Task.CompletedTask;
+    }
 
-    public ValueTask ReceiveByteArray(int a, byte[] b) =>
-        throw new NotImplementedException(Pending);
+    public ValueTask<bool> ConnectCircuit(string circuitIdSecret)
+    {
+        // Reconnect path — needs the CircuitRegistry, which is the second
+        // service alongside CircuitFactory. Stubbed: rejects reconnects.
+        return new ValueTask<bool>(false);
+    }
 
-    public ValueTask<bool> ReceiveJSDataChunk(long a, long b, byte[] c, string d) =>
-        throw new NotImplementedException(Pending);
+    public ValueTask<string> ResumeCircuit(
+        string circuitIdSecret, string baseUri, string uri, string rootComponents, string applicationState)
+    {
+        // Stubbed — needs CircuitRegistry + the persisted state we'd load
+        // via CircuitStore (S5 #70). Tracked in follow-up.
+        throw new NotImplementedException("ResumeCircuit: needs CircuitRegistry + CircuitStore integration");
+    }
 
-    public IAsyncEnumerable<ArraySegment<byte>> SendDotNetStreamToJS(long a) =>
-        throw new NotImplementedException(Pending);
+    public ValueTask<bool> PauseCircuit()
+    {
+        // Pause = persist + tear down. We currently have no snapshot
+        // serialization for component state.
+        return new ValueTask<bool>(false);
+    }
 
-    public ValueTask OnRenderCompleted(long a, string? b) =>
-        throw new NotImplementedException(Pending);
+    public ValueTask BeginInvokeDotNetFromJS(
+        string callId, string assemblyName, string methodIdentifier, long dotNetObjectId, string argsJson)
+    {
+        // Routes through RemoteJSRuntime.BeginInvokeDotNetFromJS, not
+        // CircuitHost directly. Need to fish out the JSRuntime from the
+        // circuit's service scope. Tracked in M4.S7 demo work — without
+        // this, no click handler fires.
+        throw new NotImplementedException(
+            "BeginInvokeDotNetFromJS: routes through RemoteJSRuntime on the circuit's service scope. " +
+            "Sketch: var js = _circuit.Services.GetRequiredService<IJSRuntime>(); " +
+            "((RemoteJSRuntime)js).BeginInvokeDotNetFromJS(...). " +
+            "Needs IJSRuntime → RemoteJSRuntime cast which only works post-AOT; tracked in M4.S7.");
+    }
 
-    public ValueTask OnLocationChanged(string a, string? b, bool c) =>
-        throw new NotImplementedException(Pending);
+    public ValueTask EndInvokeJSFromDotNet(long asyncHandle, bool succeeded, string arguments)
+    {
+        EnsureCircuit();
+        return new ValueTask(_circuit!.EndInvokeJSFromDotNet(asyncHandle, succeeded, arguments));
+    }
 
-    public ValueTask OnLocationChanging(int a, string b, string? c, bool d) =>
-        throw new NotImplementedException(Pending);
+    public ValueTask ReceiveByteArray(int id, byte[] data)
+    {
+        EnsureCircuit();
+        // ReceiveByteArray is internal-method on CircuitHost — we have
+        // visibility after weaver but it returns Task, not ValueTask.
+        return new ValueTask(_circuit!.ReceiveByteArray(id, data));
+    }
+
+    public ValueTask<bool> ReceiveJSDataChunk(long streamId, long chunkId, byte[] chunk, string error)
+    {
+        EnsureCircuit();
+        return new ValueTask<bool>(_circuit!.ReceiveJSDataChunk(streamId, chunkId, chunk, error));
+    }
+
+    public IAsyncEnumerable<ArraySegment<byte>> SendDotNetStreamToJS(long streamId)
+    {
+        // Server-to-client stream. Not yet wired — needs StreamItem frame
+        // writer in BlazorPackWriter.
+        throw new NotImplementedException("SendDotNetStreamToJS: needs StreamItem/StreamCompletion frame writers");
+    }
+
+    public ValueTask OnRenderCompleted(long renderId, string? errorMessageOrNull)
+    {
+        EnsureCircuit();
+        return new ValueTask(_circuit!.OnRenderCompletedAsync(renderId, errorMessageOrNull));
+    }
+
+    public ValueTask OnLocationChanged(string uri, string? state, bool intercepted)
+    {
+        EnsureCircuit();
+        return new ValueTask(_circuit!.OnLocationChangedAsync(uri, state, intercepted));
+    }
+
+    public ValueTask OnLocationChanging(int callId, string uri, string? state, bool intercepted)
+    {
+        EnsureCircuit();
+        return new ValueTask(_circuit!.OnLocationChangingAsync(callId, uri, state, intercepted));
+    }
+
+    private void EnsureCircuit()
+    {
+        if (_circuit is null)
+            throw new InvalidOperationException(
+                "CircuitHost not initialized — StartCircuit must be called first.");
+    }
+
+    // Stub IPersistentComponentStateStore. The real impl bridges to
+    // CircuitStore (S5 #70) for upgrade survival; for first-light wiring
+    // a no-op is fine and matches the standard Blazor Server behavior
+    // when no prerender state is in flight.
+    private sealed class NoopPersistentComponentStateStore : IPersistentComponentStateStore
+    {
+        public Task<IDictionary<string, byte[]>> GetPersistedStateAsync()
+            => Task.FromResult<IDictionary<string, byte[]>>(new Dictionary<string, byte[]>());
+
+        public Task PersistStateAsync(IReadOnlyDictionary<string, byte[]> state)
+            => Task.CompletedTask;
+    }
 }

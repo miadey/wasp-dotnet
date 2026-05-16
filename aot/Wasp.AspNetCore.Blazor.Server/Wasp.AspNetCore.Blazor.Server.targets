@@ -15,14 +15,31 @@
        defining assembly without vendoring the source tree.
 
        Build the vendored DLL via:
-         dotnet run --project shared/tools/Wasp.CircuitHostWeaver -- \
-           /usr/local/share/dotnet/shared/Microsoft.AspNetCore.App/10.0.*/Microsoft.AspNetCore.Components.Server.dll \
+         dotnet run **project shared/tools/Wasp.CircuitHostWeaver
+           &lt;framework Microsoft.AspNetCore.Components.Server.dll&gt;
            aot/Wasp.AspNetCore.Blazor.Server/Vendor/Microsoft.AspNetCore.Components.Server.dll
   -->
 
   <PropertyGroup>
     <_WaspBlazorServerDir>$(MSBuildThisFileDirectory)</_WaspBlazorServerDir>
   </PropertyGroup>
+
+  <!-- C# compile-time swap: replace the framework
+       Microsoft.AspNetCore.Components.Server.dll reference (which exposes
+       only ComponentHub publicly) with our weaver-rewritten vendored copy
+       (CircuitFactory / CircuitHost / CircuitClientProxy public). Runs in
+       both the Wasp.AspNetCore.Blazor.Server library *and* every consumer
+       canister that imports this .targets file. -->
+  <Target Name="_WaspSwapComponentsServerForVendor"
+          AfterTargets="ResolveTargetingPackAssets"
+          Condition="Exists('$(_WaspBlazorServerDir)Vendor\Microsoft.AspNetCore.Components.Server.dll')">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.AspNetCore.Components.Server'" />
+      <Reference Include="$(_WaspBlazorServerDir)Vendor\Microsoft.AspNetCore.Components.Server.dll">
+        <Private>false</Private>
+      </Reference>
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <!-- Exclude the framework copy from the AOT compiler's reference set so

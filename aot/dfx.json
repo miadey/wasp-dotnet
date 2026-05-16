@@ -58,6 +58,17 @@
       "wasm": "samples/RazorOnIc/RazorOnIc.canister.wasm",
       "candid": "samples/RazorOnIc/razoronic.did",
       "build": []
+    },
+    "circuitonic": {
+      "type": "custom",
+      "wasm": "samples/CircuitOnIc/CircuitOnIc.canister.wasm",
+      "candid": "samples/CircuitOnIc/circuitonic.did",
+      "build": []
+    },
+    "circuitonic_assets": {
+      "type": "assets",
+      "source": ["samples/CircuitOnIc/bin/Release/net10.0/wasi-wasm/asset-canister"],
+      "dependencies": ["circuitonic"]
     }
   },
   "networks": {

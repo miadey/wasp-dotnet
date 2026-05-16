@@ -1,0 +1,29 @@
+@* Root app component — produces the HTML shell that wraps interactive
+   Counter component. The <head> includes the IC-WS shim BEFORE
+   blazor.web.js so the shim's window.WebSocket override is in place by
+   the time blazor.web.js opens its /_blazor connection. *@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blazor Server on IC — Counter</title>
+    <base href="/" />
+
+    @* Asset-canister-supplied config script. Emitted at build time by
+       Wasp.AspNetCore.AssetCanister.targets with the backend canister id
+       + gateway URL for the deploy. *@
+    <script src="/ic-ws-blazor-config.js"></script>
+    @* ic-websocket-js UMD bundle. Vendored next to this app's wwwroot.
+       Loaded synchronously before the adapter so window.IcWebSocket
+       exists when ic-ws-blazor-adapter.js runs. *@
+    <script src="/ic-websocket.umd.js"></script>
+    @* The shim that monkey-patches window.WebSocket for the /_blazor URL.
+       Loaded before blazor.web.js for the obvious reason. *@
+    <script src="/ic-ws-blazor-adapter.js"></script>
+</head>
+<body>
+    <Routes />
+    <script src="_framework/blazor.web.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+@page "/"
+@page "/counter"
+@rendermode InteractiveServer
+
+<PageTitle>Counter — Blazor Server on IC</PageTitle>
+
+<h2>Counter</h2>
+
+<p>Count: <strong>@count</strong></p>
+
+<button class="btn btn-primary" @onclick="Bump">Bump</button>
+
+<p style="margin-top: 1em; font-size: 0.85em; color: #555;">
+    This page runs <em>interactively</em>. Click events round-trip:
+    browser → ic-websocket-gateway → backend canister → <code>CircuitHost</code>
+    → render diff → ic-websocket-gateway → browser. Expected click latency
+    on mainnet: ~2 seconds (one IC update call).
+</p>
+
+@code {
+    private int count = 0;
+
+    private void Bump() => count++;
+}

@@ -150,6 +150,18 @@ public sealed class IcCircuitTransport : IIcCircuitTransport
         return (int)BlazorPackReader.ReadInt64(body, ref bp);
     }
 
+    /// <summary>
+    /// Ship a pre-built BlazorPack frame (length-prefixed body) without
+    /// the SendCoreAsync Invocation envelope. Used by CircuitHubFacade's
+    /// completion sink to forward Completion frames produced by
+    /// BlazorHubDispatcher.
+    /// </summary>
+    public void SendRawFrame(byte[] frameBytes)
+    {
+        if (frameBytes is null) throw new ArgumentNullException(nameof(frameBytes));
+        _send(frameBytes);
+    }
+
     public ValueTask SendCoreAsync(string target, object?[] args, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(target)) throw new ArgumentException("target required", nameof(target));

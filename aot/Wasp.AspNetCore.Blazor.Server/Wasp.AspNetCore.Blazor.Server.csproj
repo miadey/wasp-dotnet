@@ -21,4 +21,22 @@
     <ProjectReference Include="..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
   </ItemGroup>
 
+  <!-- Swap the framework Microsoft.AspNetCore.Components.Server reference
+       for our Cecil-rewritten Vendor copy (visibility opened to public).
+       The framework variant only exposes ComponentHub publicly; we need
+       CircuitFactory/CircuitHost/CircuitClientProxy too. The target runs
+       after FrameworkReference is resolved so the swap takes effect for
+       the C# compiler. Run shared/tools/Wasp.CircuitHostWeaver first to
+       generate the DLL. -->
+  <Target Name="_WaspSwapComponentsServerForVendor"
+          AfterTargets="ResolveTargetingPackAssets"
+          Condition="Exists('$(MSBuildThisFileDirectory)Vendor\Microsoft.AspNetCore.Components.Server.dll')">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.AspNetCore.Components.Server'" />
+      <Reference Include="$(MSBuildThisFileDirectory)Vendor\Microsoft.AspNetCore.Components.Server.dll">
+        <Private>false</Private>
+      </Reference>
+    </ItemGroup>
+  </Target>
+
 </Project>

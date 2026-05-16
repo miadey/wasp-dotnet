@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <NativeLib>Shared</NativeLib>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <RootNamespace>WaspSample.CircuitOnIc</RootNamespace>
+    <AssemblyName>CircuitOnIc</AssemblyName>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+    <SelfContained>true</SelfContained>
+    <NoWarn>$(NoWarn);IL2026;IL3050;CA2255;RAZORSDK1006</NoWarn>
+    <IlcLlvmTarget>wasm32-wasi</IlcLlvmTarget>
+
+    <!-- Asset canister wiring. Set after dfx deploy writes the canister
+         ids (.dfx/local/canister_ids.json locally; canister_ids.json on
+         mainnet). -->
+    <WaspAssetCanisterEnabled>true</WaspAssetCanisterEnabled>
+    <WaspAssetCanisterBackendId Condition="'$(WaspAssetCanisterBackendId)' == ''">rrkah-fqaaa-aaaaa-aaaaq-cai</WaspAssetCanisterBackendId>
+    <WaspAssetCanisterGateway Condition="'$(WaspAssetCanisterGateway)' == ''">wss://gateway.icws.io</WaspAssetCanisterGateway>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.7.0-preview00010" />
+    <PackageReference Include="runtime.linux-x64.Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-alpha.1.25162.1" />
+    <ProjectReference Include="..\..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+    <ProjectReference Include="..\..\Wasp.AspNetCore\Wasp.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
+    <ProjectReference Include="..\..\Wasp.AspNetCore.Blazor.Server\Wasp.AspNetCore.Blazor.Server.csproj" />
+    <TrimmerRootAssembly Include="CircuitOnIc" />
+    <TrimmerRootAssembly Include="Wasp.IcCdk" />
+    <TrimmerRootAssembly Include="Wasp.AspNetCore" />
+    <TrimmerRootAssembly Include="Wasp.AspNetCore.Blazor.Server" />
+    <TrimmerRootAssembly Include="Wasp.WebSockets" />
+    <UnmanagedEntryPointsAssembly Include="CircuitOnIc" />
+    <UnmanagedEntryPointsAssembly Include="Wasp.AspNetCore" />
+    <UnmanagedEntryPointsAssembly Include="Wasp.WebSockets" />
+  </ItemGroup>
+
+  <Target Name="StripWasmComponentTypeWit" BeforeTargets="LinkNativeLlvm">
+    <ItemGroup>
+      <WasmComponentTypeWit Remove="@(WasmComponentTypeWit)" />
+    </ItemGroup>
+  </Target>
+
+  <Import Project="..\..\Wasp.AspNetCore\Wasp.AspNetCore.targets" />
+  <Import Project="..\..\Wasp.AspNetCore.Blazor.Server\Wasp.AspNetCore.Blazor.Server.targets" />
+  <Import Project="..\..\Wasp.AspNetCore.Blazor.Server\Wasp.AspNetCore.AssetCanister.targets" />
+
+</Project>
