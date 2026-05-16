@@ -93,8 +93,15 @@ public static class Program
             // Serve the static SSR shell so the FIRST request returns HTML
             // with our IC-WS shim baked in. Subsequent interaction goes
             // over the WS channel via the asset canister's blazor.web.js.
-            app.MapRazorComponents<App>()
-               .AddInteractiveServerRenderMode();
+            //
+            // NOTE: NOT calling .AddInteractiveServerRenderMode() because
+            // it wires ServerComponentSerializer which uses
+            // System.Text.Json reflection (PNS on wasm32-wasi). Pure SSR
+            // works first; the interactive Hub path is plumbed through
+            // Wasp.AspNetCore.Blazor.Server (IcCircuitTransportRegistry +
+            // CircuitHubFacade) which doesn't depend on this endpoint
+            // helper.
+            app.MapRazorComponents<App>();
 
             // Register an IcCircuitTransport for every IC-WS client and
             // bind it to a CircuitHubFacade backed by the framework's
