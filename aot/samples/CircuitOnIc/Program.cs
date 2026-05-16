@@ -13,14 +13,20 @@ using Microsoft.Extensions.DependencyInjection;
 using Wasp.AspNetCore;
 using Wasp.AspNetCore.Blazor.Server;
 using Wasp.IcCdk;
-using Wasp.WebSockets;
 using WaspSample.CircuitOnIc.Components;
 using WaspSample.CircuitOnIc.Components.Pages;
 
 // M4.S7 (issue #60): Counter.razor with @rendermode InteractiveServer
 // running on a canister. Companion to RazorOnIc/ — that sample renders
-// statically (no WebSocket); this one renders interactively (CircuitHost
-// over IC-WS).
+// statically (no live circuit); this one renders interactively.
+//
+// Transport: SignalR LONG POLLING over the IC HTTP gateway. No external
+// ic-websocket-gateway, no Docker at runtime — every interaction is a
+// plain HTTP request that the IC boundary node (pocket-ic locally,
+// boundary nodes on mainnet) dispatches to http_request_update on the
+// canister, which routes via ASP.NET Core middleware to the
+// /_blazor/{negotiate,send,poll} endpoints registered by
+// app.MapWaspBlazorLongPolling(...).
 //
 // Build/deploy:
 //   1. Generate the vendored CircuitHost weaver output (once):
@@ -28,15 +34,12 @@ using WaspSample.CircuitOnIc.Components.Pages;
 //          /usr/local/share/dotnet/shared/Microsoft.AspNetCore.App/10.0.6/Microsoft.AspNetCore.Components.Server.dll \
 //          aot/Wasp.AspNetCore.Blazor.Server/Vendor/Microsoft.AspNetCore.Components.Server.dll
 //   2. AOT-compile the backend canister:
-//        cd aot/samples/CircuitOnIc && dotnet publish -c Release -r wasi-wasm
-//      Produces CircuitOnIc.canister.wasm + a wwwroot/asset-canister/
-//      directory containing the JS shim + Counter HTML shell.
-//   3. Deploy both canisters via dfx (see aot/dfx.json — needs a
-//      `circuitonic` (custom wasm) entry + a `circuitonic_assets`
-//      (assets) entry).
-//   4. Open the asset-canister URL in a browser; the IC-WS shim picks
-//      up the backend canister id from window.IcWsBlazorConfig and
-//      blazor.web.js opens its /_blazor WS through the gateway.
+//        cd aot/samples/CircuitOnIc && dotnet build -c Release /p:IlcLlvmTarget=wasm32-wasi
+//   3. Deploy via dfx (see aot/dfx.json — needs `circuitonic` (custom wasm)
+//      and `circuitonic_assets` (asset canister) entries).
+//   4. Open the asset-canister URL in a browser. blazor.web.js is
+//      configured (in App.razor) to use HttpTransportType.LongPolling so
+//      it never even tries to open a WebSocket.
 
 namespace WaspSample.CircuitOnIc;
 
@@ -91,33 +94,22 @@ public static class Program
             app.UseAntiforgery();
 
             // Wasp marker middleware — appends <!--Blazor:server,...-->
-            // comments to SSR HTML responses so blazor.web.js opens the
-            // /_blazor WebSocket back to the canister. See
+            // comments to the SSR HTML so blazor.web.js knows there's a
+            // server-interactive component to hydrate. See
             // Wasp.AspNetCore.Blazor.Server/src/BlazorMarkerMiddleware.cs
-            // and gh issue #73 for why we hand-roll this instead of
-            // using the framework's ServerComponentSerializer.
+            // and gh issue #73 for why we hand-roll this instead of using
+            // the framework's ServerComponentSerializer.
             app.UseWaspBlazorMarker();
 
-            // Serve the static SSR shell so the FIRST request returns HTML
-            // with our IC-WS shim baked in. Subsequent interaction goes
-            // over the WS channel via the asset canister's blazor.web.js.
-            //
-            // NOTE: NOT calling .AddInteractiveServerRenderMode() because
-            // it wires ServerComponentSerializer which uses
-            // System.Text.Json reflection (PNS on wasm32-wasi). Pure SSR
-            // works first; the interactive Hub path is plumbed through
-            // Wasp.AspNetCore.Blazor.Server (IcCircuitTransportRegistry +
-            // CircuitHubFacade) which doesn't depend on this endpoint
-            // helper.
-            app.MapRazorComponents<App>();
-
-            // Register an IcCircuitTransport for every IC-WS client and
-            // bind it to a CircuitHubFacade backed by the framework's
-            // (now-public-via-weaver) CircuitFactory.
-            _registry = new IcCircuitTransportRegistry(WaspWs.Send);
+            // Build a transport registry first so the negotiate endpoint
+            // (registered below) can mint connection-id-keyed transports.
+            _registry = new IcCircuitTransportRegistry();
             _registry.TransportConnected += transport =>
             {
-                var factory = app.Services.GetRequiredService<CircuitFactory>();
+                // ICircuitFactory is what AddInteractiveServerComponents
+                // registers in DI; the concrete CircuitFactory is the
+                // implementation. Both are public via our Cecil weaver.
+                var factory = app.Services.GetRequiredService<ICircuitFactory>();
                 _facade = CircuitHubFacade.Bind(transport, factory, app.Services);
             };
             _registry.TransportDisconnected += async _ =>
@@ -129,12 +121,21 @@ public static class Program
                 }
             };
 
-            WaspWs.Init(new WsHandlers
-            {
-                OnOpen    = _registry.HandleOpen,
-                OnMessage = _registry.HandleMessage,
-                OnClose   = _registry.HandleClose,
-            });
+            // Hand-rolled SignalR Long Polling endpoints — replaces the
+            // ic-websocket-gateway round-trip with three pure-HTTP routes
+            // that ride the standard IC HTTP gateway:
+            //   POST /_blazor/negotiate    advertise LongPolling
+            //   POST /_blazor?id=...       inbound BlazorPack frames
+            //   GET  /_blazor?id=...       drain queued outbound frames
+            //   DELETE /_blazor?id=...     close
+            app.MapWaspBlazorLongPolling(_registry);
+
+            // Serve the SSR shell. NOT calling .AddInteractiveServerRenderMode()
+            // because it wires ServerComponentSerializer which needs JSON
+            // reflection (PNS on wasm32-wasi). We emit our own marker via
+            // BlazorMarkerMiddleware above; the descriptor format is decoded
+            // by WaspComponentRecordParser in CircuitHubFacade.StartCircuit.
+            app.MapRazorComponents<App>();
 
             app.StartAsync().GetAwaiter().GetResult();
         }

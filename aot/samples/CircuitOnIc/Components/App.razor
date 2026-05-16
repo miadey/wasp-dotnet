@@ -1,10 +1,9 @@
 @* M4.S7 — bypass <Router>/<Routes> (which trips an AOT struct-copy bug
    in StaticHtmlRenderer.RenderAttributes when reading reference-typed
    attribute values like NotFoundPage Type / AppAssembly). Render Counter
-   inline, same pattern that works in RazorOnIc.canister.wasm. The
-   interactive @rendermode handling on Counter still kicks in via the
-   inline component reference; blazor.web.js sees the
-   <!--Blazor:server--> markers and opens the /_blazor WS regardless. *@
+   inline. blazor.web.js still picks up the <!--Blazor:server--> markers
+   emitted by BlazorMarkerMiddleware and hydrates this component over the
+   SignalR Long Polling transport. *@
 <!DOCTYPE html>
 <html lang="en">
 
@@ -21,17 +20,27 @@
 
 <body style="font-family: system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem;">
     <h1 style="color: #2563eb;">Blazor Server on IC</h1>
-    <p>Counter rendered server-side, interactivity over IC-WebSocket.</p>
+    <p>Counter rendered server-side. Click events ride <strong>SignalR Long Polling</strong> over the canister's HTTP gateway — no WebSocket, no external services.</p>
 
     <Counter />
 
     <hr />
-    <small>Server-rendered shell + <code>blazor.web.js</code> loaded from the asset canister. The shim below rewires <code>window.WebSocket</code> for <code>/_blazor</code> to <code>IcWebSocket</code>.</small>
+    <small>Server-rendered shell + <code>blazor.web.js</code> from the asset canister. SignalR transport is pinned to <code>HttpTransportType.LongPolling</code> (value 4) so the client never tries WebSocket. <code>/_blazor/negotiate</code>, <code>/_blazor</code> POST (send), and <code>/_blazor</code> GET (poll) are all routed to the backend canister's <code>http_request_update</code>.</small>
 
-    <script src="ic-ws-blazor-config.js"></script>
-    <script src="ic-websocket.umd.js"></script>
-    <script src="ic-ws-blazor-adapter.js"></script>
-    <script src="_framework/blazor.web.js"></script>
+    <script src="_framework/blazor.web.js" autostart="false"></script>
+    <script>
+      // HttpTransportType: 1=WebSockets, 2=ServerSentEvents, 4=LongPolling.
+      // Pinning to 4 because canisters can't host real WebSockets; SSE
+      // would require IcServer to honor streaming_strategy callbacks
+      // (separate work item).
+      Blazor.start({
+        circuit: {
+          configureSignalR: builder => {
+            builder.withUrl('/_blazor', { transport: 4 });
+          }
+        }
+      });
+    </script>
 </body>
 
 </html>

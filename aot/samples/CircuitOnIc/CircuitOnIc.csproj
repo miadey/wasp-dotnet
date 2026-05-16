@@ -17,12 +17,12 @@
     <NoWarn>$(NoWarn);IL2026;IL3050;CA2255;RAZORSDK1006</NoWarn>
     <IlcLlvmTarget>wasm32-wasi</IlcLlvmTarget>
 
-    <!-- Asset canister wiring. Set after dfx deploy writes the canister
-         ids (.dfx/local/canister_ids.json locally; canister_ids.json on
-         mainnet). -->
+    <!-- Asset canister wiring. After the Long Polling pivot (M4.S7) the
+         asset canister just ships static wwwroot — no per-canister
+         bootstrap JS, no gateway URL. /_blazor/* requests from the
+         browser are forwarded to the backend canister via dfx
+         dependencies (declared in dfx.json). -->
     <WaspAssetCanisterEnabled>true</WaspAssetCanisterEnabled>
-    <WaspAssetCanisterBackendId Condition="'$(WaspAssetCanisterBackendId)' == ''">rrkah-fqaaa-aaaaa-aaaaq-cai</WaspAssetCanisterBackendId>
-    <WaspAssetCanisterGateway Condition="'$(WaspAssetCanisterGateway)' == ''">wss://gateway.icws.io</WaspAssetCanisterGateway>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,16 +31,13 @@
     <PackageReference Include="runtime.linux-x64.Microsoft.DotNet.ILCompiler.LLVM" Version="10.0.0-alpha.1.25162.1" />
     <ProjectReference Include="..\..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
     <ProjectReference Include="..\..\Wasp.AspNetCore\Wasp.AspNetCore.csproj" />
-    <ProjectReference Include="..\..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
     <ProjectReference Include="..\..\Wasp.AspNetCore.Blazor.Server\Wasp.AspNetCore.Blazor.Server.csproj" />
     <TrimmerRootAssembly Include="CircuitOnIc" />
     <TrimmerRootAssembly Include="Wasp.IcCdk" />
     <TrimmerRootAssembly Include="Wasp.AspNetCore" />
     <TrimmerRootAssembly Include="Wasp.AspNetCore.Blazor.Server" />
-    <TrimmerRootAssembly Include="Wasp.WebSockets" />
     <UnmanagedEntryPointsAssembly Include="CircuitOnIc" />
     <UnmanagedEntryPointsAssembly Include="Wasp.AspNetCore" />
-    <UnmanagedEntryPointsAssembly Include="Wasp.WebSockets" />
   </ItemGroup>
 
   <Target Name="StripWasmComponentTypeWit" BeforeTargets="LinkNativeLlvm">

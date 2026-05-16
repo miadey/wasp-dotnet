@@ -59,12 +59,12 @@ namespace Wasp.AspNetCore.Blazor.Server;
 public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
 {
     private readonly IIcCircuitTransport _transport;
-    private readonly CircuitFactory _factory;
+    private readonly ICircuitFactory _factory;
     private readonly IServiceProvider _services;
     private CircuitHost? _circuit;
 
     private CircuitHubFacade(
-        IIcCircuitTransport transport, CircuitFactory factory, IServiceProvider services)
+        IIcCircuitTransport transport, ICircuitFactory factory, IServiceProvider services)
     {
         _transport = transport;
         _factory = factory;
@@ -77,7 +77,7 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
     /// BlazorHubDispatcher; the consumer doesn't need to do anything else.
     /// </summary>
     public static CircuitHubFacade Bind(
-        IIcCircuitTransport transport, CircuitFactory factory, IServiceProvider services)
+        IIcCircuitTransport transport, ICircuitFactory factory, IServiceProvider services)
     {
         if (transport is null) throw new ArgumentNullException(nameof(transport));
         if (factory is null) throw new ArgumentNullException(nameof(factory));
