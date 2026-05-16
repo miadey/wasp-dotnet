@@ -1,10 +1,6 @@
-@* Single-page router. Forces InteractiveServer on every component so the
-   browser opens a /_blazor WebSocket back to the backend canister. *@
-<Router AppAssembly="@typeof(Program).Assembly">
+﻿<Router AppAssembly="typeof(Program).Assembly" NotFoundPage="typeof(Pages.NotFound)">
     <Found Context="routeData">
-        <RouteView RouteData="@routeData" DefaultLayout="@typeof(Layout.MainLayout)" />
+        <RouteView RouteData="routeData" DefaultLayout="typeof(Layout.MainLayout)" />
+        <FocusOnNavigate RouteData="routeData" Selector="h1" />
     </Found>
-    <NotFound>
-        <p>Not found.</p>
-    </NotFound>
 </Router>

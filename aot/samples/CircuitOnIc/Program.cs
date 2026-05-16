@@ -78,10 +78,17 @@ public static class Program
             // needs to resolve.
             builder.Services.AddRazorComponents()
                 .AddInteractiveServerComponents();
+            builder.Services.AddAntiforgery();
 
             builder.WebHost.UseIcCanister();
 
             var app = builder.Build();
+
+            // Standard Razor Components endpoints require Antiforgery
+            // middleware in the pipeline — the framework's
+            // RazorComponentEndpointFactory stamps every endpoint with
+            // RequireAntiforgeryToken metadata.
+            app.UseAntiforgery();
 
             // Serve the static SSR shell so the FIRST request returns HTML
             // with our IC-WS shim baked in. Subsequent interaction goes
