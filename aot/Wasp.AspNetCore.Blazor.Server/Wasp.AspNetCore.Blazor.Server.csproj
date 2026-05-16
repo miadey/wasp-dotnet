@@ -19,6 +19,7 @@
     <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
     <ProjectReference Include="..\Wasp.AspNetCore\Wasp.AspNetCore.csproj" />
     <ProjectReference Include="..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
+    <InternalsVisibleTo Include="Wasp.AspNetCore.Blazor.Server.Tests" />
   </ItemGroup>
 
   <!-- Swap the framework Microsoft.AspNetCore.Components.Server reference

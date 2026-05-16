@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Security.Claims;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Components;
@@ -141,23 +143,24 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
         var clientProxy = new IcClientProxy(_transport);
         var circuitClientProxy = new CircuitClientProxy(clientProxy, _transport.ConnectionId);
 
-        // Deserialize the inbound component records. The framework's
-        // IServerComponentDeserializer is registered by
-        // AddInteractiveServerComponents and is the canonical path —
-        // it's now public in our vendored Components.Server.dll after
-        // the Cecil weaver.
-        var deserializer = _services.GetRequiredService<IServerComponentDeserializer>();
-        IReadOnlyList<ComponentDescriptor> components;
-        if (!deserializer.TryDeserializeComponentDescriptorCollection(
-                serializedComponentRecords, out var descriptorList))
+        // Parse our own marker descriptors directly. The framework's
+        // IServerComponentDeserializer expects descriptors that have been
+        // through ServerComponentSerializer (signed via DataProtection +
+        // JsonSerializer reflection paths) — the JSON reflection bits
+        // overshoot IC's 11.5 MB code-section limit when enabled. The
+        // BlazorMarkerMiddleware on the SSR side emits a synthetic
+        // descriptor `{"componentAssembly":"...","componentType":"..."}`
+        // (base64'd) that this parser recognizes 1:1.
+        var parsed = WaspComponentRecordParser.Parse(serializedComponentRecords);
+        var components = new List<ComponentDescriptor>(parsed.Count);
+        foreach (var (type, sequence) in parsed)
         {
-            // Empty descriptor list — blazor.web.js will follow up with
-            // UpdateRootComponents to add components dynamically.
-            components = Array.Empty<ComponentDescriptor>();
-        }
-        else
-        {
-            components = descriptorList;
+            components.Add(new ComponentDescriptor
+            {
+                ComponentType = type,
+                Parameters = ParameterView.Empty,
+                Sequence = sequence,
+            });
         }
 
         var user = new ClaimsPrincipal(new ClaimsIdentity());
@@ -272,6 +275,7 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
             throw new InvalidOperationException(
                 "CircuitHost not initialized — StartCircuit must be called first.");
     }
+
 
     // Stub IPersistentComponentStateStore. The real impl bridges to
     // CircuitStore (S5 #70) for upgrade survival; for first-light wiring
