@@ -1,7 +1,10 @@
-@* M4.S7 App shell — minimal page that doesn't depend on the
-   ResourceCollectionResolver service (@Assets[...] expressions).
-   The IC-WS shim script trio comes BEFORE blazor.web.js so
-   window.WebSocket is monkey-patched before /_blazor opens. *@
+@* M4.S7 — bypass <Router>/<Routes> (which trips an AOT struct-copy bug
+   in StaticHtmlRenderer.RenderAttributes when reading reference-typed
+   attribute values like NotFoundPage Type / AppAssembly). Render Counter
+   inline, same pattern that works in RazorOnIc.canister.wasm. The
+   interactive @rendermode handling on Counter still kicks in via the
+   inline component reference; blazor.web.js sees the
+   <!--Blazor:server--> markers and opens the /_blazor WS regardless. *@
 <!DOCTYPE html>
 <html lang="en">
 
@@ -9,15 +12,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <base href="/" />
+    <title>Blazor Server on IC — Counter</title>
     <link rel="stylesheet" href="lib/bootstrap/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="app.css" />
     <link rel="icon" type="image/png" href="favicon.png" />
     <HeadOutlet />
 </head>
 
-<body>
-    <Routes />
-    <ReconnectModal />
+<body style="font-family: system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem;">
+    <h1 style="color: #2563eb;">Blazor Server on IC</h1>
+    <p>Counter rendered server-side, interactivity over IC-WebSocket.</p>
+
+    <Counter />
+
+    <hr />
+    <small>Server-rendered shell + <code>blazor.web.js</code> loaded from the asset canister. The shim below rewires <code>window.WebSocket</code> for <code>/_blazor</code> to <code>IcWebSocket</code>.</small>
 
     <script src="ic-ws-blazor-config.js"></script>
     <script src="ic-websocket.umd.js"></script>

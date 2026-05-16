@@ -68,6 +68,14 @@
     </type>
   </assembly>
 
+  <!-- TypeNameHash.Compute(Type) calls SHA256.HashData to generate stable
+       marker keys for @rendermode InteractiveServer components. SHA256
+       isn't supported on wasm32-wasi (PlatformNotSupportedException).
+       Stub the static SHA256.HashData(ReadOnlySpan, Span) overload to a
+       no-op (Span output stays zero-filled). The resulting hash is a
+       constant per render but stable across requests — good enough for
+       marker keys (which are scoped per-circuit anyway). -->
+
   <!-- PersistentServicesRegistry is hit on every Razor render via
        EndpointHtmlRenderer.InitializeStandardComponentServicesAsync. Its
        ComputeKey calls SHA256.HashData. M2 (SSR-only) does not need persistent

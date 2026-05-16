@@ -23,7 +23,18 @@
          here because we substitute a Mono.Cecil-rewritten copy below — see
          UNSUPPORTED.md > Razor SSR for the bug it works around. -->
     <IlcReference Include="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/*.dll"
-                  Exclude="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/Microsoft.AspNetCore.Components.dll" />
+                  Exclude="/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/Microsoft.AspNetCore.Components.dll;/usr/share/dotnet/shared/Microsoft.AspNetCore.App/*/Microsoft.AspNetCore.Components.Endpoints.dll" />
+
+    <!-- Cecil-rewritten copy of Microsoft.AspNetCore.Components.Endpoints.dll:
+         TypeNameHash.Compute now returns type.FullName instead of calling
+         SHA256.HashData (unsupported on wasm32-wasi). Required for
+         @rendermode InteractiveServer SSR. Build via:
+           dotnet run [project shared/tools/Wasp.CircuitHostWeaver]
+             [framework Components.Endpoints.dll]
+             aot/Wasp.AspNetCore/Vendor/Microsoft.AspNetCore.Components.Endpoints.dll
+             [rewrite-typenamehash] -->
+    <IlcReference Include="$(_WaspAspNetCoreDir)Vendor\Microsoft.AspNetCore.Components.Endpoints.dll"
+                  Condition="Exists('$(_WaspAspNetCoreDir)Vendor\Microsoft.AspNetCore.Components.Endpoints.dll')" />
 
     <!-- Vendored woven Microsoft.AspNetCore.Components.dll. The framework
          version of RenderTreeFrameArrayBuilder.AppendElement/Text/Markup/etc.

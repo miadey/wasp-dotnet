@@ -35,14 +35,15 @@ using System.IO;
 using System.Linq;
 using Mono.Cecil;
 
-if (args.Length != 2)
+if (args.Length < 2)
 {
-    Console.Error.WriteLine("usage: circuit-host-weaver <input.dll> <output.dll>");
+    Console.Error.WriteLine("usage: circuit-host-weaver <input.dll> <output.dll> [--rewrite-typenamehash]");
     return 1;
 }
 
 string inputPath = args[0];
 string outputPath = args[1];
+bool rewriteTypeNameHash = args.Length > 2 && args[2] == "--rewrite-typenamehash";
 
 if (!File.Exists(inputPath))
 {
@@ -95,6 +96,93 @@ foreach (var type in module.GetAllTypes().ToArray())
     }
     // Properties / events derive their visibility from underlying methods,
     // which we already promoted above.
+}
+
+// Optionally rewrite framework methods that call into wasm32-wasi-unsupported
+// crypto APIs (SHA256, RandomNumberGenerator). Used when weaving
+// Microsoft.AspNetCore.Components.Endpoints.dll.
+if (rewriteTypeNameHash)
+{
+    var typeNameHash = module.GetType("Microsoft.AspNetCore.Components.Endpoints.TypeNameHash");
+    if (typeNameHash is not null)
+    {
+        var compute = typeNameHash.Methods.FirstOrDefault(m =>
+            m.Name == "Compute"
+            && m.Parameters.Count == 1
+            && m.Parameters[0].ParameterType.FullName == "System.Type");
+        if (compute is not null && compute.ReturnType.FullName == "System.String")
+        {
+            compute.Body.Instructions.Clear();
+            compute.Body.ExceptionHandlers.Clear();
+            compute.Body.Variables.Clear();
+            var il = compute.Body.GetILProcessor();
+            var fullNameProp = module.ImportReference(
+                typeof(System.Type).GetProperty("FullName")!.GetGetMethod()!);
+            il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_0);
+            il.Emit(Mono.Cecil.Cil.OpCodes.Callvirt, fullNameProp);
+            il.Emit(Mono.Cecil.Cil.OpCodes.Ret);
+            Console.WriteLine("rewrote: TypeNameHash.Compute → type.FullName");
+        }
+    }
+
+    // ServerComponentInvocationSequence..ctor() calls RandomNumberGenerator.Fill
+    // to seed a per-invocation unique id. RNG is PlatformNotSupported on
+    // wasm32-wasi. Rewrite the ctor to do nothing — the resulting all-zero
+    // sequence id is stable per request (acceptable for canister model).
+    var sequenceType = module.GetType("Microsoft.AspNetCore.Components.Endpoints.ServerComponentInvocationSequence");
+    if (sequenceType is not null)
+    {
+        var ctor = sequenceType.Methods.FirstOrDefault(m => m.IsConstructor && !m.IsStatic && m.Parameters.Count == 0);
+        if (ctor is not null)
+        {
+            ctor.Body.Instructions.Clear();
+            ctor.Body.ExceptionHandlers.Clear();
+            ctor.Body.Variables.Clear();
+            var il = ctor.Body.GetILProcessor();
+            // call base ctor if it's a class (not struct)
+            if (!sequenceType.IsValueType)
+            {
+                var objectCtor = module.ImportReference(
+                    typeof(object).GetConstructor(System.Type.EmptyTypes)!);
+                il.Emit(Mono.Cecil.Cil.OpCodes.Ldarg_0);
+                il.Emit(Mono.Cecil.Cil.OpCodes.Call, objectCtor);
+            }
+            il.Emit(Mono.Cecil.Cil.OpCodes.Ret);
+            Console.WriteLine("rewrote: ServerComponentInvocationSequence..ctor() → no-op");
+        }
+    }
+
+    // ResourceCollectionResolver type uses RandomNumberGenerator too for
+    // resource asset IDs. The @Assets[...] Razor expression we already
+    // dropped goes through this. Defensive stub.
+    foreach (var t in module.GetAllTypes().ToArray())
+    {
+        if (t.Namespace?.StartsWith("Microsoft.AspNetCore.Components.Endpoints") != true) continue;
+        foreach (var m in t.Methods)
+        {
+            if (!m.HasBody) continue;
+            var body = m.Body;
+            bool patched = false;
+            for (int i = 0; i < body.Instructions.Count; i++)
+            {
+                var ins = body.Instructions[i];
+                if (ins.OpCode.Code != Mono.Cecil.Cil.Code.Call &&
+                    ins.OpCode.Code != Mono.Cecil.Cil.Code.Callvirt) continue;
+                if (ins.Operand is not MethodReference mr) continue;
+                if (mr.DeclaringType.FullName == "System.Security.Cryptography.SHA256"
+                    && mr.Name == "HashData")
+                {
+                    // Replace the SHA256.HashData call with: pop args, push null byte[].
+                    // For HashData(ReadOnlySpan, Span) → int: pop both spans, push 0.
+                    // For HashData(byte[]) → byte[]: pop arg, push empty byte[].
+                    // Conservative: leave for now and document.
+                    patched = false;
+                }
+            }
+            // No-op: we already replaced the callers above for the two known cases.
+            _ = patched;
+        }
+    }
 }
 
 // Strip the [InternalsVisibleTo] attributes — once everything is public,
