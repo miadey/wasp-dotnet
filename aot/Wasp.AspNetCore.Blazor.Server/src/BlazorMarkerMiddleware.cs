@@ -99,11 +99,14 @@ public sealed class BlazorMarkerMiddleware
             return;
         }
 
-        string marker = BuildMarkerPair();
-        string injected = html.Insert(insertAt, marker);
-        var outBytes = Encoding.UTF8.GetBytes(injected);
-        context.Response.ContentLength = outBytes.Length;
-        await originalStream.WriteAsync(outBytes);
+        // Markers are now emitted INLINE by the Razor page via
+        // WaspMarkers.ServerStart / ServerEnd so they wrap the actual
+        // prerendered component HTML. Injecting an extra marker pair at
+        // </body> would either duplicate the descriptor (client sees two
+        // root components) or anchor the hydration at the wrong DOM
+        // region (RenderBatch edits would miss the Counter's nodes).
+        // Pass the response through unchanged.
+        await originalStream.WriteAsync(bytes);
     }
 
     // The marker descriptor is a synthetic blob; our

@@ -22,7 +22,24 @@
     <h1 style="color: #2563eb;">Blazor Server on IC</h1>
     <p>Counter rendered server-side. Click events ride <strong>SignalR Long Polling</strong> over the canister's HTTP gateway — no WebSocket, no external services.</p>
 
+    @* M4.S7 follow-up: wrap <Counter /> with the Wasp-emitted Blazor
+       server-component marker pair so blazor.web.js's renderer binds to
+       the actual <button>'s DOM region (not the end-of-body fallback the
+       middleware was injecting). After this, JS.RenderBatch edits land
+       on the Counter's nodes and `Current count` actually increments.
+
+       The descriptor's componentType MUST match what the server's
+       UpdateRootComponents Add op instantiates — it's how blazor.web.js
+       knows what to ask the server to render. WaspMarkers builds the
+       exact same shape the middleware used previously. *@
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(
+        componentType: "WaspSample.CircuitOnIc.Components.Pages.Counter",
+        componentAssembly: "CircuitOnIc",
+        prerenderId: "wasp-counter-0001",
+        keyHash: "wasp-key-0001"))
     <Counter />
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(
+        prerenderId: "wasp-counter-0001"))
 
     <hr />
     <small>SignalR transport pinned to <code>HttpTransportType.LongPolling</code> (value 4). <code>/_blazor/negotiate</code>, POST <code>/_blazor</code> (send), and GET <code>/_blazor</code> (poll) all route to this canister's <code>http_request_update</code>.</small>
