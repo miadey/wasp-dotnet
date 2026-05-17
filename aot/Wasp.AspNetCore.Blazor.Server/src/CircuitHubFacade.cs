@@ -75,6 +75,22 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
     // GET poll.
     private int _wapsClickCount;
 
+    // gh #79 helper: pull the tracked .NET object id out of a
+    // DotNetObjectReference. The property is internal so we get at it
+    // via reflection — same trick the framework's
+    // JSObjectReferenceJsonConverter uses.
+    private static long TryReadDotNetObjectId(object dnRef)
+    {
+        if (dnRef is null) return 0;
+        var t = dnRef.GetType();
+        var prop = t.GetProperty(
+            "ObjectId",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+        if (prop is null) return 0;
+        var v = prop.GetValue(dnRef);
+        return v is long l ? l : (v is int i ? (long)i : 0);
+    }
+
     private CircuitHubFacade(
         IIcCircuitTransport transport, ICircuitFactory factory, IServiceProvider services)
     {
@@ -283,6 +299,52 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
             var task = (Task)method.Invoke(_circuit, new object?[] { batch, null, false, CancellationToken.None })!;
             await task;
             TraceLog("[facade] UpdateRootComponents OK");
+
+            // gh #78: alongside the framework's marker-based JS.AttachComponent,
+            // ALSO push a real CSS selector to the client so it can pin the
+            // renderer to a known DOM element. The selector points at a
+            // wasp-counter-mount placeholder div the Razor template includes
+            // unconditionally — fallback when the marker lookup misses.
+            foreach (var op in parsed.Operations)
+            {
+                if (op.Type == WaspComponentRecordParser.WaspRootComponentOperationType.Add
+                    && op.ComponentType is not null)
+                {
+                    var selectorArgsJson =
+                        "[" + op.SsrComponentId.ToString() +
+                        ",\"#wasp-counter-mount\",\"" + op.ComponentType.FullName + "\"]";
+                    try
+                    {
+                        await _transport.SendCoreAsync(
+                            "JS.BeginInvokeJS",
+                            new object?[] { 0L, "waspAttachComponentSelector", selectorArgsJson, 0, 0L },
+                            CancellationToken.None);
+                        TraceLog($"[facade]   waspAttachComponentSelector(ssrId={op.SsrComponentId},#wasp-counter-mount) queued");
+                    }
+                    catch (Exception sel) { TraceLog($"[facade]   selector queue FAILED: {sel.Message}"); }
+                }
+            }
+
+            // gh #79: surface a DotNetObjectReference for this facade so the
+            // client gets a real .NET-object id (mimicking WebRendererInterop
+            // Methods's tracked-instance flow). The framework's
+            // DotNetObjectReference.Create<T> works with public types — our
+            // facade is public and InteropMethods are wired via the
+            // Wasp-prefixed methods, so we send the id to the client which
+            // can use it as the dispatcher object id alongside our pre-
+            // registered interop bridge.
+            try
+            {
+                var dnRef = Microsoft.JSInterop.DotNetObjectReference.Create(this);
+                long dnId = TryReadDotNetObjectId(dnRef);
+                var idArgsJson = "[1," + dnId.ToString() + "]";
+                await _transport.SendCoreAsync(
+                    "JS.BeginInvokeJS",
+                    new object?[] { 0L, "waspSetRendererDotNetObject", idArgsJson, 0, 0L },
+                    CancellationToken.None);
+                TraceLog($"[facade]   waspSetRendererDotNetObject(rendererId=1,id={dnId}) queued");
+            }
+            catch (Exception dn) { TraceLog($"[facade]   DotNetObjectReference FAILED: {dn.Message}"); }
         }
         catch (Exception ex)
         {
