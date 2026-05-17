@@ -92,8 +92,16 @@
       //      handshake has fired, so the canister queue is necessarily
       //      empty — retrying forever blocks bootstrap).
       const origFetch = window.fetch;
-      const POLL_RETRY = 6;          // 6 attempts ~ <1s total
-      const POLL_DELAY = [50, 100, 150, 200, 250, 300];
+      // Tighter retry schedule: total ~270ms vs original 1150ms.
+      // Empty polls during initial circuit bootstrap dominate startup
+      // time, so retry fast and only back off if the queue is genuinely
+      // idle for an extended time.
+      const POLL_RETRY = 8;
+      const POLL_DELAY = [10, 20, 30, 40, 50, 60, 80, 120];
+
+      const _waspT0 = performance.now();
+      const _waspLog = (label) => console.log('[wasp.timing]', label, Math.round(performance.now() - _waspT0) + 'ms');
+      _waspLog('script-start');
       async function _wrappedFetch(input, init) {
         const url = typeof input === 'string' ? input : input.url;
         const method = init?.method || 'GET';
@@ -175,6 +183,18 @@
           Blazor._internal.attachWebRendererInterop(1, interop, null, null);
           console.log('[wasp] pre-registered Server renderer with SignalR bridge');
         } catch (e) { console.log('[wasp] attachWebRendererInterop:', e.message); }
+
+        _waspLog('before-blazor-start');
+
+        // Observe when the Counter actually shows up so we can measure
+        // end-to-end startup wall-clock from script-start.
+        const _waspReadyObs = new MutationObserver(() => {
+          if (document.querySelector('#wasp-count')) {
+            _waspLog('counter-rendered');
+            _waspReadyObs.disconnect();
+          }
+        });
+        _waspReadyObs.observe(document.body, { childList: true, subtree: true, characterData: true });
 
         Blazor.start({
           circuit: {
