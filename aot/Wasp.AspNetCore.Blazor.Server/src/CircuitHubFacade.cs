@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -335,41 +336,48 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
                 }
                 TraceLog($"[facade]   intercept DispatchEventAsync eventHandlerId={eventHandlerId}");
                 var renderer = _circuit!.Renderer;
-
-                // Renderer.Dispatcher.InvokeAsync queues behind any
-                // tasks that haven't quiesced — and those tasks are
-                // typically waiting on the client's OnRenderCompleted
-                // (which can't arrive until THIS update call returns).
-                // Bypass the queue: yank the dispatcher's internal
-                // RendererSynchronizationContext via reflection, install
-                // it as current, call DispatchEventAsync directly. Now
-                // Dispatcher.CheckAccess returns true and the work runs
-                // synchronously inline.
                 var dispatcher = renderer.Dispatcher;
-                var ctxField = dispatcher.GetType().GetField(
+
+                // Dispatcher.InvokeAsync would queue onto its RSC, which
+                // pumps via ThreadPool — but wasm32-wasi is single-
+                // threaded with no thread pool, so queued work never
+                // runs and we deadlock. Bypass: pull the dispatcher's
+                // private `_context` (the RendererSynchronizationContext)
+                // via reflection, install it as Current, then call
+                // DispatchEventAsync — CheckAccess now returns true and
+                // the @onclick handler runs synchronously inline. Trim
+                // metadata for this field is kept via a DynamicDependency
+                // attribute on Program.Init.
+                var dispatcherType = dispatcher.GetType();
+                var ctxField = dispatcherType.GetField(
                     "_context",
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                var ctx = ctxField?.GetValue(dispatcher) as System.Threading.SynchronizationContext;
+                if (ctxField is null)
+                {
+                    TraceLog($"[facade]   ERROR: _context field not found on {dispatcherType.FullName} (trim metadata missing)");
+                    return;
+                }
+                var rsc = (System.Threading.SynchronizationContext?)ctxField.GetValue(dispatcher);
+                if (rsc is null)
+                {
+                    TraceLog($"[facade]   ERROR: _context value was null");
+                    return;
+                }
+                TraceLog($"[facade]   rsc={rsc.GetType().FullName}");
                 var prev = System.Threading.SynchronizationContext.Current;
-                if (ctx is not null) System.Threading.SynchronizationContext.SetSynchronizationContext(ctx);
+                System.Threading.SynchronizationContext.SetSynchronizationContext(rsc);
+                TraceLog($"[facade]   checkAccess after install={dispatcher.CheckAccess()}");
                 try
                 {
                     var dispatchTask = renderer.DispatchEventAsync(
                         eventHandlerId, null, EventArgs.Empty, waitForQuiescence: false);
-                    // The Task returned from DispatchEventAsync may have
-                    // continuations queued on the dispatcher — DO NOT
-                    // await it here (would re-enter the same queue
-                    // deadlock). The event handler ran synchronously
-                    // inside DispatchEventAsync; subsequent renders are
-                    // queued onto the dispatcher and will produce
-                    // outbound RenderBatch frames our transport sink
-                    // catches.
-                    TraceLog($"[facade] DispatchEventAsync started (status={dispatchTask.Status})");
+                    TraceLog($"[facade]   DispatchEventAsync started status={dispatchTask.Status}");
                 }
                 finally
                 {
                     System.Threading.SynchronizationContext.SetSynchronizationContext(prev);
                 }
+                TraceLog($"[facade] DispatchEventAsync dispatched OK");
                 return;
             }
             catch (Exception ex)

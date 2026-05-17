@@ -54,6 +54,15 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Components.Layout.MainLayout))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
     [DynamicDependency("FromMilliseconds(System.Int64)", typeof(TimeSpan))]
+    // Keep reflection metadata on the private `_context` field of the
+    // renderer's dispatcher. We yank it at runtime to install the
+    // RendererSynchronizationContext as Current — Dispatcher.CheckAccess
+    // then returns true and DispatchEventAsync runs the @onclick handler
+    // inline (no ThreadPool pump, which wasm32-wasi doesn't have).
+    [DynamicDependency(
+        DynamicallyAccessedMemberTypes.NonPublicFields,
+        "Microsoft.AspNetCore.Components.Rendering.RendererSynchronizationContextDispatcher",
+        "Microsoft.AspNetCore.Components")]
     [ModuleInitializer]
     internal static void Init()
     {
