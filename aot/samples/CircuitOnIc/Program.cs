@@ -178,6 +178,15 @@ public static class Program
             {
                 Reply.Print($"[init] RegisterRenderedPath(/) failed (continuing): {rex.GetType().Name}: {rex.Message}");
             }
+
+            // SignalR's blazor.web.js fires GET /_blazor/initializers
+            // on startup; in our setup it just returns an empty `[]`
+            // JSON. Serving that from the query path saves another
+            // ~1 s update-call.
+            IcServer.RegisterStaticAsset(
+                "/_blazor/initializers",
+                System.Text.Encoding.UTF8.GetBytes("[]"),
+                "application/json; charset=utf-8");
         }
         catch (Exception ex)
         {

@@ -188,8 +188,13 @@ public sealed class IcServer : IServer
                 {
                     var probeArg = MessageContext.ArgData();
                     var probeReq = CandidHttp.DecodeRequest(probeArg);
+                    // Strip query string so `/?t=v35` matches `/` in the
+                    // static-asset map. Cache-busting query params are
+                    // ignored — the asset body is identical regardless.
+                    int qIdx = probeReq.Url.IndexOf('?');
+                    string lookupPath = qIdx >= 0 ? probeReq.Url.Substring(0, qIdx) : probeReq.Url;
                     if (probeReq.Method == "GET"
-                        && _staticAssets.TryGetValue(probeReq.Url, out var asset))
+                        && _staticAssets.TryGetValue(lookupPath, out var asset))
                     {
                         Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
                         {
