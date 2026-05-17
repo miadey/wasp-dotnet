@@ -232,6 +232,18 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
                 Descriptor = (op.Type != WaspComponentRecordParser.WaspRootComponentOperationType.Remove && op.ComponentType is not null)
                     ? new WebRootComponentDescriptor(op.ComponentType, WebRootComponentParameters.Empty)
                     : null,
+                // CircuitHost.PerformRootComponentOperations dereferences
+                // Marker.Value.Key — leaving Marker null throws
+                // InvalidOperationException("InvalidOperation_NoValue").
+                // We synthesize a deterministic Key per ssrComponentId.
+                Marker = (op.Type != WaspComponentRecordParser.WaspRootComponentOperationType.Remove)
+                    ? new ComponentMarker
+                    {
+                        Type = ComponentMarker.ServerMarkerType,
+                        Sequence = op.SsrComponentId,
+                        Key = new ComponentMarkerKey($"wasp-root-{op.SsrComponentId}", null),
+                    }
+                    : null,
             };
         }
         var batch = new RootComponentOperationBatch

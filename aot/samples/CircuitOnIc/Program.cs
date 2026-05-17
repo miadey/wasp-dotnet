@@ -80,7 +80,10 @@ public static class Program
             // is what brings in CircuitFactory + the friends CircuitHubFacade
             // needs to resolve.
             builder.Services.AddRazorComponents()
-                .AddInteractiveServerComponents();
+                .AddInteractiveServerComponents(options =>
+                {
+                    options.DetailedErrors = true;
+                });
             builder.Services.AddAntiforgery();
 
             builder.WebHost.UseIcCanister();
