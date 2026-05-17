@@ -166,6 +166,18 @@ public static class Program
             app.MapRazorComponents<App>();
 
             app.StartAsync().GetAwaiter().GetResult();
+
+            // Pre-render the SSR shell and register it as a static
+            // asset so GET / serves from the query path (~100 ms on
+            // .raw.localhost) instead of upgrading to an update call
+            // (~1.5 s). The shell is deterministic (Counter type +
+            // marker descriptors don't vary per request) so a single
+            // capture at init suffices until the next canister upgrade.
+            try { IcServer.RegisterRenderedPath("/"); }
+            catch (Exception rex)
+            {
+                Reply.Print($"[init] RegisterRenderedPath(/) failed (continuing): {rex.GetType().Name}: {rex.Message}");
+            }
         }
         catch (Exception ex)
         {

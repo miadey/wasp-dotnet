@@ -59,6 +59,79 @@ public sealed class IcServer : IServer
         _staticAssets[path] = (body, contentType);
     }
 
+    /// <summary>
+    /// Synthesize a GET request through the ASP.NET pipeline now,
+    /// capture the response, and register it as a static asset. Use
+    /// for paths whose body doesn't change per request — most useful
+    /// for the SSR HTML shell so the initial page load lands in
+    /// ~100 ms instead of ~1500 ms (the update-call upgrade).
+    ///
+    /// Call AFTER <c>app.StartAsync</c> at canister init.
+    /// </summary>
+    public static void RegisterRenderedPath(string path)
+    {
+        if (path is null) throw new ArgumentNullException(nameof(path));
+        if (_instance?._app is not { } app)
+        {
+            Reply.Print($"[icserver] RegisterRenderedPath({path}) skipped — app not started yet");
+            return;
+        }
+
+        var icReq = new IcHttpRequest
+        {
+            Method = "GET",
+            Url = path,
+            Headers = new[]
+            {
+                new KeyValuePair<string, string>("host", "wasp-canister"),
+                new KeyValuePair<string, string>("user-agent", "wasp-prerender"),
+            },
+            Body = Array.Empty<byte>(),
+        };
+
+        var httpCtx = BuildHttpContext(icReq, isUpdate: true);
+        var aspCtx = app.CreateContext(httpCtx.Features);
+        Exception? pipelineException = null;
+        try
+        {
+            IcSyncContext.RunUntilComplete(() => app.ProcessRequestAsync(aspCtx));
+        }
+        catch (Exception ex)
+        {
+            pipelineException = ex;
+        }
+        app.DisposeContext(aspCtx, pipelineException);
+
+        if (pipelineException is not null)
+        {
+            Reply.Print($"[icserver] RegisterRenderedPath({path}) FAILED: {pipelineException.GetType().Name}: {pipelineException.Message}");
+            return;
+        }
+
+        var icResp = BuildIcResponse(httpCtx, httpCtx.Response);
+        if (icResp.StatusCode != 200)
+        {
+            Reply.Print($"[icserver] RegisterRenderedPath({path}) skipped — status {icResp.StatusCode}");
+            return;
+        }
+
+        // Try to keep the response's own content-type header if the
+        // pipeline set one; fall back to text/html for / and the
+        // default for everything else.
+        string contentType = "text/html; charset=utf-8";
+        foreach (var h in icResp.Headers)
+        {
+            if (string.Equals(h.Key, "content-type", StringComparison.OrdinalIgnoreCase))
+            {
+                contentType = h.Value;
+                break;
+            }
+        }
+
+        _staticAssets[path] = (icResp.Body, contentType);
+        Reply.Print($"[icserver] RegisterRenderedPath({path}) OK — {icResp.Body.Length} bytes registered as static");
+    }
+
     /// <inheritdoc />
     public IFeatureCollection Features { get; } = new FeatureCollection();
 
