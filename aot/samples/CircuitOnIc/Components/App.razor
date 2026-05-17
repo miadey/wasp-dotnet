@@ -31,36 +31,37 @@
     <script>
       // Override fetch:
       //   1. Trace every /_blazor request for diagnostics.
-      //   2. For SignalR Long Polling GETs, swallow empty (cl=0) responses
-      //      and re-poll silently — blazor.web.js's _processIncomingData
-      //      always invokes _processHandshakeResponse on incoming buffers
-      //      (because a 0-byte ArrayBuffer is truthy in JS), and an empty
-      //      buffer throws "Message is incomplete". The canister can't
-      //      true-long-poll (no async-wait that yields to the IC
-      //      scheduler), so we filter at the browser instead.
+      //   2. For SignalR Long Polling GETs, retry up to N times on empty
+      //      body before giving up. Capped to avoid deadlocking the
+      //      transport's connect() probe (which polls before any POST
+      //      handshake has fired, so the canister queue is necessarily
+      //      empty — retrying forever blocks bootstrap).
       const origFetch = window.fetch;
-      const baseDelayMs = 100, maxDelayMs = 1500;
+      const POLL_RETRY = 6;          // 6 attempts ~ <1s total
+      const POLL_DELAY = [50, 100, 150, 200, 250, 300];
       async function _wrappedFetch(input, init) {
         const url = typeof input === 'string' ? input : input.url;
         const method = init?.method || 'GET';
         if (url && url.match(/\/_blazor\?id=/) && method === 'GET') {
-          // Long Polling GET — retry on empty body, server-side suppress
-          // races without us caring.
-          let delay = baseDelayMs;
-          for (;;) {
+          for (let i = 0; i < POLL_RETRY; i++) {
+            if (init?.signal?.aborted) break;
             const resp = await origFetch(input, init);
             if (resp.status !== 200) return resp;
             const cloned = resp.clone();
             const bytes = await cloned.arrayBuffer();
             if (bytes.byteLength > 0) {
-              console.log('[wasp] poll-data', url, bytes.byteLength + 'B');
+              console.log('[wasp] poll-data', bytes.byteLength + 'B (attempt ' + (i+1) + ')');
               return resp;
             }
-            // empty — wait and re-poll
-            if (init?.signal?.aborted) return resp;
-            await new Promise(r => setTimeout(r, delay));
-            delay = Math.min(delay * 2, maxDelayMs);
+            // Empty — wait and retry. If we exhaust retries we fall
+            // through and return the last (still-empty) response to
+            // SignalR; harmless on connect() probe (body ignored) and
+            // any subsequent empty poll just becomes a "timed out,
+            // reissuing" in SignalR's _poll loop (after handshake done).
+            await new Promise(r => setTimeout(r, POLL_DELAY[i] || 300));
           }
+          // Final empty fetch — return as-is so SignalR can decide.
+          return await origFetch(input, init);
         }
         if (url && url.includes('/_blazor')) {
           console.log('[wasp] FETCH', method, url);

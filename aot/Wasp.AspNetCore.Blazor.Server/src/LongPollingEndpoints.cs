@@ -119,18 +119,14 @@ public static class LongPollingEndpoints
                 }
             }
 
-            // SignalR Long Polling: the POST response body drains any
-            // outbound bytes the server has queued — handshake ack and
-            // any pending Hub frames. Duplicate handshake acks are
-            // filtered (see LongPollingConnection.DrainOutbound).
-            var outBytes = conn.DrainOutbound();
+            // SignalR Long Polling's `send` helper DISCARDS the POST
+            // response body — only the GET _poll loop pipes data into
+            // onreceive. So we don't drain the queue here; we let the
+            // next GET poll pick up any bytes (handshake ack, render
+            // frames) that HandleInbound just enqueued.
             ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/octet-stream";
-            ctx.Response.ContentLength = outBytes.Length;
-            if (outBytes.Length > 0)
-            {
-                await ctx.Response.Body.WriteAsync(outBytes);
-            }
+            ctx.Response.ContentLength = 0;
         }).DisableAntiforgery();
 
         // Poll — return all queued outbound bytes (concatenated, since each
@@ -157,20 +153,13 @@ public static class LongPollingEndpoints
                 return;
             }
 
+            // Drain everything the transport has queued for the client:
+            // handshake ack on the first poll after a handshake POST,
+            // then render-batch / completion frames as CircuitHost
+            // produces them. Empty body is fine — the App.razor fetch
+            // wrapper retries silently so blazor.web.js never sees an
+            // empty buffer in its _processHandshakeResponse path.
             var bytes = conn.DrainOutbound();
-            // If still nothing queued and the handshake ack hasn't been
-            // sent on the wire yet, send it now — blazor.web.js's
-            // LongPolling client always calls onreceive on empty content
-            // (0-byte ArrayBuffer is truthy), which routes into
-            // _processHandshakeResponse and throws "Message is incomplete"
-            // when no 0x1E is present. Sending the ack here covers the
-            // race where this GET poll arrives before the handshake POST
-            // has been processed. TryRaceAck is one-shot per connection.
-            if (bytes.Length == 0)
-            {
-                var ack = conn.TryRaceAck();
-                if (ack is not null) bytes = ack;
-            }
 
             ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/octet-stream";
