@@ -158,6 +158,28 @@ public static class Program
                 Reply.Print($"[init] RegisterWaspStaticAssets failed: {sex.GetType().Name}: {sex.Message}");
             }
 
+            // POST /api/sync — writes the supplied count to stable
+            // memory. Update call, ~1.3 s. Client fires this every
+            // few seconds in the background OR on page unload via
+            // navigator.sendBeacon. Hot-path clicks stay on the query
+            // path — only persistence ever hits an update call.
+            // Must be registered BEFORE StartAsync so routing builds
+            // the endpoint table with it included.
+            app.MapPost("/api/sync", async (HttpContext ctx) =>
+            {
+                int next = 0;
+                if (ctx.Request.Query.TryGetValue("c", out var raw)
+                    && int.TryParse(raw.ToString(), out var parsed))
+                {
+                    next = parsed;
+                }
+                CounterStableStore.Write(next);
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(
+                    "{\"persisted\":" + next.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
+            }).DisableAntiforgery();
+
             // Serve the SSR shell. NOT calling .AddInteractiveServerRenderMode()
             // because it wires ServerComponentSerializer which needs JSON
             // reflection (PNS on wasm32-wasi). We emit our own marker via
@@ -190,15 +212,9 @@ public static class Program
 
             // QUERY-RPC PROTOTYPE — GET /api/click?c=<N> returns
             // {"count": N+1}. Stateless: the canister doesn't persist
-            // the count; the client carries it in the query string and
-            // we return the next value. Because this rides the query
-            // path (no consensus, no state mutation) it returns in
-            // ~50 ms instead of the ~1.3 s an update call would cost.
-            //
-            // Persistence would normally come from a canister timer
-            // flushing accumulated input to stable memory off the hot
-            // path. For this demo we skip persistence to keep the
-            // round-trip cost honest.
+            // the count from the query; the client carries it in the
+            // query string. Returns in ~12 ms (query call) vs ~1.3 s
+            // for the SignalR update-call path.
             IcServer.RegisterQueryHandler("/api/click", url =>
             {
                 int prev = 0;
@@ -218,6 +234,19 @@ public static class Program
                     "{\"count\":" + (prev + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
                 return (bytes, "application/json; charset=utf-8");
             });
+
+            // GET /api/state — reads the persisted counter from stable
+            // memory. Single 4-byte read at offset 0. Query call, no
+            // consensus. ~10 ms round trip on raw.localhost.
+            IcServer.RegisterQueryHandler("/api/state", url =>
+            {
+                int count = CounterStableStore.Read();
+                var bytes = System.Text.Encoding.UTF8.GetBytes(
+                    "{\"count\":" + count.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
+                return (bytes, "application/json; charset=utf-8");
+            });
+
+            // /api/sync moved above to be registered before StartAsync.
         }
         catch (Exception ex)
         {

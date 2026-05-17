@@ -11,10 +11,16 @@
 </button>
 
 @code {
-    private int currentCount = 0;
+    // Initial render hydrates from stable memory so the span doesn't
+    // flash back to 0 when Blazor's renderer kicks in 5-6 s after the
+    // page paints. The fast-click path bypasses this field entirely;
+    // it lives only for the slow-click (SignalR) path and to give the
+    // framework's first render the right number.
+    private int currentCount = CounterStableStore.Read();
 
     private void IncrementCount()
     {
         currentCount++;
+        CounterStableStore.Write(currentCount);
     }
 }
