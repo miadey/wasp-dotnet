@@ -20,6 +20,11 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
     <ProjectReference Include="..\Wasp.Http\Wasp.Http.csproj" />
+    <!-- For IcHttpCertTree: reuses HashTree / Sha256 / Cbor from
+         Wasp.WebSockets. These are really IC primitives (not WS-
+         specific) — moving them into Wasp.IcCdk is the cleaner
+         long-term refactor; for now we just take the dependency. -->
+    <ProjectReference Include="..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
   </ItemGroup>
 
 </Project>
