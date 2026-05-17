@@ -3,22 +3,52 @@ using System.Text;
 
 namespace Wasp.AspNetCore.Blazor.Server;
 
-// Renders the Blazor server-component marker comment pair that
-// blazor.web.js scans for to identify hydration anchors. Used from
-// Razor pages via @((MarkupString)WaspMarkers.ServerStart(...)) so the
-// markers WRAP the prerendered component's DOM (rather than being
-// dropped at end-of-body, which prevents JS.RenderBatch edits from
-// finding their target nodes).
+// Renders the Blazor server-component marker comment(s) that
+// blazor.web.js scans for to identify component placement. Used from
+// Razor pages via @((MarkupString)WaspMarkers.Server(...)).
 //
-// Shape (must match what BlazorMarkerMiddleware previously emitted —
-// blazor.web.js's parser is strict on field names):
+// Two shapes are supported:
 //
-//   <!--Blazor:{"type":"server","sequence":0,"descriptor":"<base64>",
-//               "prerenderId":"<id>","key":{"locationHash":"<id>"}}-->
-//   <prerendered HTML>
-//   <!--Blazor:{"prerenderId":"<id>"}-->
+//   1. Non-prerendered (used here): a SINGLE marker — no prerenderId,
+//      no closing marker, no content. The client renders the whole
+//      component from the first JS.RenderBatch the server sends.
+//      Avoids the SSR ↔ hydration text-frame reconciliation that fails
+//      without <!--bl:N--> boundary markers (which Wasp's
+//      StaticHtmlRenderer doesn't emit).
+//
+//          <!--Blazor:{"type":"server","sequence":0,"descriptor":"<b64>",
+//                      "key":{"locationHash":"<id>"}}-->
+//
+//   2. Prerendered (ServerPrerendered): an opening + closing comment
+//      pair wrapping the prerendered DOM. Kept for completeness but
+//      not currently used — hydration reconciliation requires per-
+//      frame boundary markers we don't emit, so dynamic text frames
+//      come out blank.
 public static class WaspMarkers
 {
+    public static string Server(
+        string componentType,
+        string componentAssembly,
+        string keyHash)
+    {
+        if (componentType is null) throw new ArgumentNullException(nameof(componentType));
+        if (componentAssembly is null) throw new ArgumentNullException(nameof(componentAssembly));
+        if (keyHash is null) throw new ArgumentNullException(nameof(keyHash));
+
+        string descriptorJson =
+            "{\"componentAssembly\":\"" + componentAssembly +
+            "\",\"componentType\":\"" + componentType + "\"}";
+        string descriptor = Convert.ToBase64String(Encoding.UTF8.GetBytes(descriptorJson));
+
+        var sb = new StringBuilder(512);
+        sb.Append("<!--Blazor:");
+        sb.Append("{\"type\":\"server\",\"sequence\":0,\"descriptor\":\"");
+        sb.Append(descriptor);
+        sb.Append("\",\"key\":{\"locationHash\":\"").Append(keyHash).Append("\"}}");
+        sb.Append("-->");
+        return sb.ToString();
+    }
+
     public static string ServerStart(
         string componentType,
         string componentAssembly,

@@ -4,11 +4,15 @@
 
 <h1>Counter</h1>
 
-<p role="status">Current count: @currentCount</p>
+<p role="status">Current count: <span id="wasp-count">@currentCount</span></p>
 
 <button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
 
 @code {
+    // <span id="wasp-count"> wrapper preserves a stable DOM element
+    // across render diffs — the framework's client renderer can
+    // target it directly instead of having to split a shared text
+    // node against absent boundary markers. (See gh #19 / #77.)
     private int currentCount = 0;
 
     private void IncrementCount()

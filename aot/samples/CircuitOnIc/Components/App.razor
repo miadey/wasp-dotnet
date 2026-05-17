@@ -22,16 +22,11 @@
     <h1 style="color: #2563eb;">Blazor Server on IC</h1>
     <p>Counter rendered server-side. Click events ride <strong>SignalR Long Polling</strong> over the canister's HTTP gateway — no WebSocket, no external services.</p>
 
-    @* M4.S7 follow-up: wrap <Counter /> with the Wasp-emitted Blazor
-       server-component marker pair so blazor.web.js's renderer binds to
-       the actual <button>'s DOM region (not the end-of-body fallback the
-       middleware was injecting). After this, JS.RenderBatch edits land
-       on the Counter's nodes and `Current count` actually increments.
-
-       The descriptor's componentType MUST match what the server's
-       UpdateRootComponents Add op instantiates — it's how blazor.web.js
-       knows what to ask the server to render. WaspMarkers builds the
-       exact same shape the middleware used previously. *@
+    @* Prerendered: marker pair wraps the SSR <Counter /> output. The
+       dynamic @currentCount is wrapped in <span id="wasp-count"> in
+       Counter.razor so it lives in its own DOM element — the framework's
+       client renderer can update the span's contents without having to
+       split a shared text node against absent boundary markers. *@
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(
         componentType: "WaspSample.CircuitOnIc.Components.Pages.Counter",
         componentAssembly: "CircuitOnIc",
