@@ -41,6 +41,17 @@
 
     <script src="/_framework/blazor.web.js" autostart="false"></script>
     <script>
+      // Direct-DOM update for the Counter's <span id="wasp-count">,
+      // invoked from Counter.razor via IJSRuntime.InvokeVoidAsync
+      // ("waspSetCount", count). Works around the wasm32-wasi AOT
+      // RenderBatchWriter strings-table bug tracked in gh #80 — the
+      // framework's delta-render path emits a batch whose strings
+      // section is empty, so the span text would otherwise wipe to "".
+      window.waspSetCount = function(val) {
+        const el = document.getElementById('wasp-count');
+        if (el) el.textContent = val;
+      };
+
       // Override fetch:
       //   1. Trace every /_blazor request for diagnostics.
       //   2. For SignalR Long Polling GETs, retry up to N times on empty
