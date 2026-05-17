@@ -131,7 +131,7 @@ public static class BlazorHubDispatcher
             {
                 EnsureArgs(args, 5, message.Target);
                 await hub.BeginInvokeDotNetFromJS(
-                    Str(args[0]), Str(args[1]), Str(args[2]), Long(args[3]), Str(args[4]));
+                    Str(args[0]), NullableStr(args[1]) ?? "", Str(args[2]), Long(args[3]), NullableStr(args[4]) ?? "");
                 break;
             }
             case "EndInvokeJSFromDotNet":

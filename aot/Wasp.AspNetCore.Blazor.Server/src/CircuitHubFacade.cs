@@ -302,12 +302,73 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
         return new ValueTask<bool>(false);
     }
 
-    public ValueTask BeginInvokeDotNetFromJS(
+    public async ValueTask BeginInvokeDotNetFromJS(
         string callId, string assemblyName, string methodIdentifier, long dotNetObjectId, string argsJson)
     {
         EnsureCircuit();
-        return new ValueTask(_circuit!.BeginInvokeDotNetFromJS(
-            callId, assemblyName, methodIdentifier, dotNetObjectId, argsJson));
+        TraceLog($"[facade] BeginInvokeDotNetFromJS call={callId} asm={assemblyName} method={methodIdentifier} dotNetObjId={dotNetObjectId} args.Len={argsJson?.Length ?? -1}");
+
+        // INTERCEPT: DispatchEventAsync is the per-renderer event delegate
+        // that blazor.web.js fires on every UI event. Stock framework routes
+        // it via DotNetDispatcher.BeginInvokeDotNet which JSON-reflects the
+        // arg into MouseEventArgs/KeyboardEventArgs/etc. — those reflection
+        // paths are PNS on wasm32-wasi. We short-circuit by parsing the
+        // JSON ourselves (JsonDocument is reflection-free) and calling
+        // Renderer.DispatchEventAsync directly with EventArgs.Empty. The
+        // Counter sample's @onclick handler ignores the event payload.
+        if (methodIdentifier == "DispatchEventAsync" && !string.IsNullOrEmpty(argsJson))
+        {
+            try
+            {
+                ulong eventHandlerId = 0;
+                using (var doc = System.Text.Json.JsonDocument.Parse(argsJson))
+                {
+                    var root = doc.RootElement;
+                    if (root.ValueKind == System.Text.Json.JsonValueKind.Array && root.GetArrayLength() >= 1)
+                    {
+                        var desc = root[0];
+                        if (desc.TryGetProperty("eventHandlerId", out var idEl))
+                        {
+                            eventHandlerId = idEl.GetUInt64();
+                        }
+                    }
+                }
+                TraceLog($"[facade]   intercept DispatchEventAsync eventHandlerId={eventHandlerId}");
+                // Renderer requires dispatch on its own Dispatcher thread.
+                // waitForQuiescence:false avoids deadlock — the default
+                // overload waits for client OnRenderCompleted, but the
+                // client can't send that until THIS update call returns
+                // its response (which carries the render batch). Fire
+                // the event, schedule the batch, return — client will
+                // pick up the batch on its next poll.
+                var renderer = _circuit!.Renderer;
+                await renderer.Dispatcher.InvokeAsync(
+                    () => renderer.DispatchEventAsync(eventHandlerId, null, EventArgs.Empty, waitForQuiescence: false));
+                TraceLog("[facade] DispatchEventAsync OK");
+                return;
+            }
+            catch (Exception ex)
+            {
+                TraceLog($"[facade] DispatchEventAsync FAILED: {ex.GetType().Name}: {ex.Message}");
+                // fall through to framework path below in case our parse is wrong
+            }
+        }
+
+        if (argsJson is not null && argsJson.Length < 400)
+        {
+            TraceLog($"[facade]   argsJson={argsJson}");
+        }
+        try
+        {
+            await _circuit!.BeginInvokeDotNetFromJS(
+                callId, assemblyName, methodIdentifier, dotNetObjectId, argsJson!);
+            TraceLog($"[facade] BeginInvokeDotNetFromJS OK call={callId}");
+        }
+        catch (Exception ex)
+        {
+            TraceLog($"[facade] BeginInvokeDotNetFromJS FAILED call={callId}: {ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
     }
 
     public ValueTask EndInvokeJSFromDotNet(long asyncHandle, bool succeeded, string arguments)

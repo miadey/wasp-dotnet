@@ -84,20 +84,41 @@
         console.log('[wasp] markers in DOM:',
           (document.body.innerHTML.match(/<!--Blazor:[^>]*-->/g) || []).length);
 
-        // Pre-register the Server (=1) renderer so blazor.web.js's
-        // determinePendingOperation succeeds and refreshRootComponents
-        // actually sends UpdateRootComponents to the server. In a stock
-        // Blazor Server setup the .NET-side RemoteRenderer issues a
-        // JS.BeginInvokeJS("Blazor._internal.attachWebRendererInterop",
-        // [Server, methods, ...]) on first init — we trigger it from
-        // the client to bypass that bootstrap step. The interop methods
-        // object can be empty for components that have no parameter
-        // values flowing through the dispatcher.
-        try {
-          if (Blazor._internal && Blazor._internal.attachWebRendererInterop) {
-            Blazor._internal.attachWebRendererInterop(1, {}, null, null);
-            console.log('[wasp] pre-registered Server renderer (id=1)');
+        // We capture the SignalR HubConnection by wrapping the builder's
+        // build() so the resulting connection is available for our
+        // interop bridge (below).
+        let _waspHub = null;
+
+        // Pre-register the Server (=1) renderer with a real interop
+        // bridge that delegates .NET-from-JS calls (events) to the
+        // SignalR connection via BeginInvokeDotNetFromJS — the same
+        // wire format the framework's _dispatcher would use. Without
+        // this, blazor.web.js's determinePendingOperation returns null
+        // and no UpdateRootComponents fires, and event dispatch hits
+        // "A(...).invokeMethodAsync is not a function".
+        const interop = {
+          invokeMethodAsync(methodName, ...args) {
+            if (!_waspHub) {
+              console.log('[wasp] interop call before hub built:', methodName);
+              return Promise.reject(new Error('SignalR hub not built'));
+            }
+            const callId = String(Math.floor(Math.random() * 1e9));
+            console.log('[wasp] interop->BeginInvokeDotNetFromJS', methodName, args);
+            // Fire-and-forget: server's renderer dispatches event,
+            // re-renders, and the render diff arrives separately via
+            // JS.RenderBatch — the DOM update happens regardless of
+            // when (or whether) this promise resolves.
+            _waspHub.send('BeginInvokeDotNetFromJS', callId, null, methodName, 0, JSON.stringify(args))
+                    .catch(e => console.log('[wasp] hub send err', e));
+            return Promise.resolve(null);
+          },
+          invokeMethod(methodName, ...args) {
+            throw new Error('synchronous invokeMethod not supported on Wasp/Server transport');
           }
+        };
+        try {
+          Blazor._internal.attachWebRendererInterop(1, interop, null, null);
+          console.log('[wasp] pre-registered Server renderer with SignalR bridge');
         } catch (e) { console.log('[wasp] attachWebRendererInterop:', e.message); }
 
         Blazor.start({
@@ -106,6 +127,14 @@
               builder
                 .withUrl('/_blazor', { transport: 4 })
                 .configureLogging(1);  // LogLevel.Trace
+              // Hijack build() to capture the resulting HubConnection
+              // for our interop bridge.
+              const origBuild = builder.build.bind(builder);
+              builder.build = function() {
+                _waspHub = origBuild();
+                console.log('[wasp] captured SignalR hub');
+                return _waspHub;
+              };
             }
           }
         });
