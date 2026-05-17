@@ -84,8 +84,21 @@ public sealed class IcCircuitTransportRegistry
     /// </summary>
     public sealed class LongPollingConnection
     {
+        // The 3-byte SignalR handshake ack — `{}` + record separator.
+        // We track its delivery separately from generic queued frames so
+        // we can guarantee it goes on the wire EXACTLY ONCE. A duplicate
+        // ack reaches blazor.web.js's blazorpack parser (since the first
+        // already flipped _receivedHandshakeResponse) and throws because
+        // 0x7b 0x7d 0x1e isn't a valid msgpack length-prefix.
+        internal static readonly byte[] HandshakeAck =
+            new byte[] { (byte)'{', (byte)'}', 0x1E };
+
         public IcCircuitTransport Transport { get; }
         public ConcurrentQueue<byte[]> Outbound { get; } = new();
+
+        // True once the handshake ack has been emitted on either a POST
+        // response or a GET poll response.
+        public bool HandshakeAckSent { get; set; }
 
         private LongPollingConnection(IcCircuitTransport transport) { Transport = transport; }
 
@@ -99,6 +112,43 @@ public sealed class IcCircuitTransportRegistry
             outbound = conn.Outbound;
             return conn;
         }
+
+        /// <summary>
+        /// Pull every queued outbound frame, but drop any handshake-ack
+        /// duplicate if one has already been sent on the wire.
+        /// </summary>
+        public byte[] DrainOutbound()
+        {
+            using var ms = new System.IO.MemoryStream();
+            while (Outbound.TryDequeue(out var frame))
+            {
+                if (IsHandshakeAck(frame))
+                {
+                    if (HandshakeAckSent) continue; // duplicate — swallow
+                    HandshakeAckSent = true;
+                }
+                ms.Write(frame, 0, frame.Length);
+            }
+            return ms.ToArray();
+        }
+
+        /// <summary>
+        /// If no real data is pending AND the handshake ack hasn't been
+        /// sent yet, return it now so an in-flight poll doesn't race
+        /// blazor.web.js's handshake parser with an empty body.
+        /// </summary>
+        public byte[]? TryRaceAck()
+        {
+            if (HandshakeAckSent) return null;
+            HandshakeAckSent = true;
+            return HandshakeAck;
+        }
+
+        private static bool IsHandshakeAck(byte[] frame)
+            => frame.Length == HandshakeAck.Length
+            && frame[0] == HandshakeAck[0]
+            && frame[1] == HandshakeAck[1]
+            && frame[2] == HandshakeAck[2];
     }
 
     public LongPollingConnection CreateLongPollingConnection(string connectionId)

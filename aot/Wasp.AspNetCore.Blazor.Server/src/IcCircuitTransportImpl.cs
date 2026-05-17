@@ -52,6 +52,15 @@ public sealed class IcCircuitTransport : IIcCircuitTransport
     public string ConnectionId => _connectionId;
 
     /// <summary>
+    /// True once a valid SignalR handshake JSON has been processed via
+    /// <see cref="HandleInbound"/> and the ack was queued. Used by the
+    /// Long Polling poll endpoint to decide whether to keep replying with
+    /// the handshake ack on empty polls (to handle the race where a poll
+    /// in flight returns before the handshake POST arrives).
+    /// </summary>
+    public bool HandshakeComplete => _handshakeComplete;
+
+    /// <summary>
     /// Push inbound bytes from Wasp.WebSockets. May contain handshake + zero
     /// or more BlazorPack frames concatenated; the caller need not split.
     /// </summary>

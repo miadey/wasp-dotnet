@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Wasp.IcCdk;
 
 namespace Wasp.AspNetCore.Blazor.Server;
 
@@ -98,6 +99,7 @@ public static class LongPollingEndpoints
             using var ms = new MemoryStream();
             await ctx.Request.Body.CopyToAsync(ms);
             var bytes = ms.ToArray();
+            Reply.Print($"[lp] POST id={id} {bytes.Length}B");
             if (bytes.Length > 0)
             {
                 try
@@ -106,8 +108,6 @@ public static class LongPollingEndpoints
                 }
                 catch (Exception ex)
                 {
-                    // Surface the actual error so the client log is
-                    // diagnosable. Bytes are dumped (max 256) as hex.
                     int dumpLen = Math.Min(bytes.Length, 256);
                     var hex = new System.Text.StringBuilder(dumpLen * 2);
                     for (int i = 0; i < dumpLen; i++) hex.Append(bytes[i].ToString("x2"));
@@ -118,7 +118,19 @@ public static class LongPollingEndpoints
                     return;
                 }
             }
+
+            // SignalR Long Polling: the POST response body drains any
+            // outbound bytes the server has queued — handshake ack and
+            // any pending Hub frames. Duplicate handshake acks are
+            // filtered (see LongPollingConnection.DrainOutbound).
+            var outBytes = conn.DrainOutbound();
             ctx.Response.StatusCode = 200;
+            ctx.Response.ContentType = "application/octet-stream";
+            ctx.Response.ContentLength = outBytes.Length;
+            if (outBytes.Length > 0)
+            {
+                await ctx.Response.Body.WriteAsync(outBytes);
+            }
         }).DisableAntiforgery();
 
         // Poll — return all queued outbound bytes (concatenated, since each
@@ -145,12 +157,20 @@ public static class LongPollingEndpoints
                 return;
             }
 
-            using var ms = new MemoryStream();
-            while (conn.Outbound.TryDequeue(out var frame))
+            var bytes = conn.DrainOutbound();
+            // If still nothing queued and the handshake ack hasn't been
+            // sent on the wire yet, send it now — blazor.web.js's
+            // LongPolling client always calls onreceive on empty content
+            // (0-byte ArrayBuffer is truthy), which routes into
+            // _processHandshakeResponse and throws "Message is incomplete"
+            // when no 0x1E is present. Sending the ack here covers the
+            // race where this GET poll arrives before the handshake POST
+            // has been processed. TryRaceAck is one-shot per connection.
+            if (bytes.Length == 0)
             {
-                ms.Write(frame, 0, frame.Length);
+                var ack = conn.TryRaceAck();
+                if (ack is not null) bytes = ack;
             }
-            var bytes = ms.ToArray();
 
             ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/octet-stream";

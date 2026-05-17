@@ -194,6 +194,43 @@ if (rewriteTypeNameHash)
     }
 }
 
+// Default-mode patch for Components.Server: rewrite every
+// `RandomNumberGenerator.Fill(byte[])` and `RandomNumberGenerator.GetBytes(byte[])`
+// call inside Circuits/* types to a single `pop` instruction. Those calls are
+// PNS on wasm32-wasi (no entropy source), and the buffers are seed material
+// for circuit IDs / token salts — the resulting all-zero buffers are stable
+// (acceptable for the canister model where every replica is deterministic).
+if (!rewriteTypeNameHash)
+{
+    int patched = 0;
+    foreach (var t in module.GetAllTypes().ToArray())
+    {
+        if (t.Namespace?.StartsWith("Microsoft.AspNetCore.Components.Server") != true) continue;
+        foreach (var m in t.Methods)
+        {
+            if (!m.HasBody) continue;
+            var il = m.Body.GetILProcessor();
+            for (int i = 0; i < m.Body.Instructions.Count; i++)
+            {
+                var ins = m.Body.Instructions[i];
+                if (ins.OpCode.Code != Mono.Cecil.Cil.Code.Call) continue;
+                if (ins.Operand is not MethodReference mr) continue;
+                if (mr.DeclaringType.FullName == "System.Security.Cryptography.RandomNumberGenerator"
+                    && (mr.Name == "Fill" || mr.Name == "GetBytes"))
+                {
+                    // Both Fill(byte[]) and GetBytes(byte[]) take a single
+                    // byte[] argument and return void. Replace with pop.
+                    var pop = il.Create(Mono.Cecil.Cil.OpCodes.Pop);
+                    il.Replace(ins, pop);
+                    patched++;
+                    Console.WriteLine($"rewrote: {t.FullName}::{m.Name} — pop RandomNumberGenerator.{mr.Name}");
+                }
+            }
+        }
+    }
+    Console.WriteLine($"patched {patched} RandomNumberGenerator.Fill/GetBytes call sites");
+}
+
 // Strip the [InternalsVisibleTo] attributes — once everything is public,
 // keeping them clutters tooling output without affecting behavior.
 var asmAttrs = assembly.CustomAttributes
