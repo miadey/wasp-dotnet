@@ -36,6 +36,19 @@
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(
         prerenderId: "wasp-counter-0001"))
 
+    @* Query-RPC fast click button. Lives OUTSIDE Counter's hydrated
+       marker region so Blazor's renderer doesn't strip it on hydration.
+       The handler is plain JS; the server-side path is the
+       /api/click?c=<N> query handler registered in Program.cs. *@
+    <button class="btn btn-success" type="button"
+            onclick="waspFastClick()"
+            style="margin-top: 0.5rem;">
+        Fast click (query RPC, ~15 ms)
+    </button>
+    <p style="margin-top: 0.5rem; color: #888;">
+        <span id="wasp-fast-ms">click the green button to measure</span>
+    </p>
+
     <hr />
     <small>SignalR transport pinned to <code>HttpTransportType.LongPolling</code> (value 4). <code>/_blazor/negotiate</code>, POST <code>/_blazor</code> (send), and GET <code>/_blazor</code> (poll) all route to this canister's <code>http_request_update</code>.</small>
 
@@ -50,6 +63,27 @@
       window.waspSetCount = function(val) {
         const el = document.getElementById('wasp-count');
         if (el) el.textContent = val;
+      };
+
+      // Query-RPC fast click. Fires GET /api/click?c=<current> which
+      // the canister answers from the query call path (no consensus,
+      // ~15 ms on raw.localhost) instead of the SignalR update-call
+      // chain that costs ~1.3 s.
+      window.waspFastClick = async function() {
+        const span = document.getElementById('wasp-count');
+        const current = parseInt(span ? span.textContent : '0', 10) || 0;
+        const t0 = performance.now();
+        try {
+          const r = await fetch('/api/click?c=' + current);
+          const j = await r.json();
+          if (span) span.textContent = String(j.count);
+          const dur = Math.round(performance.now() - t0);
+          const ms = document.getElementById('wasp-fast-ms');
+          if (ms) ms.textContent = 'fast click round-trip: ' + dur + ' ms (server returned count=' + j.count + ')';
+        } catch (e) {
+          const ms = document.getElementById('wasp-fast-ms');
+          if (ms) ms.textContent = 'fast click error: ' + e.message;
+        }
       };
 
       // Override fetch:

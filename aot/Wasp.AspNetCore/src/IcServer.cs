@@ -60,6 +60,28 @@ public sealed class IcServer : IServer
     }
 
     /// <summary>
+    /// path-prefix → query handler. When a GET request matches a
+    /// registered prefix, the handler receives the request URL (with
+    /// query string) and returns (body, content-type). The result is
+    /// served from the query call directly — no upgrade, no ASP.NET
+    /// pipeline, ~10-50 ms on local pocket-ic.
+    ///
+    /// Use for stateless RPC endpoints (e.g. compute-only handlers that
+    /// take input from query params and return the result). Mutations
+    /// are NOT persisted — queries roll back state changes at the end
+    /// of the call.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Func<string, (byte[] Body, string ContentType)>> _queryHandlers =
+        new(StringComparer.Ordinal);
+
+    public static void RegisterQueryHandler(string pathPrefix, Func<string, (byte[] Body, string ContentType)> handler)
+    {
+        if (pathPrefix is null) throw new ArgumentNullException(nameof(pathPrefix));
+        if (handler is null) throw new ArgumentNullException(nameof(handler));
+        _queryHandlers[pathPrefix] = handler;
+    }
+
+    /// <summary>
     /// Synthesize a GET request through the ASP.NET pipeline now,
     /// capture the response, and register it as a static asset. Use
     /// for paths whose body doesn't change per request — most useful
@@ -193,6 +215,29 @@ public sealed class IcServer : IServer
                     // ignored — the asset body is identical regardless.
                     int qIdx = probeReq.Url.IndexOf('?');
                     string lookupPath = qIdx >= 0 ? probeReq.Url.Substring(0, qIdx) : probeReq.Url;
+
+                    // Dynamic query handlers — match by exact path,
+                    // handler computes body from full URL (incl. query
+                    // string). Used for stateless RPC patterns like
+                    // /api/click?c=5 → {"count":6}.
+                    if (probeReq.Method == "GET"
+                        && _queryHandlers.TryGetValue(lookupPath, out var handler))
+                    {
+                        var (hBody, hContentType) = handler(probeReq.Url);
+                        Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
+                        {
+                            StatusCode = 200,
+                            Body = hBody,
+                            Headers = new[]
+                            {
+                                new KeyValuePair<string, string>("content-type", hContentType),
+                                new KeyValuePair<string, string>("content-length", hBody.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                new KeyValuePair<string, string>("access-control-allow-origin", "*"),
+                            },
+                        }));
+                        return;
+                    }
+
                     if (probeReq.Method == "GET"
                         && _staticAssets.TryGetValue(lookupPath, out var asset))
                     {

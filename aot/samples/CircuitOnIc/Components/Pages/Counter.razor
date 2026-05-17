@@ -6,7 +6,9 @@
 
 <p role="status">Current count: <span id="wasp-count">@currentCount</span></p>
 
-<button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
+<button class="btn btn-primary" @onclick="IncrementCount">
+    Slow click (SignalR update call, ~1.3 s)
+</button>
 
 @code {
     private int currentCount = 0;

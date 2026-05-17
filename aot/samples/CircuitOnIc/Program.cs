@@ -187,6 +187,37 @@ public static class Program
                 "/_blazor/initializers",
                 System.Text.Encoding.UTF8.GetBytes("[]"),
                 "application/json; charset=utf-8");
+
+            // QUERY-RPC PROTOTYPE — GET /api/click?c=<N> returns
+            // {"count": N+1}. Stateless: the canister doesn't persist
+            // the count; the client carries it in the query string and
+            // we return the next value. Because this rides the query
+            // path (no consensus, no state mutation) it returns in
+            // ~50 ms instead of the ~1.3 s an update call would cost.
+            //
+            // Persistence would normally come from a canister timer
+            // flushing accumulated input to stable memory off the hot
+            // path. For this demo we skip persistence to keep the
+            // round-trip cost honest.
+            IcServer.RegisterQueryHandler("/api/click", url =>
+            {
+                int prev = 0;
+                int q = url.IndexOf('?');
+                if (q >= 0)
+                {
+                    foreach (var part in url.Substring(q + 1).Split('&'))
+                    {
+                        if (part.StartsWith("c=", StringComparison.Ordinal)
+                            && int.TryParse(part.Substring(2), out var parsed))
+                        {
+                            prev = parsed;
+                        }
+                    }
+                }
+                var bytes = System.Text.Encoding.UTF8.GetBytes(
+                    "{\"count\":" + (prev + 1).ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
+                return (bytes, "application/json; charset=utf-8");
+            });
         }
         catch (Exception ex)
         {
