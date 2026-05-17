@@ -86,4 +86,113 @@ internal static class WaspComponentRecordParser
 
         return list;
     }
+
+    // A single root-component operation extracted from the JSON that
+    // blazor.web.js sends in UpdateRootComponents(operations, applicationState).
+    // The framework's wire format is:
+    //   { "batchId": N,
+    //     "operations": [
+    //        {"type":"add","ssrComponentId":0,"marker":{type,sequence,descriptor,...}},
+    //        {"type":"remove","ssrComponentId":1},
+    //        ...
+    //     ] }
+    public readonly record struct WaspRootComponentOperation(
+        WaspRootComponentOperationType Type,
+        int SsrComponentId,
+        Type? ComponentType);
+
+    public enum WaspRootComponentOperationType { Add, Update, Remove }
+
+    public readonly record struct WaspRootComponentOperationBatch(
+        long BatchId, WaspRootComponentOperation[] Operations);
+
+    public static WaspRootComponentOperationBatch ParseRootComponentOperations(string json)
+    {
+        if (string.IsNullOrEmpty(json))
+            return new WaspRootComponentOperationBatch(0, Array.Empty<WaspRootComponentOperation>());
+
+        long batchId = 0;
+        var ops = new List<WaspRootComponentOperation>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return new WaspRootComponentOperationBatch(0, Array.Empty<WaspRootComponentOperation>());
+
+            if (root.TryGetProperty("batchId", out var batchEl) &&
+                batchEl.ValueKind == JsonValueKind.Number)
+            {
+                batchId = batchEl.GetInt64();
+            }
+
+            if (!root.TryGetProperty("operations", out var opsEl) ||
+                opsEl.ValueKind != JsonValueKind.Array)
+            {
+                return new WaspRootComponentOperationBatch(batchId, Array.Empty<WaspRootComponentOperation>());
+            }
+
+            foreach (var opEl in opsEl.EnumerateArray())
+            {
+                if (opEl.ValueKind != JsonValueKind.Object) continue;
+
+                WaspRootComponentOperationType opType;
+                if (!opEl.TryGetProperty("type", out var typeEl) ||
+                    typeEl.ValueKind != JsonValueKind.String) continue;
+                switch (typeEl.GetString())
+                {
+                    case "add":    opType = WaspRootComponentOperationType.Add;    break;
+                    case "update": opType = WaspRootComponentOperationType.Update; break;
+                    case "remove": opType = WaspRootComponentOperationType.Remove; break;
+                    default: continue;
+                }
+
+                int ssrId = 0;
+                if (opEl.TryGetProperty("ssrComponentId", out var idEl) &&
+                    idEl.ValueKind == JsonValueKind.Number)
+                {
+                    ssrId = idEl.GetInt32();
+                }
+
+                Type? compType = null;
+                if (opType != WaspRootComponentOperationType.Remove &&
+                    opEl.TryGetProperty("marker", out var markerEl) &&
+                    markerEl.ValueKind == JsonValueKind.Object)
+                {
+                    compType = ResolveComponentTypeFromMarker(markerEl);
+                }
+
+                ops.Add(new WaspRootComponentOperation(opType, ssrId, compType));
+            }
+        }
+        catch { /* best effort */ }
+
+        return new WaspRootComponentOperationBatch(batchId, ops.ToArray());
+    }
+
+    private static Type? ResolveComponentTypeFromMarker(JsonElement markerEl)
+    {
+        if (!markerEl.TryGetProperty("descriptor", out var descEl) ||
+            descEl.ValueKind != JsonValueKind.String) return null;
+        var descBase64 = descEl.GetString();
+        if (string.IsNullOrEmpty(descBase64)) return null;
+
+        byte[] descBytes;
+        try { descBytes = Convert.FromBase64String(descBase64); }
+        catch { return null; }
+        var descJson = Encoding.UTF8.GetString(descBytes);
+
+        try
+        {
+            using var descDoc = JsonDocument.Parse(descJson);
+            if (descDoc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (!descDoc.RootElement.TryGetProperty("componentAssembly", out var asmEl) ||
+                !descDoc.RootElement.TryGetProperty("componentType", out var ctypeEl)) return null;
+            var asmName = asmEl.GetString();
+            var typeName = ctypeEl.GetString();
+            if (string.IsNullOrEmpty(asmName) || string.IsNullOrEmpty(typeName)) return null;
+            return Type.GetType($"{typeName}, {asmName}", throwOnError: false);
+        }
+        catch { return null; }
+    }
 }

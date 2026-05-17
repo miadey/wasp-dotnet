@@ -71,11 +71,26 @@ string[] targetNamespacePrefixes = rewriteTypeNameHash
         // RootComponentOperationBatch, ComponentMarker, etc.). Without this
         // CircuitHubFacade.UpdateRootComponents can't call CircuitHost's
         // internal-typed signature.
+        //
+        // Only widen the .Endpoints and .Infrastructure subtrees — NOT
+        // the bare Microsoft.AspNetCore.Components namespace. Types like
+        // IClearableStore exist in that bare namespace in BOTH
+        // Endpoints.dll AND Server.dll (internal type-name twinning is
+        // a common .NET source-shared pattern); publicizing both causes
+        // CS0433 collision at compile time. We get IClearableStore
+        // via the Server.dll vendor (where the bare-namespace widen
+        // lives below).
         "Microsoft.AspNetCore.Components.Endpoints",
         "Microsoft.AspNetCore.Components.Infrastructure",
     }
     : new[] {
+        // Default mode (Components.Server.dll): widen the .Server tree
+        // AND the bare Components namespace (which inside this assembly
+        // hosts RootComponentOperation, RootComponentOperationBatch,
+        // WebRootComponentDescriptor/Parameters, etc. that the framework
+        // marked internal but CircuitHost takes as method arguments).
         "Microsoft.AspNetCore.Components.Server",
+        "Microsoft.AspNetCore.Components",
     };
 
 int typesPromoted = 0;

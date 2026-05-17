@@ -177,6 +177,7 @@ public sealed class IcCircuitTransport : IIcCircuitTransport
         if (args is null) throw new ArgumentNullException(nameof(args));
         cancellationToken.ThrowIfCancellationRequested();
         var bytes = BlazorPackWriter.WriteInvocation(target, args);
+        TraceLog($"[transport] SendCore target={target} bytes={bytes.Length}");
         _send(bytes);
         return ValueTask.CompletedTask;
     }
@@ -192,6 +193,7 @@ public sealed class IcCircuitTransport : IIcCircuitTransport
         _pendingInvocations[invocationId] = completion;
 
         var bytes = BlazorPackWriter.WriteInvocationWithId(invocationId, target, args);
+        TraceLog($"[transport] InvokeCore target={target} id={invocationId} bytes={bytes.Length}");
         _send(bytes);
 
         if (cancellationToken.CanBeCanceled)
@@ -239,6 +241,13 @@ public sealed class IcCircuitTransport : IIcCircuitTransport
             }
             return false;
         }
+    }
+
+    private static void TraceLog(string msg)
+    {
+        // Use Reply.Print when available (canister context), swallow
+        // PNS exceptions in unit tests where ic0.debug_print isn't bound.
+        try { Wasp.IcCdk.Reply.Print(msg); } catch { }
     }
 
     private static readonly byte[] PingFrame = BuildPingFrame();

@@ -74,16 +74,47 @@
       }
       window.fetch = _wrappedFetch;
 
+      // Defer Blazor.start until after the HTML parser has seen the
+      // entire <body> — the <!--Blazor:...--> marker comments are AFTER
+      // this <script> tag (appended by BlazorMarkerMiddleware before
+      // </body>) and won't be in the DOM yet if we call start
+      // synchronously.
       // HttpTransportType: 1=WebSockets, 2=ServerSentEvents, 4=LongPolling.
-      Blazor.start({
-        circuit: {
-          configureSignalR: builder => {
-            builder
-              .withUrl('/_blazor', { transport: 4 })
-              .configureLogging(1);  // LogLevel.Trace
+      function _waspStartBlazor() {
+        console.log('[wasp] markers in DOM:',
+          (document.body.innerHTML.match(/<!--Blazor:[^>]*-->/g) || []).length);
+
+        // Pre-register the Server (=1) renderer so blazor.web.js's
+        // determinePendingOperation succeeds and refreshRootComponents
+        // actually sends UpdateRootComponents to the server. In a stock
+        // Blazor Server setup the .NET-side RemoteRenderer issues a
+        // JS.BeginInvokeJS("Blazor._internal.attachWebRendererInterop",
+        // [Server, methods, ...]) on first init — we trigger it from
+        // the client to bypass that bootstrap step. The interop methods
+        // object can be empty for components that have no parameter
+        // values flowing through the dispatcher.
+        try {
+          if (Blazor._internal && Blazor._internal.attachWebRendererInterop) {
+            Blazor._internal.attachWebRendererInterop(1, {}, null, null);
+            console.log('[wasp] pre-registered Server renderer (id=1)');
           }
-        }
-      });
+        } catch (e) { console.log('[wasp] attachWebRendererInterop:', e.message); }
+
+        Blazor.start({
+          circuit: {
+            configureSignalR: builder => {
+              builder
+                .withUrl('/_blazor', { transport: 4 })
+                .configureLogging(1);  // LogLevel.Trace
+            }
+          }
+        });
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _waspStartBlazor);
+      } else {
+        _waspStartBlazor();
+      }
     </script>
 </body>
 

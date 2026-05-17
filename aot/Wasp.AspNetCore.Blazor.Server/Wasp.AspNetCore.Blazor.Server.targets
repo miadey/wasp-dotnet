@@ -27,9 +27,11 @@
   <!-- C# compile-time swap: replace the framework
        Microsoft.AspNetCore.Components.Server.dll reference (which exposes
        only ComponentHub publicly) with our weaver-rewritten vendored copy
-       (CircuitFactory / CircuitHost / CircuitClientProxy public). Runs in
-       both the Wasp.AspNetCore.Blazor.Server library *and* every consumer
-       canister that imports this .targets file. -->
+       (CircuitFactory / CircuitHost / CircuitClientProxy public). Same
+       swap for Microsoft.AspNetCore.Components.Endpoints.dll so we can
+       see IClearableStore / RootComponent* internal-but-now-public types.
+       Runs in both the library and every consumer canister that imports
+       this .targets file. -->
   <Target Name="_WaspSwapComponentsServerForVendor"
           AfterTargets="ResolveTargetingPackAssets"
           Condition="Exists('$(_WaspBlazorServerDir)Vendor\Microsoft.AspNetCore.Components.Server.dll')">

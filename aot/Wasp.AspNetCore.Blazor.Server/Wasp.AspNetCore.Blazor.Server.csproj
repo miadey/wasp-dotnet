@@ -22,6 +22,7 @@
     <InternalsVisibleTo Include="Wasp.AspNetCore.Blazor.Server.Tests" />
   </ItemGroup>
 
+
   <!-- Swap the framework Microsoft.AspNetCore.Components.Server reference
        for our Cecil-rewritten Vendor copy (visibility opened to public).
        The framework variant only exposes ComponentHub publicly; we need

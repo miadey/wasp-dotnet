@@ -120,7 +120,7 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
             }
             catch (Exception ex)
             {
-                Reply.Print($"[circuit-facade] dispatch error: {ex.GetType().Name}: {ex.Message}");
+                TraceLog($"[circuit-facade] dispatch error: {ex.GetType().Name}: {ex.Message}");
             }
         };
         return facade;
@@ -152,9 +152,11 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
         // descriptor `{"componentAssembly":"...","componentType":"..."}`
         // (base64'd) that this parser recognizes 1:1.
         var parsed = WaspComponentRecordParser.Parse(serializedComponentRecords);
+        TraceLog($"[facade] StartCircuit baseUri={baseUri} uri={uri} components={parsed.Count} appState.Len={applicationState?.Length ?? -1} markers.Len={serializedComponentRecords?.Length ?? -1}");
         var components = new List<ComponentDescriptor>(parsed.Count);
         foreach (var (type, sequence) in parsed)
         {
+            TraceLog($"[facade]   component[{sequence}] = {type.FullName}");
             components.Add(new ComponentDescriptor
             {
                 ComponentType = type,
@@ -167,31 +169,103 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
         var store = new NoopPersistentComponentStateStore();
         var resources = new ResourceAssetCollection(Array.Empty<ResourceAsset>());
 
-        _circuit = await _factory.CreateCircuitHostAsync(
-            components, circuitClientProxy, baseUri, uri, user, store, resources);
+        try
+        {
+            _circuit = await _factory.CreateCircuitHostAsync(
+                components, circuitClientProxy, baseUri, uri, user, store, resources);
+            TraceLog($"[facade] CreateCircuitHostAsync OK circuitId={_circuit?.CircuitId.Secret?.Substring(0, Math.Min(16, _circuit.CircuitId.Secret.Length))}");
+        }
+        catch (Exception ex)
+        {
+            TraceLog($"[facade] CreateCircuitHostAsync FAILED: {ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
 
-        await _circuit.InitializeAsync(
-            store: null!, // ProtectedPrerenderComponentApplicationStore — pass null for now; the framework path handles null by treating it as no prerender state
-            httpActivityContext: default,
-            cancellationToken: CancellationToken.None);
+        try
+        {
+            await _circuit.InitializeAsync(
+                store: null!, // ProtectedPrerenderComponentApplicationStore — pass null for now; the framework path handles null by treating it as no prerender state
+                httpActivityContext: default,
+                cancellationToken: CancellationToken.None);
+            TraceLog($"[facade] InitializeAsync OK");
+        }
+        catch (Exception ex)
+        {
+            TraceLog($"[facade] InitializeAsync FAILED: {ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
 
-        // The circuit secret returned to blazor.web.js is opaque from the
-        // client's POV; use CircuitHost.CircuitId.Secret if accessible,
-        // else the ConnectionId. Final wire-up will switch to the secret.
-        return _transport.ConnectionId;
+        // Return the circuit's actual secret (what blazor.web.js stores
+        // for reconnection). Falls back to connection ID if unavailable.
+        return _circuit?.CircuitId.Secret ?? _transport.ConnectionId;
     }
 
-    public Task UpdateRootComponents(string serializedComponentOperations, string applicationState)
+    public async Task UpdateRootComponents(string serializedComponentOperations, string applicationState)
     {
-        // CircuitHost.UpdateRootComponents takes a RootComponentOperationBatch +
-        // IClearableStore. IClearableStore lives in
-        // Microsoft.AspNetCore.Components.Endpoints (NOT Components.Server)
-        // and our weaver only widened the .Server assembly. Wiring this
-        // requires a second weaver pass on Components.Endpoints.dll OR
-        // hand-rolling the JSON-array deserialization. Components defined
-        // by StartCircuit's initial descriptor list still render; only
-        // dynamic add/remove is missing. Tracked in #71 follow-up.
-        return Task.CompletedTask;
+        if (_circuit is null)
+        {
+            TraceLog("[facade] UpdateRootComponents called before StartCircuit");
+            return;
+        }
+
+        TraceLog($"[facade] UpdateRootComponents ops.Len={serializedComponentOperations?.Length ?? -1}");
+        var parsed = WaspComponentRecordParser.ParseRootComponentOperations(
+            serializedComponentOperations);
+        TraceLog($"[facade] UpdateRootComponents parsed batchId={parsed.BatchId} ops={parsed.Operations.Length}");
+
+        // Translate our wasm-AOT-safe DTOs into the framework's
+        // RootComponentOperationBatch shape that CircuitHost expects.
+        var frameworkOps = new RootComponentOperation[parsed.Operations.Length];
+        for (int i = 0; i < parsed.Operations.Length; i++)
+        {
+            var op = parsed.Operations[i];
+            TraceLog($"[facade]   op[{i}] type={op.Type} ssrId={op.SsrComponentId} component={op.ComponentType?.FullName ?? "(null)"}");
+            frameworkOps[i] = new RootComponentOperation
+            {
+                Type = op.Type switch
+                {
+                    WaspComponentRecordParser.WaspRootComponentOperationType.Add => RootComponentOperationType.Add,
+                    WaspComponentRecordParser.WaspRootComponentOperationType.Update => RootComponentOperationType.Update,
+                    _ => RootComponentOperationType.Remove,
+                },
+                SsrComponentId = op.SsrComponentId,
+                Descriptor = (op.Type != WaspComponentRecordParser.WaspRootComponentOperationType.Remove && op.ComponentType is not null)
+                    ? new WebRootComponentDescriptor(op.ComponentType, WebRootComponentParameters.Empty)
+                    : null,
+            };
+        }
+        var batch = new RootComponentOperationBatch
+        {
+            BatchId = parsed.BatchId,
+            Operations = frameworkOps,
+        };
+
+        // Reach CircuitHost.UpdateRootComponents via reflection because
+        // its `IClearableStore` parameter type lives in two assemblies
+        // (Components.Endpoints + Components.Server, source-shared) and
+        // publicizing both via the weaver causes CS0433 collision at
+        // C# compile time. The store argument is null because our
+        // backend has no prerender state to clear.
+        try
+        {
+            var method = typeof(CircuitHost).GetMethod(
+                "UpdateRootComponents",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            if (method is null)
+            {
+                TraceLog("[facade] CircuitHost.UpdateRootComponents method not found via reflection");
+                return;
+            }
+            var task = (Task)method.Invoke(_circuit, new object?[] { batch, null, false, CancellationToken.None })!;
+            await task;
+            TraceLog("[facade] UpdateRootComponents OK");
+        }
+        catch (Exception ex)
+        {
+            var inner = ex.InnerException ?? ex;
+            TraceLog($"[facade] UpdateRootComponents FAILED: {inner.GetType().Name}: {inner.Message}");
+            throw;
+        }
     }
 
     public ValueTask<bool> ConnectCircuit(string circuitIdSecret)
@@ -274,6 +348,11 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
         if (_circuit is null)
             throw new InvalidOperationException(
                 "CircuitHost not initialized — StartCircuit must be called first.");
+    }
+
+    private static void TraceLog(string msg)
+    {
+        try { Reply.Print(msg); } catch { }
     }
 
 
