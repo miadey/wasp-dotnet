@@ -89,12 +89,12 @@ public static class LongPollingEndpoints
                 ctx.Response.StatusCode = 400;
                 return;
             }
-            var conn = registry.GetLongPollingConnection(id);
-            if (conn is null)
-            {
-                ctx.Response.StatusCode = 404;
-                return;
-            }
+            // Lazy-create the connection on first POST so the client
+            // can skipNegotiation entirely — saves a ~1.5 s update-call
+            // round trip on startup. The client just mints its own id
+            // and starts POSTing.
+            var conn = registry.GetLongPollingConnection(id)
+                       ?? registry.CreateLongPollingConnection(id);
 
             using var ms = new MemoryStream();
             await ctx.Request.Body.CopyToAsync(ms);
@@ -146,12 +146,10 @@ public static class LongPollingEndpoints
                 ctx.Response.StatusCode = 400;
                 return;
             }
-            var conn = registry.GetLongPollingConnection(id);
-            if (conn is null)
-            {
-                ctx.Response.StatusCode = 404;
-                return;
-            }
+            // Lazy-create (same as POST path) so skipNegotiation:true
+            // works even when the first request is a GET poll.
+            var conn = registry.GetLongPollingConnection(id)
+                       ?? registry.CreateLongPollingConnection(id);
 
             // Drain everything the transport has queued for the client:
             // handshake ack on the first poll after a handshake POST,

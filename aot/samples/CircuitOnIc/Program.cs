@@ -147,6 +147,17 @@ public static class Program
             // script loading from a separate asset canister.
             app.MapWaspEmbeddedStaticFiles(typeof(Program).Assembly);
 
+            // Register the SAME assets with the in-canister static-asset
+            // map so they're served directly from a query call (~50 ms)
+            // instead of upgrading to a ~3 s update call. Reach the
+            // canister via the `.raw.localhost` subdomain so the IC
+            // gateway skips response verification.
+            try { EmbeddedStaticFiles.RegisterWaspStaticAssets(typeof(Program).Assembly); }
+            catch (Exception sex)
+            {
+                Reply.Print($"[init] RegisterWaspStaticAssets failed: {sex.GetType().Name}: {sex.Message}");
+            }
+
             // Serve the SSR shell. NOT calling .AddInteractiveServerRenderMode()
             // because it wires ServerComponentSerializer which needs JSON
             // reflection (PNS on wasm32-wasi). We emit our own marker via

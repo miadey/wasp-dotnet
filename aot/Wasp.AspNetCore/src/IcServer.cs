@@ -40,6 +40,25 @@ public sealed class IcServer : IServer
     /// </summary>
     public static string? InitFailureMessage { get; set; }
 
+    /// <summary>
+    /// path → (body, content-type). When the consumer registers paths
+    /// here at init, the query path serves them directly without
+    /// upgrading — turns a ~3 s update-call round trip into a ~50 ms
+    /// query. Responses are NOT certified, so the client must reach the
+    /// canister via the IC HTTP gateway's `.raw.` subdomain
+    /// (e.g. http://&lt;canister-id&gt;.raw.localhost:4944/) which skips
+    /// response verification.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Body, string ContentType)> _staticAssets =
+        new(StringComparer.Ordinal);
+
+    public static void RegisterStaticAsset(string path, byte[] body, string contentType = "application/octet-stream")
+    {
+        if (path is null) throw new ArgumentNullException(nameof(path));
+        if (body is null) throw new ArgumentNullException(nameof(body));
+        _staticAssets[path] = (body, contentType);
+    }
+
     /// <inheritdoc />
     public IFeatureCollection Features { get; } = new FeatureCollection();
 
@@ -75,15 +94,46 @@ public sealed class IcServer : IServer
     {
         try
         {
-            // Always upgrade queries to update (must come before any other
-            // path so even error states upgrade — non-certified query
-            // responses get rejected by the IC gateway with "response
-            // verification error", which surfaces as a 503 to the client).
+            // Query fast path: GET requests for registered static assets
+            // are served directly as a query response — no upgrade to an
+            // update call. ~50 ms vs ~3 s round trip on local dfx.
             //
-            // ASP.NET Core's pipeline easily blows past the 5B instruction
-            // limit for queries. Per-route certified queries are M5 (#61).
+            // The response is NOT certified, so the IC HTTP gateway will
+            // reject it on the standard `<canister>.localhost` /
+            // `<canister>.ic0.app` subdomain. The consumer canister must
+            // be accessed via the `.raw.` variant
+            // (e.g. http://<canister>.raw.localhost:4944/) where the
+            // gateway skips response verification.
+            //
+            // Anything else (POST, paths not in the static map, including
+            // /_blazor/* and SSR routes) falls through to the upgrade
+            // path. Per-route certified queries — for serving the same
+            // assets on the standard subdomain too — land in #61 (M5).
             if (!isUpdate)
             {
+                try
+                {
+                    var probeArg = MessageContext.ArgData();
+                    var probeReq = CandidHttp.DecodeRequest(probeArg);
+                    if (probeReq.Method == "GET"
+                        && _staticAssets.TryGetValue(probeReq.Url, out var asset))
+                    {
+                        Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
+                        {
+                            StatusCode = 200,
+                            Body = asset.Body,
+                            Headers = new[]
+                            {
+                                new KeyValuePair<string, string>("content-type", asset.ContentType),
+                                new KeyValuePair<string, string>("content-length", asset.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                new KeyValuePair<string, string>("access-control-allow-origin", "*"),
+                            },
+                        }));
+                        return;
+                    }
+                }
+                catch { /* fall through to upgrade on any decode error */ }
+
                 Reply.Bytes(CandidHttp.EncodeResponse(IcHttpResponse.Upgrading()));
                 return;
             }

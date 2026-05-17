@@ -50,4 +50,36 @@ public static class EmbeddedStaticFiles
 
         return endpoints;
     }
+
+    /// <summary>
+    /// Register every Wasp-bundled static asset with
+    /// <see cref="Wasp.AspNetCore.IcServer.RegisterStaticAsset"/> so the
+    /// IC HTTP gateway serves them directly from a query call (~50 ms)
+    /// instead of upgrading to a ~3-second update call. Asset bytes are
+    /// read from the consumer assembly's embedded resources at canister
+    /// init time.
+    ///
+    /// Responses are not certified; the canister must be reached via the
+    /// `.raw.` subdomain (e.g. <c>{canister-id}.raw.localhost:4944</c>)
+    /// where the gateway skips response verification.
+    /// </summary>
+    public static void RegisterWaspStaticAssets(Assembly assembly)
+    {
+        if (assembly is null) throw new ArgumentNullException(nameof(assembly));
+
+        var assets = new (string Url, string Resource, string ContentType)[]
+        {
+            ("/_framework/blazor.web.js", "wwwroot/_framework/blazor.web.js",
+                "application/javascript; charset=utf-8"),
+        };
+
+        foreach (var (url, resource, contentType) in assets)
+        {
+            using var stream = assembly.GetManifestResourceStream(resource);
+            if (stream is null) continue;
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            Wasp.AspNetCore.IcServer.RegisterStaticAsset(url, ms.ToArray(), contentType);
+        }
+    }
 }
