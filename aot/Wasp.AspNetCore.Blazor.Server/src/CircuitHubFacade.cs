@@ -334,17 +334,42 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
                     }
                 }
                 TraceLog($"[facade]   intercept DispatchEventAsync eventHandlerId={eventHandlerId}");
-                // Renderer requires dispatch on its own Dispatcher thread.
-                // waitForQuiescence:false avoids deadlock — the default
-                // overload waits for client OnRenderCompleted, but the
-                // client can't send that until THIS update call returns
-                // its response (which carries the render batch). Fire
-                // the event, schedule the batch, return — client will
-                // pick up the batch on its next poll.
                 var renderer = _circuit!.Renderer;
-                await renderer.Dispatcher.InvokeAsync(
-                    () => renderer.DispatchEventAsync(eventHandlerId, null, EventArgs.Empty, waitForQuiescence: false));
-                TraceLog("[facade] DispatchEventAsync OK");
+
+                // Renderer.Dispatcher.InvokeAsync queues behind any
+                // tasks that haven't quiesced — and those tasks are
+                // typically waiting on the client's OnRenderCompleted
+                // (which can't arrive until THIS update call returns).
+                // Bypass the queue: yank the dispatcher's internal
+                // RendererSynchronizationContext via reflection, install
+                // it as current, call DispatchEventAsync directly. Now
+                // Dispatcher.CheckAccess returns true and the work runs
+                // synchronously inline.
+                var dispatcher = renderer.Dispatcher;
+                var ctxField = dispatcher.GetType().GetField(
+                    "_context",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                var ctx = ctxField?.GetValue(dispatcher) as System.Threading.SynchronizationContext;
+                var prev = System.Threading.SynchronizationContext.Current;
+                if (ctx is not null) System.Threading.SynchronizationContext.SetSynchronizationContext(ctx);
+                try
+                {
+                    var dispatchTask = renderer.DispatchEventAsync(
+                        eventHandlerId, null, EventArgs.Empty, waitForQuiescence: false);
+                    // The Task returned from DispatchEventAsync may have
+                    // continuations queued on the dispatcher — DO NOT
+                    // await it here (would re-enter the same queue
+                    // deadlock). The event handler ran synchronously
+                    // inside DispatchEventAsync; subsequent renders are
+                    // queued onto the dispatcher and will produce
+                    // outbound RenderBatch frames our transport sink
+                    // catches.
+                    TraceLog($"[facade] DispatchEventAsync started (status={dispatchTask.Status})");
+                }
+                finally
+                {
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(prev);
+                }
                 return;
             }
             catch (Exception ex)
