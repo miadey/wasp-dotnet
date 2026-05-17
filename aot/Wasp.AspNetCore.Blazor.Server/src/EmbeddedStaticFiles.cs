@@ -50,36 +50,4 @@ public static class EmbeddedStaticFiles
 
         return endpoints;
     }
-
-    /// <summary>
-    /// Register every Wasp-bundled static asset with
-    /// <see cref="Wasp.AspNetCore.IcServer.RegisterCertifiedAsset"/> so
-    /// the IC HTTP gateway serves them via the query call path
-    /// (~50 ms) instead of upgrading to a ~3-second update call.
-    /// Call ONCE at canister init, before <c>app.StartAsync</c>.
-    /// </summary>
-    public static void CertifyWaspEmbeddedStaticFiles(Assembly assembly)
-    {
-        if (assembly is null) throw new ArgumentNullException(nameof(assembly));
-
-        // Each pair: (URL path, manifest resource name).
-        // Extend this list if you add more <EmbeddedResource> entries to
-        // the consumer csproj — every registered asset gets a single
-        // SHA256(body) entry in the cert tree.
-        var assets = new (string Url, string Resource)[]
-        {
-            ("/_framework/blazor.web.js", "wwwroot/_framework/blazor.web.js"),
-        };
-
-        foreach (var (url, resource) in assets)
-        {
-            using var stream = assembly.GetManifestResourceStream(resource);
-            if (stream is null) continue;
-            using var ms = new MemoryStream();
-            stream.CopyTo(ms);
-            Wasp.AspNetCore.IcServer.RegisterCertifiedAsset(url, ms.ToArray());
-        }
-
-        Wasp.AspNetCore.IcServer.CommitCertifiedAssets();
-    }
 }

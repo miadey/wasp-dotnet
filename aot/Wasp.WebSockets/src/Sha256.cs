@@ -6,7 +6,7 @@ namespace Wasp.WebSockets;
 // Hand-rolled SHA-256 because System.Security.Cryptography.SHA256 is
 // "PlatformNotSupported" under NativeAOT-LLVM wasi-wasm. Pure managed
 // code — no syscalls, no allocations beyond the 32-byte output buffer.
-public static class Sha256
+internal static class Sha256
 {
     private static readonly uint[] K =
     {

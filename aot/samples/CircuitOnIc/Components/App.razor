@@ -22,13 +22,6 @@
     <h1 style="color: #2563eb;">Blazor Server on IC</h1>
     <p>Counter rendered server-side. Click events ride <strong>SignalR Long Polling</strong> over the canister's HTTP gateway — no WebSocket, no external services.</p>
 
-    @* gh #78: hand-targeted CSS-selector mount point. Server pushes
-       waspAttachComponentSelector(ssrId, '#wasp-counter-mount', type)
-       after JS.AttachComponent so the client can pin the renderer to
-       a real DOM element by selector — bypasses the marker-comment
-       lookup if it fails. *@
-    <div id="wasp-counter-mount" data-wasp-renderer-id="1"></div>
-
     @* Prerendered: marker pair wraps the SSR <Counter /> output. The
        dynamic @currentCount is wrapped in <span id="wasp-count"> in
        Counter.razor so it lives in its own DOM element — the framework's
@@ -59,31 +52,6 @@
         if (el) el.textContent = val;
       };
 
-      // gh #78: receive the real CSS selector for the component mount.
-      // Server invokes this after JS.AttachComponent so the client has a
-      // selector-based fallback if the marker-based DOM lookup misses.
-      // Stamps the data-wasp-component-* attributes on the mount div
-      // and logs for verification.
-      window.waspAttachComponentSelector = function(ssrId, selector, componentType) {
-        const el = document.querySelector(selector);
-        if (el) {
-          el.setAttribute('data-wasp-ssr-id', String(ssrId));
-          el.setAttribute('data-wasp-component-type', componentType);
-        }
-        console.log('[wasp] attach-selector', { ssrId, selector, componentType, hit: !!el });
-      };
-
-      // gh #79: receive the .NET-side DotNetObjectReference id for the
-      // renderer's interop methods. Stored on the registered interop
-      // bridge so its invokeMethodAsync can carry the real dotNetObjectId
-      // in BeginInvokeDotNetFromJS payloads (mimicking the framework's
-      // WebRendererInteropMethods routing).
-      window._waspRendererDotNetIds = window._waspRendererDotNetIds || {};
-      window.waspSetRendererDotNetObject = function(rendererId, dotNetId) {
-        window._waspRendererDotNetIds[rendererId] = dotNetId;
-        console.log('[wasp] renderer dotnet object', { rendererId, dotNetId });
-      };
-
       // Override fetch:
       //   1. Trace every /_blazor request for diagnostics.
       //   2. For SignalR Long Polling GETs, retry up to N times on empty
@@ -92,16 +60,8 @@
       //      handshake has fired, so the canister queue is necessarily
       //      empty — retrying forever blocks bootstrap).
       const origFetch = window.fetch;
-      // Tighter retry schedule: total ~270ms vs original 1150ms.
-      // Empty polls during initial circuit bootstrap dominate startup
-      // time, so retry fast and only back off if the queue is genuinely
-      // idle for an extended time.
-      const POLL_RETRY = 8;
-      const POLL_DELAY = [10, 20, 30, 40, 50, 60, 80, 120];
-
-      const _waspT0 = performance.now();
-      const _waspLog = (label) => console.log('[wasp.timing]', label, Math.round(performance.now() - _waspT0) + 'ms');
-      _waspLog('script-start');
+      const POLL_RETRY = 6;          // 6 attempts ~ <1s total
+      const POLL_DELAY = [50, 100, 150, 200, 250, 300];
       async function _wrappedFetch(input, init) {
         const url = typeof input === 'string' ? input : input.url;
         const method = init?.method || 'GET';
@@ -166,12 +126,12 @@
               return Promise.reject(new Error('SignalR hub not built'));
             }
             const callId = String(Math.floor(Math.random() * 1e9));
-            // gh #79: include the real DotNetObjectReference id when
-            // the server has surfaced one. Falls back to 0 (untracked)
-            // before AttachComponent has fired.
-            const dotNetId = (window._waspRendererDotNetIds && window._waspRendererDotNetIds[1]) || 0;
-            console.log('[wasp] interop->BeginInvokeDotNetFromJS', methodName, args, 'dotNetId=' + dotNetId);
-            _waspHub.send('BeginInvokeDotNetFromJS', callId, null, methodName, dotNetId, JSON.stringify(args))
+            console.log('[wasp] interop->BeginInvokeDotNetFromJS', methodName, args);
+            // Fire-and-forget: server's renderer dispatches event,
+            // re-renders, and the render diff arrives separately via
+            // JS.RenderBatch — the DOM update happens regardless of
+            // when (or whether) this promise resolves.
+            _waspHub.send('BeginInvokeDotNetFromJS', callId, null, methodName, 0, JSON.stringify(args))
                     .catch(e => console.log('[wasp] hub send err', e));
             return Promise.resolve(null);
           },
@@ -183,18 +143,6 @@
           Blazor._internal.attachWebRendererInterop(1, interop, null, null);
           console.log('[wasp] pre-registered Server renderer with SignalR bridge');
         } catch (e) { console.log('[wasp] attachWebRendererInterop:', e.message); }
-
-        _waspLog('before-blazor-start');
-
-        // Observe when the Counter actually shows up so we can measure
-        // end-to-end startup wall-clock from script-start.
-        const _waspReadyObs = new MutationObserver(() => {
-          if (document.querySelector('#wasp-count')) {
-            _waspLog('counter-rendered');
-            _waspReadyObs.disconnect();
-          }
-        });
-        _waspReadyObs.observe(document.body, { childList: true, subtree: true, characterData: true });
 
         Blazor.start({
           circuit: {

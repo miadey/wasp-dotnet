@@ -40,26 +40,6 @@ public sealed class IcServer : IServer
     /// </summary>
     public static string? InitFailureMessage { get; set; }
 
-    /// <summary>
-    /// Tree of certified static assets. When populated (consumer canister
-    /// calls <see cref="RegisterCertifiedAsset"/> before
-    /// <c>app.StartAsync</c>), <see cref="Dispatch"/>'s query path returns
-    /// the asset body + IC-Certificate header directly without upgrading
-    /// to an update call. Saves ~3 s per asset on local dfx.
-    /// </summary>
-    public static readonly IcHttpCertTree CertifiedAssets = new();
-
-    /// <summary>
-    /// Register a path → body mapping for query-mode delivery.
-    /// Multiple registrations are permitted; <see cref="CommitCertifiedAssets"/>
-    /// must be called after the last one to update ic0.certified_data.
-    /// </summary>
-    public static void RegisterCertifiedAsset(string path, byte[] body)
-        => CertifiedAssets.Insert(path, body);
-
-    /// <summary>Recompute the cert root hash and push it to ic0.certified_data_set.</summary>
-    public static void CommitCertifiedAssets() => CertifiedAssets.Commit();
-
     /// <inheritdoc />
     public IFeatureCollection Features { get; } = new FeatureCollection();
 
@@ -95,50 +75,15 @@ public sealed class IcServer : IServer
     {
         try
         {
-            // Query fast path: if the request matches a registered
-            // certified asset, return the body + IC-Certificate header
-            // directly — no upgrade to update call. Each such response
-            // is ~50 ms vs ~3 s for the update path on local dfx.
+            // Always upgrade queries to update (must come before any other
+            // path so even error states upgrade — non-certified query
+            // responses get rejected by the IC gateway with "response
+            // verification error", which surfaces as a 503 to the client).
             //
-            // The static SSR shell and /_framework/* embedded assets
-            // are registered at canister init by the consumer (see
-            // MapWaspEmbeddedStaticFilesAndCertify in
-            // EmbeddedStaticFiles.cs). The registry is sealed before
-            // app start; mutations during requests would invalidate
-            // the cert root.
-            //
-            // Anything else (SignalR endpoints, dynamic routes, paths
-            // not in the cert tree) falls through to the standard
-            // upgrade path.
+            // ASP.NET Core's pipeline easily blows past the 5B instruction
+            // limit for queries. Per-route certified queries are M5 (#61).
             if (!isUpdate)
             {
-                try
-                {
-                    var probeArg = MessageContext.ArgData();
-                    var probeReq = CandidHttp.DecodeRequest(probeArg);
-                    if (probeReq.Method == "GET"
-                        && CertifiedAssets.TryGetBody(probeReq.Url, out var body))
-                    {
-                        var certHeader = CertifiedAssets.BuildCertificateHeader(probeReq.Url);
-                        var contentType = GuessContentType(probeReq.Url);
-                        var headers = new List<KeyValuePair<string, string>>(3)
-                        {
-                            new("content-type", contentType),
-                            new("content-length", body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                        };
-                        if (certHeader is not null)
-                            headers.Add(new("ic-certificate", certHeader));
-                        Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
-                        {
-                            StatusCode = 200,
-                            Body = body,
-                            Headers = headers.ToArray(),
-                        }));
-                        return;
-                    }
-                }
-                catch { /* fall through to upgrade on any decode error */ }
-
                 Reply.Bytes(CandidHttp.EncodeResponse(IcHttpResponse.Upgrading()));
                 return;
             }
@@ -277,25 +222,6 @@ public sealed class IcServer : IServer
         httpCtx.Items["__icResponseBuffer"] = responseBuffer;
 
         return httpCtx;
-    }
-
-    // Best-effort content type for certified-asset query responses.
-    // Covers the file extensions used by Blazor's _framework bundle and
-    // the SSR HTML root. Anything else is served as octet-stream.
-    private static string GuessContentType(string url)
-    {
-        // Strip the query string.
-        int q = url.IndexOf('?');
-        var path = q >= 0 ? url.Substring(0, q) : url;
-        if (path.EndsWith(".js", StringComparison.OrdinalIgnoreCase)) return "application/javascript; charset=utf-8";
-        if (path.EndsWith(".css", StringComparison.OrdinalIgnoreCase)) return "text/css; charset=utf-8";
-        if (path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || path == "/") return "text/html; charset=utf-8";
-        if (path.EndsWith(".wasm", StringComparison.OrdinalIgnoreCase)) return "application/wasm";
-        if (path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return "application/json; charset=utf-8";
-        if (path.EndsWith(".svg", StringComparison.OrdinalIgnoreCase)) return "image/svg+xml";
-        if (path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) return "image/png";
-        if (path.EndsWith(".woff2", StringComparison.OrdinalIgnoreCase)) return "font/woff2";
-        return "application/octet-stream";
     }
 
     private static IcHttpResponse BuildIcResponse(HttpContext httpCtx, AspHttpResponse aspResp)
