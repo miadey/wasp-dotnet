@@ -361,12 +361,23 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
         return new ValueTask<bool>(false);
     }
 
-    public ValueTask<string> ResumeCircuit(
+    public async ValueTask<string> ResumeCircuit(
         string circuitIdSecret, string baseUri, string uri, string rootComponents, string applicationState)
     {
-        // Stubbed — needs CircuitRegistry + the persisted state we'd load
-        // via CircuitStore (S5 #70). Tracked in follow-up.
-        throw new NotImplementedException("ResumeCircuit: needs CircuitRegistry + CircuitStore integration");
+        // Minimal resume: tear down any existing circuit and start a
+        // FRESH one. Client doesn't see an error / "Rejoining" failure
+        // because we return a new circuit id; the consequence is the
+        // visible counter resets to 0, but the connection stays alive.
+        // A real implementation would restore component state from a
+        // per-principal CircuitStore snapshot (#70).
+        TraceLog($"[facade] ResumeCircuit secret-len={circuitIdSecret?.Length ?? -1} — starting fresh");
+        if (_circuit is not null)
+        {
+            try { await _circuit.DisposeAsync(); } catch { /* swallow on resume */ }
+            _circuit = null;
+        }
+        _wapsClickCount = 0;
+        return await StartCircuit(baseUri, uri, rootComponents, applicationState);
     }
 
     public ValueTask<bool> PauseCircuit()

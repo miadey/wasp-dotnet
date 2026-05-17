@@ -178,6 +178,21 @@ public sealed class IcCircuitTransport : IIcCircuitTransport
         cancellationToken.ThrowIfCancellationRequested();
         var bytes = BlazorPackWriter.WriteInvocation(target, args);
         TraceLog($"[transport] SendCore target={target} bytes={bytes.Length}");
+        // gh #80 follow-up: the framework's wasi-wasm-AOT
+        // RenderBatchWriter occasionally emits absurdly large
+        // (>1 MB) delta batches whose binary is corrupted
+        // (empty strings table). Pushing them over the IC HTTP
+        // gateway exceeds the response-size cap and trips a 503
+        // → client-side disconnect → "Rejoining" modal. The
+        // visible counter update rides our waspSetCount JS.BeginInvokeJS
+        // path instead, so dropping these batches has no functional
+        // impact for the click counter.
+        const int MaxBatchBytes = 256 * 1024; // 256 KB
+        if (target == "JS.RenderBatch" && bytes.Length > MaxBatchBytes)
+        {
+            TraceLog($"[transport]   DROPPING oversize RenderBatch ({bytes.Length} > {MaxBatchBytes}) — see gh #80");
+            return ValueTask.CompletedTask;
+        }
         _send(bytes);
         return ValueTask.CompletedTask;
     }
