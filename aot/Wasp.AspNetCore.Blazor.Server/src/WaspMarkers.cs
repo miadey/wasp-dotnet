@@ -80,4 +80,38 @@ public static class WaspMarkers
         if (prerenderId is null) throw new ArgumentNullException(nameof(prerenderId));
         return "<!--Blazor:{\"prerenderId\":\"" + prerenderId + "\"}-->";
     }
+
+    /// <summary>
+    /// Convenience overload: ServerStart from a CLR Type. Defaults
+    /// prerenderId/keyHash to type-name-based deterministic strings.
+    /// </summary>
+    public static string ServerStart(Type rootComponent, string? prerenderId = null)
+    {
+        if (rootComponent is null) throw new ArgumentNullException(nameof(rootComponent));
+        prerenderId ??= "wasp-" + rootComponent.Name.ToLowerInvariant() + "-0001";
+        return ServerStart(
+            componentType: rootComponent.FullName ?? rootComponent.Name,
+            componentAssembly: rootComponent.Assembly.GetName().Name ?? "unknown",
+            prerenderId: prerenderId,
+            keyHash: prerenderId + "-key");
+    }
+
+    /// <summary>
+    /// Convenience overload paired with <see cref="ServerStart(Type, string?)"/>.
+    /// </summary>
+    public static string ServerEnd(Type rootComponent, string? prerenderId = null)
+    {
+        if (rootComponent is null) throw new ArgumentNullException(nameof(rootComponent));
+        prerenderId ??= "wasp-" + rootComponent.Name.ToLowerInvariant() + "-0001";
+        return ServerEnd(prerenderId);
+    }
+
+    /// <summary>
+    /// The two &lt;script&gt; tags that bootstrap Blazor + the Wasp
+    /// bridge. Drop in App.razor's body:
+    /// <c>@((MarkupString)WaspMarkers.Scripts())</c>.
+    /// </summary>
+    public static string Scripts()
+        => "<script src=\"/_framework/blazor.web.js\" autostart=\"false\"></script>" +
+           "<script src=\"/_framework/wasp-bridge.js\"></script>";
 }

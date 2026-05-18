@@ -1,13 +1,7 @@
-@* M4.S7 — bypass <Router>/<Routes> (which trips an AOT struct-copy bug
-   in StaticHtmlRenderer.RenderAttributes when reading reference-typed
-   attribute values like NotFoundPage Type / AppAssembly). Render Counter
-   inline. blazor.web.js picks up the <!--Blazor:server--> markers
-   emitted by BlazorMarkerMiddleware and hydrates this component over the
-   SignalR Long Polling transport.
+@* App.razor — Wasp surface is now three @((MarkupString)…) calls
+   plus the per-app fast-click bits. The Counter component below is
+   100% stock from `dotnet new blazorserver`. *@
 
-   Static assets (blazor.web.js etc.) are served by the asset canister
-   (cross-origin with CORS *). The /_blazor SignalR endpoints are on the
-   backend canister, same origin as this page. *@
 <!DOCTYPE html>
 <html lang="en">
 
@@ -22,24 +16,14 @@
     <h1 style="color: #2563eb;">Blazor Server on IC</h1>
     <p>Counter rendered server-side. Click events ride <strong>SignalR Long Polling</strong> over the canister's HTTP gateway — no WebSocket, no external services.</p>
 
-    @* Prerendered: marker pair wraps the SSR <Counter /> output. The
-       dynamic @currentCount is wrapped in <span id="wasp-count"> in
-       Counter.razor so it lives in its own DOM element — the framework's
-       client renderer can update the span's contents without having to
-       split a shared text node against absent boundary markers. *@
-    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(
-        componentType: "WaspSample.CircuitOnIc.Components.Pages.Counter",
-        componentAssembly: "CircuitOnIc",
-        prerenderId: "wasp-counter-0001",
-        keyHash: "wasp-key-0001"))
+    @* Wasp marker pair around the interactive Counter. *@
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(WaspSample.CircuitOnIc.Components.Pages.Counter)))
     <Counter />
-    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(
-        prerenderId: "wasp-counter-0001"))
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(WaspSample.CircuitOnIc.Components.Pages.Counter)))
 
-    @* Query-RPC fast click button. Lives OUTSIDE Counter's hydrated
-       marker region so Blazor's renderer doesn't strip it on hydration.
-       The handler is plain JS; the server-side path is the
-       /api/click?c=<N> query handler registered in Program.cs. *@
+    @* App-specific extra: the green query-RPC fast-click button. Stays
+       outside the Counter marker pair so Blazor's renderer doesn't
+       strip it during hydration. *@
     <button class="btn btn-success" type="button"
             onclick="waspFastClick()"
             style="margin-top: 0.5rem;">
@@ -52,31 +36,15 @@
     <hr />
     <small>SignalR transport pinned to <code>HttpTransportType.LongPolling</code> (value 4). <code>/_blazor/negotiate</code>, POST <code>/_blazor</code> (send), and GET <code>/_blazor</code> (poll) all route to this canister's <code>http_request_update</code>.</small>
 
-    <script src="/_framework/blazor.web.js" autostart="false"></script>
-    <script>
-      // Direct-DOM update for the Counter's <span id="wasp-count">,
-      // invoked from Counter.razor via IJSRuntime.InvokeVoidAsync
-      // ("waspSetCount", count). Works around the wasm32-wasi AOT
-      // RenderBatchWriter strings-table bug tracked in gh #80 — the
-      // framework's delta-render path emits a batch whose strings
-      // section is empty, so the span text would otherwise wipe to "".
-      window.waspSetCount = function(val) {
-        const el = document.getElementById('wasp-count');
-        if (el) el.textContent = val;
-      };
+    @* Wasp scripts (blazor.web.js + wasp-bridge.js). *@
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
 
-      // Query-RPC fast click. Fires GET /api/click?c=<current> which
-      // the canister answers from the query call path (no consensus,
-      // ~15 ms on raw.localhost) instead of the SignalR update-call
-      // chain that costs ~1.3 s.
-      //
-      // Tracks the count locally; the periodic sync below pushes it
-      // to stable memory in the background (~1.3 s update call) so the
-      // count survives canister upgrades / page reloads — but the
-      // click itself never waits for that.
+    @* App-specific fast-click + sync — lives in app, not framework. *@
+    <script>
       let _waspLocalCount = 0;
       let _waspLastSyncedCount = 0;
-      window.waspFastClick = async function() {
+
+      window.waspFastClick = async function () {
         const span = document.getElementById('wasp-count');
         const t0 = performance.now();
         try {
@@ -86,15 +54,15 @@
           if (span) span.textContent = String(j.count);
           const dur = Math.round(performance.now() - t0);
           const ms = document.getElementById('wasp-fast-ms');
-          if (ms) ms.textContent = 'fast click round-trip: ' + dur + ' ms (server returned count=' + j.count + ', unsynced delta: ' + (j.count - _waspLastSyncedCount) + ')';
+          if (ms) ms.textContent = 'fast click round-trip: ' + dur + ' ms (count=' + j.count
+              + ', unsynced delta: ' + (j.count - _waspLastSyncedCount) + ')';
         } catch (e) {
           const ms = document.getElementById('wasp-fast-ms');
           if (ms) ms.textContent = 'fast click error: ' + e.message;
         }
       };
 
-      // Page-load: pull the persisted count from stable memory so the
-      // counter survives reloads. Query call, ~10 ms.
+      // Pull persisted count on load.
       (async () => {
         try {
           const r = await fetch('/api/state');
@@ -103,12 +71,10 @@
           _waspLastSyncedCount = j.count;
           const span = document.getElementById('wasp-count');
           if (span) span.textContent = String(j.count);
-        } catch { /* offline / fresh canister — start at 0 */ }
+        } catch { /* cold canister */ }
       })();
 
-      // Periodic sync: every 3 seconds, if the local count diverges
-      // from what we last persisted, fire one update call to write
-      // it to stable memory. Background — never blocks a click.
+      // Periodic sync — every 3 s, flush diffed count to stable memory.
       setInterval(async () => {
         if (_waspLocalCount === _waspLastSyncedCount) return;
         const target = _waspLocalCount;
@@ -119,132 +85,14 @@
           if (ms && ms.textContent.includes('unsynced')) {
             ms.textContent = ms.textContent.replace(/unsynced delta: \d+/, 'persisted (synced=' + target + ')');
           }
-        } catch { /* will retry on next tick */ }
+        } catch { /* retry next tick */ }
       }, 3000);
 
-      // Best-effort persistence on page unload — sendBeacon doesn't
-      // block navigation.
       window.addEventListener('beforeunload', () => {
         if (_waspLocalCount !== _waspLastSyncedCount) {
           navigator.sendBeacon('/api/sync?c=' + _waspLocalCount);
         }
       });
-
-      // Override fetch:
-      //   1. Trace every /_blazor request for diagnostics.
-      //   2. For SignalR Long Polling GETs, retry up to N times on empty
-      //      body before giving up. Capped to avoid deadlocking the
-      //      transport's connect() probe (which polls before any POST
-      //      handshake has fired, so the canister queue is necessarily
-      //      empty — retrying forever blocks bootstrap).
-      const origFetch = window.fetch;
-      const POLL_RETRY = 6;          // 6 attempts ~ <1s total
-      const POLL_DELAY = [50, 100, 150, 200, 250, 300];
-      async function _wrappedFetch(input, init) {
-        const url = typeof input === 'string' ? input : input.url;
-        const method = init?.method || 'GET';
-        if (url && url.match(/\/_blazor\?id=/) && method === 'GET') {
-          for (let i = 0; i < POLL_RETRY; i++) {
-            if (init?.signal?.aborted) break;
-            const resp = await origFetch(input, init);
-            if (resp.status !== 200) return resp;
-            const cloned = resp.clone();
-            const bytes = await cloned.arrayBuffer();
-            if (bytes.byteLength > 0) {
-              console.log('[wasp] poll-data', bytes.byteLength + 'B (attempt ' + (i+1) + ')');
-              return resp;
-            }
-            // Empty — wait and retry. If we exhaust retries we fall
-            // through and return the last (still-empty) response to
-            // SignalR; harmless on connect() probe (body ignored) and
-            // any subsequent empty poll just becomes a "timed out,
-            // reissuing" in SignalR's _poll loop (after handshake done).
-            await new Promise(r => setTimeout(r, POLL_DELAY[i] || 300));
-          }
-          // Final empty fetch — return as-is so SignalR can decide.
-          return await origFetch(input, init);
-        }
-        if (url && url.includes('/_blazor')) {
-          console.log('[wasp] FETCH', method, url);
-        }
-        const resp = await origFetch(input, init);
-        if (url && url.includes('/_blazor')) {
-          console.log('[wasp] FETCH resp', url, resp.status, 'ct=' + resp.headers.get('content-type'), 'cl=' + resp.headers.get('content-length'));
-        }
-        return resp;
-      }
-      window.fetch = _wrappedFetch;
-
-      // Defer Blazor.start until after the HTML parser has seen the
-      // entire <body> — the <!--Blazor:...--> marker comments are AFTER
-      // this <script> tag (appended by BlazorMarkerMiddleware before
-      // </body>) and won't be in the DOM yet if we call start
-      // synchronously.
-      // HttpTransportType: 1=WebSockets, 2=ServerSentEvents, 4=LongPolling.
-      function _waspStartBlazor() {
-        console.log('[wasp] markers in DOM:',
-          (document.body.innerHTML.match(/<!--Blazor:[^>]*-->/g) || []).length);
-
-        // We capture the SignalR HubConnection by wrapping the builder's
-        // build() so the resulting connection is available for our
-        // interop bridge (below).
-        let _waspHub = null;
-
-        // Pre-register the Server (=1) renderer with a real interop
-        // bridge that delegates .NET-from-JS calls (events) to the
-        // SignalR connection via BeginInvokeDotNetFromJS — the same
-        // wire format the framework's _dispatcher would use. Without
-        // this, blazor.web.js's determinePendingOperation returns null
-        // and no UpdateRootComponents fires, and event dispatch hits
-        // "A(...).invokeMethodAsync is not a function".
-        const interop = {
-          invokeMethodAsync(methodName, ...args) {
-            if (!_waspHub) {
-              console.log('[wasp] interop call before hub built:', methodName);
-              return Promise.reject(new Error('SignalR hub not built'));
-            }
-            const callId = String(Math.floor(Math.random() * 1e9));
-            console.log('[wasp] interop->BeginInvokeDotNetFromJS', methodName, args);
-            // Fire-and-forget: server's renderer dispatches event,
-            // re-renders, and the render diff arrives separately via
-            // JS.RenderBatch — the DOM update happens regardless of
-            // when (or whether) this promise resolves.
-            _waspHub.send('BeginInvokeDotNetFromJS', callId, null, methodName, 0, JSON.stringify(args))
-                    .catch(e => console.log('[wasp] hub send err', e));
-            return Promise.resolve(null);
-          },
-          invokeMethod(methodName, ...args) {
-            throw new Error('synchronous invokeMethod not supported on Wasp/Server transport');
-          }
-        };
-        try {
-          Blazor._internal.attachWebRendererInterop(1, interop, null, null);
-          console.log('[wasp] pre-registered Server renderer with SignalR bridge');
-        } catch (e) { console.log('[wasp] attachWebRendererInterop:', e.message); }
-
-        Blazor.start({
-          circuit: {
-            configureSignalR: builder => {
-              builder
-                .withUrl('/_blazor', { transport: 4 })
-                .configureLogging(1);  // LogLevel.Trace
-              // Hijack build() to capture the resulting HubConnection
-              // for our interop bridge.
-              const origBuild = builder.build.bind(builder);
-              builder.build = function() {
-                _waspHub = origBuild();
-                console.log('[wasp] captured SignalR hub');
-                return _waspHub;
-              };
-            }
-          }
-        });
-      }
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', _waspStartBlazor);
-      } else {
-        _waspStartBlazor();
-      }
     </script>
 </body>
 

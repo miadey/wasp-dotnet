@@ -20,6 +20,12 @@
     <ProjectReference Include="..\Wasp.AspNetCore\Wasp.AspNetCore.csproj" />
     <ProjectReference Include="..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
     <InternalsVisibleTo Include="Wasp.AspNetCore.Blazor.Server.Tests" />
+
+    <!-- Wasp client-side bridge JS bundled as an embedded resource so
+         BlazorOnICRuntime can serve it without the consumer copying
+         anything into their wwwroot. -->
+    <EmbeddedResource Include="wwwroot\wasp-bridge.js"
+                      LogicalName="Wasp.AspNetCore.Blazor.Server.wwwroot.wasp-bridge.js" />
   </ItemGroup>
 
 
