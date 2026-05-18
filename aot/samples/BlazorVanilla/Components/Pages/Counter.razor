@@ -11,7 +11,11 @@
 
 <h1>Counter</h1>
 
-<p role="status">Current count: <span id="bv-count">@currentCount</span></p>
+@* id="wasp-count" is required so the wasp-bridge.js workaround for #80
+   (RenderBatchWriter strings table empty for delta batches on wasm32-wasi
+   AOT) can find this span and inject the post-click count value. Without
+   it the framework's delta-batch DOM patch leaves the span empty. *@
+<p role="status">Current count: <span id="wasp-count">@currentCount</span></p>
 
 <button class="btn btn-primary" @onclick="IncrementCount">
     Click me
