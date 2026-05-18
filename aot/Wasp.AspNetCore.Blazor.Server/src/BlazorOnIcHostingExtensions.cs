@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Reflection;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Components.Server.Circuits;
@@ -102,6 +103,19 @@ public static class BlazorOnIcHostingExtensions
         this WebApplication app,
         Assembly staticAssetsAssembly)
         where TApp : Microsoft.AspNetCore.Components.IComponent
+            => MapBlazorOnIC<TApp>(app, staticAssetsAssembly, enableInteractiveServer: true);
+
+    /// <summary>
+    /// Internal overload that accepts the interactive-server flag. The
+    /// public 2-arg overload defaults to true (preserves CircuitOnIc
+    /// behavior). The app-side UseInternetComputer() reads
+    /// marker.Options.EnableInteractiveServer and passes it through.
+    /// </summary>
+    internal static WebApplication MapBlazorOnIC<TApp>(
+        this WebApplication app,
+        Assembly staticAssetsAssembly,
+        bool enableInteractiveServer)
+        where TApp : Microsoft.AspNetCore.Components.IComponent
     {
         if (app is null) throw new ArgumentNullException(nameof(app));
         if (staticAssetsAssembly is null) throw new ArgumentNullException(nameof(staticAssetsAssembly));
@@ -121,25 +135,28 @@ public static class BlazorOnIcHostingExtensions
         // breaking existing samples.
         app.UseWaspBlazorMarker();
 
-        // SignalR Long Polling endpoints — translate /_blazor/{...}
-        // traffic into IcCircuitTransport frames the CircuitHubFacade
-        // can dispatch.
-        var registry = app.Services.GetRequiredService<IcCircuitTransportRegistry>();
-        CircuitHubFacade? boundFacade = null;
-        registry.TransportConnected += transport =>
+        if (enableInteractiveServer)
         {
-            var factory = app.Services.GetRequiredService<ICircuitFactory>();
-            boundFacade = CircuitHubFacade.Bind(transport, factory, app.Services);
-        };
-        registry.TransportDisconnected += async _ =>
-        {
-            if (boundFacade is not null)
+            // SignalR Long Polling endpoints — translate /_blazor/{...}
+            // traffic into IcCircuitTransport frames the CircuitHubFacade
+            // can dispatch.
+            var registry = app.Services.GetRequiredService<IcCircuitTransportRegistry>();
+            CircuitHubFacade? boundFacade = null;
+            registry.TransportConnected += transport =>
             {
-                await boundFacade.DisposeAsync();
-                boundFacade = null;
-            }
-        };
-        app.MapWaspBlazorLongPolling(registry);
+                var factory = app.Services.GetRequiredService<ICircuitFactory>();
+                boundFacade = CircuitHubFacade.Bind(transport, factory, app.Services);
+            };
+            registry.TransportDisconnected += async _ =>
+            {
+                if (boundFacade is not null)
+                {
+                    await boundFacade.DisposeAsync();
+                    boundFacade = null;
+                }
+            };
+            app.MapWaspBlazorLongPolling(registry);
+        }
 
         // Embedded static-asset endpoint (blazor.web.js) AND the in-
         // canister static-asset map (so the asset rides the ~50 ms
@@ -245,15 +262,28 @@ public static class BlazorOnIcHostingExtensions
             o.DetailedBlazorErrors = options.DetailedBlazorErrors;
         });
 
-        // Blazor-specific DI: Razor Components + interactive server +
-        // antiforgery + per-canister circuit transport registry.
-        builder.Services.AddRazorComponents()
-            .AddInteractiveServerComponents(opts =>
+        // Blazor-specific DI: always need AddRazorComponents (it wires
+        // the renderer, component activator, navigation manager etc.).
+        // AddInteractiveServerComponents and IcCircuitTransportRegistry
+        // only matter when the app actually has live circuits — gate
+        // them so static-SSR-only samples (e.g. BlazorVanilla) don't
+        // pay the ~1–2 MB of code section the interactive stack costs.
+        //
+        // Note: AddInteractiveServerComponents transitively pulls in
+        // AddRouting(); when skipped we still need full routing for
+        // VerifyRoutingServicesAreRegistered (called by ConfigureApplication
+        // → UseRouting). Add it explicitly.
+        builder.Services.AddRouting();
+        var razorComponents = builder.Services.AddRazorComponents();
+        if (options.EnableInteractiveServer)
+        {
+            razorComponents.AddInteractiveServerComponents(opts =>
             {
                 opts.DetailedErrors = options.DetailedBlazorErrors;
             });
-        builder.Services.AddAntiforgery();
-        builder.Services.AddSingleton<IcCircuitTransportRegistry>();
+            builder.Services.AddSingleton<IcCircuitTransportRegistry>();
+        }
+        // Antiforgery intentionally not registered (see AddBlazorOnIC).
 
         // Marker — app.UseInternetComputer() reads this from DI to
         // decide whether to wire Long-Polling / JS-bridge / pre-render.
@@ -290,10 +320,20 @@ public static class BlazorOnIcHostingExtensions
         // call works for whatever TApp the consumer passed at build-
         // time. (DynamicDependency on the consumer's App type is
         // already pinned via [DynamicDependency] in their Program.cs.)
+        // Find the 3-arg internal overload (the public 2-arg one routes
+        // here with enableInteractiveServer=true). We always want to
+        // pass the flag explicitly so static-SSR samples skip the
+        // circuit endpoint wiring.
         var generic = typeof(BlazorOnIcHostingExtensions)
-            .GetMethod(nameof(MapBlazorOnIC))!
+            .GetMethods(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            .First(m => m.Name == nameof(MapBlazorOnIC) && m.GetParameters().Length == 3)
             .MakeGenericMethod(marker.AppType);
-        generic.Invoke(null, new object[] { app, marker.AssetsAssembly });
+        generic.Invoke(null, new object[]
+        {
+            app,
+            marker.AssetsAssembly,
+            marker.Options.EnableInteractiveServer,
+        });
 
         if (marker.Options.AutoPreRenderRoot)
         {

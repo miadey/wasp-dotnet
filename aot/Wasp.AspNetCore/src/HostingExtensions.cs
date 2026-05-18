@@ -91,6 +91,16 @@ public static class HostingExtensions
         public string ApplicationName { get; set; } = "WaspCanister";
         public bool AutoPreRenderRoot { get; set; } = true;
         public bool DetailedBlazorErrors { get; set; } = true;
+
+        /// <summary>
+        /// When false (Blazor Static SSR only — e.g. BlazorVanilla),
+        /// skip AddInteractiveServerComponents + the circuit transport
+        /// registry + the /_blazor Long Polling endpoint chain. Cuts
+        /// ~1–2 MB of code section that's pure dead weight for
+        /// non-interactive samples. Default true (preserves CircuitOnIc-
+        /// style live circuits).
+        /// </summary>
+        public bool EnableInteractiveServer { get; set; } = true;
     }
 
     /// <summary>

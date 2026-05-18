@@ -40,7 +40,14 @@ public static class Program
             });
 
             // ─── M4.S9 one-line API ────────────────────────────────
-            builder.UseInternetComputer<App>();
+            // EnableInteractiveServer=false: BlazorVanilla is Static SSR
+            // only (no @rendermode InteractiveServer anywhere). Skipping
+            // the framework's interactive server registration + the
+            // circuit transport endpoints saves ~1–2 MB of code section.
+            builder.UseInternetComputer<App>(o =>
+            {
+                o.EnableInteractiveServer = false;
+            });
 
             var app = builder.Build();
 
