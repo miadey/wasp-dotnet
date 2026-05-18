@@ -23,15 +23,6 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Components.Layout.NavMenu))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Home))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Weather))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(MultiCounter))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(FormDemo))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(LifecycleLog))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CascadeDemo))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(EventCallbackDemo))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(JsInteropDemo))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Components.ThemedChild))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Components.SelectableRow))]
     [DynamicDependency("FromMilliseconds(System.Int64)", typeof(System.TimeSpan))]
     [DynamicDependency(
         DynamicallyAccessedMemberTypes.NonPublicFields,
