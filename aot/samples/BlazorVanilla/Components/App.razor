@@ -14,6 +14,7 @@
 
 @inject NavigationManager Nav
 @using Microsoft.AspNetCore.Components.Routing
+@using Wasp.AspNetCore.Blazor.Server
 @using WaspSample.BlazorVanilla.Components.Pages
 
 <!DOCTYPE html>
@@ -43,8 +44,11 @@
     }
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(pageType))
     <nav class="top">
-        <NavLink href="" Match="NavLinkMatch.All" ActiveClass="active">Home</NavLink>
-        <NavLink href="counter" ActiveClass="active">Counter</NavLink>
+        @* WaspNavLink replaces framework Microsoft.AspNetCore.Components.Routing.NavLink
+           because the framework version's [Parameter] binding is broken on wasm32-wasi
+           AOT — see Wasp.AspNetCore.Blazor.Server/src/WaspNavLink.cs and gh #82. *@
+        <WaspNavLink href="" Match="NavLinkMatch.All" ActiveClass="active">Home</WaspNavLink>
+        <WaspNavLink href="counter" ActiveClass="active">Counter</WaspNavLink>
     </nav>
     @if (pageType == typeof(Counter))
     {
