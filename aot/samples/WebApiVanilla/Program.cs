@@ -1,6 +1,9 @@
 using System;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Formatters;
 using Microsoft.Extensions.DependencyInjection;
 using Wasp.AspNetCore;
 using Wasp.IcCdk;
@@ -50,6 +53,21 @@ public static class Program
                     o.JsonSerializerOptions.TypeInfoResolverChain.Insert(
                         0, WeatherJsonContext.Default);
                 });
+
+            // gh #96 (M4.S9.5b) — swap the framework input formatter
+            // (which routes through the trimmed
+            // JsonSerializer.DeserializeAsync(PipeReader, ...)) for a
+            // Wasp-supplied formatter using the Stream overload.
+            builder.Services.PostConfigure<MvcOptions>(opts =>
+            {
+                var stj = opts.InputFormatters
+                    .OfType<SystemTextJsonInputFormatter>()
+                    .FirstOrDefault();
+                if (stj is not null) opts.InputFormatters.Remove(stj);
+
+                opts.InputFormatters.Insert(0, new WaspJsonInputFormatter(
+                    WeatherJsonContext.Default.Options));
+            });
 
             var app = builder.Build();
             app.MapControllers();

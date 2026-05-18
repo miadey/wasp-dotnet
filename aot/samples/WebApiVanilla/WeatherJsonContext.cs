@@ -12,6 +12,9 @@ namespace WaspSample.WebApiVanilla;
 //   builder.Services.AddControllers().AddJsonOptions(o =>
 //       o.JsonSerializerOptions.TypeInfoResolverChain.Insert(
 //           0, WeatherJsonContext.Default));
+[JsonSourceGenerationOptions(
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    PropertyNameCaseInsensitive = true)]
 [JsonSerializable(typeof(WeatherForecast))]
 [JsonSerializable(typeof(WeatherForecast[]))]
 [JsonSerializable(typeof(IEnumerable<WeatherForecast>))]
