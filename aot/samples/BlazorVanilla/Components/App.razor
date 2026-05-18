@@ -1,16 +1,11 @@
-@* App.razor — manual router. Bypasses the stock <Router>/<RouteView>
-   pipeline which currently NREs in StaticHtmlRenderer.RenderAttributes
-   (gh #107). Switching on NavigationManager.Uri lets the harness exercise
-   the per-page SSR while #107 stays open as a framework bug.
+@* App.razor — manual router with stock dotnet-new-blazor visual chrome:
+   purple gradient sidebar, three pages (Home / Counter / Weather), and
+   <WaspNavLink> for active-class detection.
 
-   <NavLink> usage inline (not via MainLayout) exercises #82 active-class
-   detection while sidestepping a separate LayoutComponentBase trim issue:
-   the framework's ComponentProperties.SetProperties cannot find the
-   inherited ChildContent property on a trimmed-LayoutComponentBase even
-   with DynamicallyAccessedMemberTypes.All. File a focused issue if a
-   future sample needs MainLayout.
-
-   Restore <Routes /> once #107 closes. *@
+   Bypasses the stock <Router>/<RouteView> pipeline (gh #107). NavLink
+   replaced with WaspNavLink (gh #82). MainLayout inlined because the
+   framework's ChildContent inheritance is broken under our trim
+   (parameter-reflection root cause). *@
 
 @inject NavigationManager Nav
 @using Microsoft.AspNetCore.Components.Routing
@@ -23,13 +18,49 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Blazor Vanilla on IC</title>
+    <title>BlazorVanilla on IC</title>
     <base href="/" />
     <style>
-        body { font-family: system-ui; max-width: 760px; margin: 1rem auto; padding: 0 1rem; }
-        nav.top { display: flex; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid #cbd5f5; margin-bottom: 1rem; }
-        nav.top a { color: #475569; text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 4px; }
-        nav.top a.active { background: #1e293b; color: #f8fafc; }
+        html, body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #1e293b; background: #f8fafc; }
+        .page { display: flex; min-height: 100vh; }
+        .sidebar {
+            width: 250px;
+            background: linear-gradient(180deg, rgb(5, 39, 103) 0%, #3a0647 70%);
+            color: #f8fafc;
+            padding: 1.25rem 0;
+        }
+        .brand {
+            color: #f8fafc;
+            text-decoration: none;
+            font-size: 1.1rem;
+            font-weight: 600;
+            padding: 0 1.25rem 1rem 1.25rem;
+            display: block;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 1rem;
+        }
+        .nav a {
+            display: block;
+            color: #cbd5f5;
+            text-decoration: none;
+            padding: 0.6rem 1.25rem;
+            border-left: 4px solid transparent;
+            font-size: 0.95rem;
+        }
+        .nav a:hover { background: rgba(255,255,255,0.1); color: #fff; }
+        .nav a.active {
+            background: rgba(255,255,255,0.18);
+            color: #fff;
+            border-left-color: #fff;
+        }
+        main { flex: 1; padding: 2rem; max-width: 960px; }
+        main h1 { color: #1e3a8a; margin-top: 0; }
+        main code { background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+        button.btn { background: #2563eb; color: #fff; border: 0; padding: 0.45rem 1rem; border-radius: 4px; cursor: pointer; font-size: 0.95rem; }
+        button.btn:hover { background: #1d4ed8; }
+        .table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+        .table th, .table td { padding: 0.5rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
+        .table th { background: #f1f5f9; border-bottom-color: #cbd5f5; }
     </style>
 </head>
 
@@ -39,25 +70,35 @@
         Type pageType = path switch
         {
             "/counter" => typeof(Counter),
+            "/weather" => typeof(Weather),
             _ => typeof(Home),
         };
     }
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(pageType))
-    <nav class="top">
-        @* WaspNavLink replaces framework Microsoft.AspNetCore.Components.Routing.NavLink
-           because the framework version's [Parameter] binding is broken on wasm32-wasi
-           AOT — see Wasp.AspNetCore.Blazor.Server/src/WaspNavLink.cs and gh #82. *@
-        <WaspNavLink href="" Match="NavLinkMatch.All" ActiveClass="active">Home</WaspNavLink>
-        <WaspNavLink href="counter" ActiveClass="active">Counter</WaspNavLink>
-    </nav>
-    @if (pageType == typeof(Counter))
-    {
-        <Counter />
-    }
-    else
-    {
-        <Home />
-    }
+    <div class="page">
+        <aside class="sidebar">
+            <a class="brand" href="/">BlazorVanilla on IC</a>
+            <nav class="nav">
+                <WaspNavLink href="" Match="NavLinkMatch.All" ActiveClass="active">Home</WaspNavLink>
+                <WaspNavLink href="counter" ActiveClass="active">Counter</WaspNavLink>
+                <WaspNavLink href="weather" ActiveClass="active">Weather</WaspNavLink>
+            </nav>
+        </aside>
+        <main>
+            @if (pageType == typeof(Counter))
+            {
+                <Counter />
+            }
+            else if (pageType == typeof(Weather))
+            {
+                <Weather />
+            }
+            else
+            {
+                <Home />
+            }
+        </main>
+    </div>
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(pageType))
 
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())

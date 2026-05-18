@@ -32,6 +32,8 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Microsoft.AspNetCore.Components.Routing.NavLink))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Home))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Weather))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Wasp.AspNetCore.Blazor.Server.WaspNavLink))]
     [DynamicDependency("FromMilliseconds(System.Int64)", typeof(System.TimeSpan))]
     [DynamicDependency(
         DynamicallyAccessedMemberTypes.NonPublicFields,

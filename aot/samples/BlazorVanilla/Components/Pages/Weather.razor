@@ -1,0 +1,74 @@
+@page "/weather"
+
+@* Stock-template Weather page. The dotnet new blazor template uses
+   OnInitializedAsync + Task.Delay to "simulate" an HTTP call. On
+   canister we have no thread pool / async timer, so we initialize the
+   data synchronously in OnInitialized. The rendered output matches the
+   stock template (table of 5 forecasts with Date/Temp(C)/Temp(F)/Summary). *@
+
+@code {
+    private WeatherForecast[]? forecasts;
+
+    protected override void OnInitialized()
+    {
+        // Stock template uses a randomized in-memory forecast. We use a
+        // deterministic seed so the page is reproducible across reloads
+        // — canister update/query semantics don't tolerate non-deterministic
+        // output in the response anyway.
+        var startDate = new DateOnly(2026, 5, 18);
+        var summaries = new[]
+        {
+            "Freezing", "Bracing", "Chilly", "Cool", "Mild",
+            "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
+        };
+        forecasts = Enumerable.Range(1, 5).Select(index => new WeatherForecast
+        {
+            Date = startDate.AddDays(index),
+            TemperatureC = 10 + index * 4,
+            Summary = summaries[index % summaries.Length]
+        }).ToArray();
+    }
+
+    private sealed class WeatherForecast
+    {
+        public DateOnly Date { get; set; }
+        public int TemperatureC { get; set; }
+        public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+        public string? Summary { get; set; }
+    }
+}
+
+<PageTitle>Weather</PageTitle>
+
+<h1>Weather</h1>
+
+<p>This component demonstrates showing data.</p>
+
+@if (forecasts == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <table class="table" style="border-collapse: collapse; width: 100%; margin-top: 1rem;">
+        <thead>
+            <tr style="background: #f1f5f9; text-align: left;">
+                <th style="padding: 0.5rem; border-bottom: 1px solid #cbd5f5;">Date</th>
+                <th style="padding: 0.5rem; border-bottom: 1px solid #cbd5f5;">Temp. (C)</th>
+                <th style="padding: 0.5rem; border-bottom: 1px solid #cbd5f5;">Temp. (F)</th>
+                <th style="padding: 0.5rem; border-bottom: 1px solid #cbd5f5;">Summary</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var forecast in forecasts)
+            {
+                <tr>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e2e8f0;">@forecast.Date.ToString("yyyy-MM-dd")</td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e2e8f0;">@forecast.TemperatureC</td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e2e8f0;">@forecast.TemperatureF</td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e2e8f0;">@forecast.Summary</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
