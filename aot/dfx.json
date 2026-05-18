@@ -87,6 +87,12 @@
       "wasm": "samples/BlazorVanilla/BlazorVanilla.canister.wasm",
       "candid": "samples/BlazorVanilla/blazorvanilla.did",
       "build": []
+    },
+    "mvcvanilla": {
+      "type": "custom",
+      "wasm": "samples/MvcVanilla/MvcVanilla.canister.wasm",
+      "candid": "samples/MvcVanilla/mvcvanilla.did",
+      "build": []
     }
   },
   "networks": {
