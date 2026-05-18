@@ -76,6 +76,31 @@
        constant per render but stable across requests — good enough for
        marker keys (which are scoped per-circuit anyway). -->
 
+  <!-- Regex engine entry points. The framework references regex via
+       routing patterns + DataAnnotations (EmailAddress, RegularExpression
+       attributes — #108). Neither BlazorVanilla nor CircuitOnIc has
+       any [Regex]/[EmailAddress] attributes, and our route patterns
+       are simple. Stubbing the engine ctors to throw means the
+       trimmer can drop the engine's match/compile pipelines.
+       Note: if the user later adds a [RegularExpression] attribute,
+       this stub would surface at startup with a clear failure. -->
+  <assembly fullname="System.Text.RegularExpressions">
+    <type fullname="System.Text.RegularExpressions.RegexInterpreter">
+      <method signature="System.Void .ctor(System.Text.RegularExpressions.RegexInterpreterCode,System.Globalization.CultureInfo)" body="stub" />
+    </type>
+  </assembly>
+
+  <!-- DataProtection AuthenticatedEncryptor — we already stub
+       KeyManagementOptions.ctor + .Configure, but the actual encryptor
+       Encrypt/Decrypt method bodies remain. Stub the data-flow paths.
+       Safe: we don't use DataProtection (no encrypted cookies, no
+       antiforgery — see UseIcDataProtection). -->
+  <assembly fullname="Microsoft.AspNetCore.DataProtection">
+    <type fullname="Microsoft.AspNetCore.DataProtection.AuthenticatedEncryption.ConfigurationModel.AuthenticatedEncryptorConfiguration">
+      <method signature="System.Void Validate()" body="stub" />
+    </type>
+  </assembly>
+
   <!-- ValueStopwatch.GetElapsedTime() throws when StartNew was never called
        (the default-struct state). On wasm32-wasi, Stopwatch.GetTimestamp()
        returns 0 after wasi-stub no-ops __wasi_clock_time_get — so even
@@ -97,6 +122,25 @@
   <assembly fullname="Microsoft.AspNetCore.Components.Server">
     <type fullname="Microsoft.Extensions.Internal.ValueStopwatch">
       <method signature="System.Boolean get_IsActive()" body="stub" value="true" />
+    </type>
+  </assembly>
+
+  <!-- EventSource.IsEnabled() gates all framework ETW/EventListener
+       emission. Forcing false to constant lets AOT see the gated
+       WriteEvent paths as unreachable and (where the trimmer can prove
+       it) drop them. No application of ours subscribes to EventSource. -->
+  <assembly fullname="System.Private.CoreLib">
+    <type fullname="System.Diagnostics.Tracing.EventSource">
+      <method signature="System.Boolean IsEnabled()" body="stub" value="false" />
+    </type>
+  </assembly>
+
+  <!-- Activity / ActivitySource — distributed-tracing API. Canister has
+       no tracer backend; stubbing AnyListeners to false makes the
+       tracer fast-path become "no listeners, skip event construction". -->
+  <assembly fullname="System.Diagnostics.DiagnosticSource">
+    <type fullname="System.Diagnostics.ActivitySource">
+      <method signature="System.Boolean HasListeners()" body="stub" value="false" />
     </type>
   </assembly>
 

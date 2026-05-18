@@ -16,6 +16,25 @@
     <SelfContained>true</SelfContained>
     <NoWarn>$(NoWarn);IL2026;IL3050;CA2255;RAZORSDK1006</NoWarn>
     <IlcLlvmTarget>wasm32-wasi</IlcLlvmTarget>
+
+    <!-- Feature switches: tell the trimmer entire subsystems are dead.
+         Unlike ILLink method-body stubs, these eliminate type metadata
+         from the reachable graph. Each is verified to be safe on
+         wasm32-wasi (no platform support) or unneeded for our samples. -->
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetricsSupport>false</MetricsSupport>
+    <DebuggerSupport>false</DebuggerSupport>
+    <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+    <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
+    <EnableUnsafeUTF7Encoding>false</EnableUnsafeUTF7Encoding>
+    <XmlResolverIsNetworkingEnabledByDefault>false</XmlResolverIsNetworkingEnabledByDefault>
+    <UseNativeHttpHandler>false</UseNativeHttpHandler>
+    <_AggressiveAttributeTrimming>true</_AggressiveAttributeTrimming>
+    <_DataSetXmlSerializationSupport>false</_DataSetXmlSerializationSupport>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
   </PropertyGroup>
 
   <ItemGroup>
