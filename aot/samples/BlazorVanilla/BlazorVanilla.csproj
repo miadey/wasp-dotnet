@@ -23,9 +23,6 @@
          /_framework/blazor.web.js -->
     <EmbeddedResource Include="wwwroot\_framework\blazor.web.js"
                       LogicalName="wwwroot/_framework/blazor.web.js" />
-    <!-- Tiny demo JS module exercised by JsInteropDemo.razor. -->
-    <EmbeddedResource Include="wwwroot\js-interop-demo.js"
-                      LogicalName="wwwroot/js-interop-demo.js" />
   </ItemGroup>
 
   <ItemGroup>

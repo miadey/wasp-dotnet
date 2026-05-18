@@ -1,5 +1,12 @@
-@* App.razor — stock-template host shell. Renders the Router so that
-   each @page-decorated component under Pages/ becomes a routed page. *@
+@* App.razor — manual router. Bypasses the stock <Router>/<RouteView>
+   pipeline which currently NREs in StaticHtmlRenderer.RenderAttributes
+   (gh #107). Switching on NavigationManager.Uri lets the harness exercise
+   the per-page SSR while #107 stays open as a framework bug.
+
+   Restore <Routes /> once #107 closes. *@
+
+@inject NavigationManager Nav
+@using WaspSample.BlazorVanilla.Components.Pages
 
 <!DOCTYPE html>
 <html lang="en">
@@ -12,13 +19,25 @@
 </head>
 
 <body>
-    @* Wasp marker pair around the Router. Long-Polling hydration will
-       attach an interactive circuit to the routed component tree. *@
-    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Routes)))
-    <Routes />
-    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(Routes)))
+    @{
+        var path = "/" + Nav.ToBaseRelativePath(Nav.Uri).TrimStart('/').Split('?')[0];
+        Type pageType = path switch
+        {
+            "/counter" => typeof(Counter),
+            _ => typeof(Home),
+        };
+    }
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(pageType))
+    @if (pageType == typeof(Counter))
+    {
+        <Counter />
+    }
+    else
+    {
+        <Home />
+    }
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(pageType))
 
-    @* Wasp scripts (blazor.web.js + wasp-bridge.js). *@
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
 </body>
 
