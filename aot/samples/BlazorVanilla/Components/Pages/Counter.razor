@@ -1,5 +1,12 @@
 @page "/counter"
 
+@* Interactivity comes from WaspMarkers.ServerStart wrapping this
+   component in App.razor — NOT from @rendermode InteractiveServer,
+   which trips the framework's ServerComponentSerializer.GetTypeInfo
+   reflection path (JsonSerializerIsReflectionDisabled per #76). The
+   Wasp marker + CircuitHubFacade chain delivers the same interactive
+   semantics without the JSON reflection. *@
+
 <PageTitle>Counter</PageTitle>
 
 <h1>Counter</h1>

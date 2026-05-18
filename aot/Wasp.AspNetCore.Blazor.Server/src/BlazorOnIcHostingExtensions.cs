@@ -204,7 +204,16 @@ public static class BlazorOnIcHostingExtensions
         // we don't register antiforgery (see AddBlazorOnIC), so the
         // matching middleware isn't in the pipeline and the routing
         // EndpointMiddleware would otherwise throw at dispatch time.
-        app.MapRazorComponents<TApp>().DisableAntiforgery();
+        // .AddInteractiveServerRenderMode() is required when any
+        // component declares @rendermode InteractiveServer — without it,
+        // the framework's SSRRenderModeBoundary throws at render time
+        // ("A component ... has render mode 'InteractiveServerRenderMode',
+        // but the required endpoints are not mapped on the server").
+        var razorEndpoints = app.MapRazorComponents<TApp>().DisableAntiforgery();
+        if (enableInteractiveServer)
+        {
+            razorEndpoints.AddInteractiveServerRenderMode();
+        }
 
         return app;
     }
