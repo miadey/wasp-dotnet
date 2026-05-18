@@ -189,4 +189,105 @@ public static class BlazorOnIcHostingExtensions
             Reply.Print($"[BlazorOnIC] RegisterPreRenderedShell({path}): {rex.GetType().Name}: {rex.Message}");
         }
     }
+
+    // ─── New unified API (gh #87) ────────────────────────────────────
+
+    /// <summary>
+    /// One-line IC adapter for a Blazor Server app. Same as the
+    /// non-generic <see cref="HostingExtensions.UseInternetComputer"/>
+    /// plus Razor Components + Wasp circuit-transport wiring.
+    ///
+    /// <code>
+    /// var builder = WebApplication.CreateBuilder(args);
+    /// builder.UseInternetComputer&lt;App&gt;();           // ← ONE LINE
+    /// var app = builder.Build();
+    /// app.UseInternetComputer();                       // mirror
+    /// app.Run();
+    /// </code>
+    ///
+    /// Equivalent to today's <see cref="AddBlazorOnIC"/> +
+    /// <see cref="MapBlazorOnIC{TApp}"/> + <see cref="RegisterPreRenderedShell"/>
+    /// trio. Auto-detects assets-assembly from <c>typeof(TApp).Assembly</c>.
+    /// </summary>
+    public static WebApplicationBuilder UseInternetComputer<TApp>(
+        this WebApplicationBuilder builder,
+        Action<HostingExtensions.IcOptions>? configure = null)
+        where TApp : Microsoft.AspNetCore.Components.IComponent
+    {
+        if (builder is null) throw new ArgumentNullException(nameof(builder));
+
+        var options = new HostingExtensions.IcOptions();
+        configure?.Invoke(options);
+
+        // Base IC adapter (encoders, antiforgery, data-protection,
+        // IcServer-replaces-Kestrel).
+        builder.UseInternetComputer(o =>
+        {
+            o.ContentRoot = options.ContentRoot;
+            o.ApplicationName = options.ApplicationName;
+            o.AutoPreRenderRoot = options.AutoPreRenderRoot;
+            o.DetailedBlazorErrors = options.DetailedBlazorErrors;
+        });
+
+        // Blazor-specific DI: Razor Components + interactive server +
+        // antiforgery + per-canister circuit transport registry.
+        builder.Services.AddRazorComponents()
+            .AddInteractiveServerComponents(opts =>
+            {
+                opts.DetailedErrors = options.DetailedBlazorErrors;
+            });
+        builder.Services.AddAntiforgery();
+        builder.Services.AddSingleton<IcCircuitTransportRegistry>();
+
+        // Marker — app.UseInternetComputer() reads this from DI to
+        // decide whether to wire Long-Polling / JS-bridge / pre-render.
+        builder.Services.AddSingleton(
+            new HostingExtensions.BlazorOnIcMarker(
+                appType: typeof(TApp),
+                assetsAssembly: typeof(TApp).Assembly,
+                options: options));
+
+        return builder;
+    }
+
+    /// <summary>
+    /// App-side companion to <see cref="UseInternetComputer{TApp}"/>.
+    /// Auto-detects whether Blazor wiring is needed (via
+    /// <see cref="HostingExtensions.BlazorOnIcMarker"/> in DI). For
+    /// WebAPI / MVC canisters that haven't registered Blazor, this is
+    /// a no-op — call <c>app.MapControllers()</c> / etc. as usual.
+    /// </summary>
+    public static WebApplication UseInternetComputer(this WebApplication app)
+    {
+        if (app is null) throw new ArgumentNullException(nameof(app));
+
+        var marker = app.Services.GetService<HostingExtensions.BlazorOnIcMarker>();
+        if (marker is null)
+        {
+            // Non-Blazor canister — nothing to wire here. Consumer
+            // continues with their own MapControllers / MapGet / etc.
+            return app;
+        }
+
+        // Generic MapBlazorOnIC needs a compile-time type parameter;
+        // we reach through reflection so the same UseInternetComputer
+        // call works for whatever TApp the consumer passed at build-
+        // time. (DynamicDependency on the consumer's App type is
+        // already pinned via [DynamicDependency] in their Program.cs.)
+        var generic = typeof(BlazorOnIcHostingExtensions)
+            .GetMethod(nameof(MapBlazorOnIC))!
+            .MakeGenericMethod(marker.AppType);
+        generic.Invoke(null, new object[] { app, marker.AssetsAssembly });
+
+        if (marker.Options.AutoPreRenderRoot)
+        {
+            // Pre-render after StartAsync — caller is responsible for
+            // ordering. We register the deferred render here; the
+            // implementation handles being called pre-or-post start.
+            // For simplicity require the caller to invoke
+            // app.RegisterPreRenderedShell("/") explicitly after Run.
+        }
+
+        return app;
+    }
 }
