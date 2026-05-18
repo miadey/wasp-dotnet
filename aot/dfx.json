@@ -81,6 +81,12 @@
       "wasm": "samples/WebApiVanilla/WebApiVanilla.canister.wasm",
       "candid": "samples/WebApiVanilla/webapivanilla.did",
       "build": []
+    },
+    "blazorvanilla": {
+      "type": "custom",
+      "wasm": "samples/BlazorVanilla/BlazorVanilla.canister.wasm",
+      "candid": "samples/BlazorVanilla/blazorvanilla.did",
+      "build": []
     }
   },
   "networks": {

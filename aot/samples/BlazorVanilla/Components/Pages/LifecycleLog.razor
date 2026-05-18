@@ -1,0 +1,50 @@
+@page "/lifecycle"
+
+@* #84 — log component lifecycle callbacks to a visible <ul>. *@
+
+<PageTitle>Lifecycle</PageTitle>
+
+<h1>Lifecycle Log</h1>
+
+<p>Each entry records when a component lifecycle method fired, in order.
+Click <strong>Re-render</strong> to force a parameter update.</p>
+
+<button class="btn btn-primary" @onclick="ForceUpdate">Re-render (counter: @counter)</button>
+
+<ul style="margin-top:1rem; font-family: ui-monospace, monospace; background:#f8fafc; padding:1rem; border-radius:6px;">
+    @foreach (var entry in log)
+    {
+        <li>@entry</li>
+    }
+</ul>
+
+@code {
+    private readonly List<string> log = new();
+    private int counter;
+
+    [Parameter] public int External { get; set; }
+
+    protected override void OnInitialized()
+    {
+        log.Add($"[{log.Count + 1:00}] OnInitialized");
+        base.OnInitialized();
+    }
+
+    protected override void OnParametersSet()
+    {
+        log.Add($"[{log.Count + 1:00}] OnParametersSet (External={External})");
+        base.OnParametersSet();
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        log.Add($"[{log.Count + 1:00}] OnAfterRender (firstRender={firstRender})");
+        base.OnAfterRender(firstRender);
+    }
+
+    private void ForceUpdate()
+    {
+        counter++;
+        log.Add($"[{log.Count + 1:00}] click handler — counter now {counter}");
+    }
+}

@@ -1,0 +1,46 @@
+@* Stock-template navigation. NavLink toggles its "active" class based
+   on the current URL via NavigationManager. *@
+
+<div class="top-row navbar" style="padding-bottom: 1rem; border-bottom: 1px solid #334155;">
+    <a class="navbar-brand" href="/" style="color:#f8fafc; text-decoration:none; font-weight:600;">BlazorVanilla</a>
+</div>
+
+<nav class="nav flex-column" style="display:flex; flex-direction:column; gap:0.25rem; padding-top:1rem;">
+    <NavLink class="nav-link" href="" Match="NavLinkMatch.All"
+             ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        Home
+    </NavLink>
+    <NavLink class="nav-link" href="counter" ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        Counter
+    </NavLink>
+    <NavLink class="nav-link" href="weather" ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        Weather
+    </NavLink>
+    <NavLink class="nav-link" href="multicounter" ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        Multi-Counter
+    </NavLink>
+    <NavLink class="nav-link" href="forms" ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        Forms
+    </NavLink>
+    <NavLink class="nav-link" href="lifecycle" ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        Lifecycle
+    </NavLink>
+    <NavLink class="nav-link" href="cascade" ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        Cascade
+    </NavLink>
+    <NavLink class="nav-link" href="eventcallback" ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        EventCallback
+    </NavLink>
+    <NavLink class="nav-link" href="jsinterop" ActiveClass="active"
+             style="color:#cbd5f5; text-decoration:none; padding:0.4rem 0.5rem; border-radius:4px;">
+        JS Interop
+    </NavLink>
+</nav>

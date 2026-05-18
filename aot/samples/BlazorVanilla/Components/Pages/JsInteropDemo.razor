@@ -1,0 +1,44 @@
+@page "/jsinterop"
+@inject IJSRuntime JS
+
+@* #79 — IJSRuntime invocation of a tiny JS module. *@
+
+<PageTitle>JS Interop</PageTitle>
+
+<h1>JS Interop</h1>
+
+<p>Calls a function exported from
+<code>/_framework/js-interop-demo.js</code> via
+<code>IJSRuntime.InvokeAsync&lt;string&gt;</code>.</p>
+
+<button class="btn btn-primary" @onclick="CallJs">Call JS</button>
+
+@if (!string.IsNullOrEmpty(jsResult))
+{
+    <p role="status" style="margin-top:1rem;">JS returned: <code>@jsResult</code></p>
+}
+
+@if (!string.IsNullOrEmpty(jsError))
+{
+    <p role="alert" style="margin-top:1rem; color:#b91c1c;">Error: @jsError</p>
+}
+
+@code {
+    private string? jsResult;
+    private string? jsError;
+
+    private async Task CallJs()
+    {
+        jsError = null;
+        try
+        {
+            var module = await JS.InvokeAsync<IJSObjectReference>(
+                "import", "./_framework/js-interop-demo.js");
+            jsResult = await module.InvokeAsync<string>("greet", "Blazor");
+        }
+        catch (Exception ex)
+        {
+            jsError = $"{ex.GetType().Name}: {ex.Message}";
+        }
+    }
+}

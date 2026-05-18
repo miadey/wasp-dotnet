@@ -1,0 +1,18 @@
+@inherits LayoutComponentBase
+
+<div class="page" style="display: flex; min-height: 100vh; font-family: system-ui;">
+    <aside class="sidebar" style="width: 220px; background: #1e293b; color: #f8fafc; padding: 1rem;">
+        <NavMenu />
+    </aside>
+
+    <main style="flex: 1; padding: 1.5rem 2rem; max-width: 960px;">
+        <article class="content">
+            @Body
+        </article>
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet style="display:none; background:#fee2e2; padding:0.75rem;">
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+</div>

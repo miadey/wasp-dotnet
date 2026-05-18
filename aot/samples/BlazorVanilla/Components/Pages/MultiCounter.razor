@@ -1,0 +1,23 @@
+@page "/multicounter"
+
+@* #81 — two interactive Counter instances on the same page. Each
+   should maintain its own state and respond to its own click events. *@
+
+<PageTitle>Multi-Counter</PageTitle>
+
+<h1>Multi-Counter</h1>
+
+<p>Two <code>&lt;Counter /&gt;</code> instances on one page. Click events on
+one should not affect the other.</p>
+
+<div style="display:flex; gap:2rem; flex-wrap:wrap;">
+    <section style="border:1px solid #cbd5f5; padding:1rem; border-radius:6px;">
+        <h2>Counter A</h2>
+        <Counter />
+    </section>
+
+    <section style="border:1px solid #cbd5f5; padding:1rem; border-radius:6px;">
+        <h2>Counter B</h2>
+        <Counter />
+    </section>
+</div>

@@ -1,0 +1,25 @@
+@* App.razor — stock-template host shell. Renders the Router so that
+   each @page-decorated component under Pages/ becomes a routed page. *@
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blazor Vanilla on IC</title>
+    <base href="/" />
+</head>
+
+<body>
+    @* Wasp marker pair around the Router. Long-Polling hydration will
+       attach an interactive circuit to the routed component tree. *@
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Routes)))
+    <Routes />
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(Routes)))
+
+    @* Wasp scripts (blazor.web.js + wasp-bridge.js). *@
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
+</body>
+
+</html>

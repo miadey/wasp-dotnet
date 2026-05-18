@@ -1,0 +1,61 @@
+@page "/forms"
+
+@using System.ComponentModel.DataAnnotations
+
+@* #83 — EditForm + DataAnnotations validation. *@
+
+<PageTitle>Forms</PageTitle>
+
+<h1>Form Demo</h1>
+
+<p>Stock <code>EditForm</code> + <code>DataAnnotationsValidator</code>
+binding to a <code>Person</code> model with <code>[Required]</code> and
+<code>[StringLength]</code> attributes.</p>
+
+<EditForm Model="person" OnValidSubmit="OnValidSubmit" FormName="person-form">
+    <DataAnnotationsValidator />
+    <ValidationSummary />
+
+    <div style="margin-bottom: 0.75rem;">
+        <label>Name: <InputText @bind-Value="person.Name" /></label>
+    </div>
+
+    <div style="margin-bottom: 0.75rem;">
+        <label>Email: <InputText @bind-Value="person.Email" /></label>
+    </div>
+
+    <div style="margin-bottom: 0.75rem;">
+        <label>Age: <InputNumber @bind-Value="person.Age" /></label>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Submit</button>
+</EditForm>
+
+@if (!string.IsNullOrEmpty(submittedMessage))
+{
+    <p role="status" style="margin-top:1rem; color:#15803d;">@submittedMessage</p>
+}
+
+@code {
+    private Person person = new();
+    private string? submittedMessage;
+
+    private void OnValidSubmit()
+    {
+        submittedMessage = $"Submitted: {person.Name} <{person.Email}>, age {person.Age}";
+    }
+
+    public sealed class Person
+    {
+        [Required(ErrorMessage = "Name is required.")]
+        [StringLength(40, MinimumLength = 2, ErrorMessage = "Name must be 2-40 characters.")]
+        public string? Name { get; set; }
+
+        [Required(ErrorMessage = "Email is required.")]
+        [StringLength(60, MinimumLength = 3, ErrorMessage = "Email must be 3-60 characters.")]
+        public string? Email { get; set; }
+
+        [Range(0, 150, ErrorMessage = "Age must be 0-150.")]
+        public int Age { get; set; }
+    }
+}

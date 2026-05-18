@@ -1,0 +1,39 @@
+@page "/eventcallback"
+
+@* #86 — typed EventCallback<int>. Child raises an int, parent stores. *@
+
+<PageTitle>EventCallback</PageTitle>
+
+<h1>EventCallback&lt;int&gt;</h1>
+
+<p>Each row is a child component that raises a typed
+<code>EventCallback&lt;int&gt;</code> on click. The parent updates its
+<code>selectedId</code> field, which the children read back via the
+<code>IsSelected</code> parameter.</p>
+
+<p>Selected: <strong>@(selectedId?.ToString() ?? "(none)")</strong></p>
+
+@foreach (var row in rows)
+{
+    <SelectableRow Id="row.Id"
+                   Label="row.Label"
+                   IsSelected="selectedId == row.Id"
+                   OnSelected="HandleSelected" />
+}
+
+@code {
+    private int? selectedId;
+
+    private readonly (int Id, string Label)[] rows = new[]
+    {
+        (1, "Alpha"),
+        (2, "Bravo"),
+        (3, "Charlie"),
+        (4, "Delta"),
+    };
+
+    private void HandleSelected(int id)
+    {
+        selectedId = id;
+    }
+}
