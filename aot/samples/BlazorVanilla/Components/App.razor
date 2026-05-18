@@ -101,7 +101,12 @@
     </div>
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(pageType))
 
-    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
+    @* blazor.web.js intentionally NOT loaded — BlazorVanilla is Static
+       SSR only. blazor.web.js intercepts <a href> clicks and tries to
+       push a `sendLocationChanged` message into a SignalR connection
+       that doesn't exist (EnableInteractiveServer=false), throwing
+       "Cannot read properties of undefined (reading 'send')". Plain
+       full-page navigation via the <a> elements works fine. *@
 </body>
 
 </html>
