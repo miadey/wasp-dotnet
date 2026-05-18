@@ -1,7 +1,20 @@
 # M4 progress — Blazor Server on canister
 
-Snapshot as of 2026-05-16. Companion to `m4-blazor-server-on-canister.md`
+Snapshot as of 2026-05-18. Companion to `m4-blazor-server-on-canister.md`
 (plan) and `m4-s2-circuit-coupling.md` (spike).
+
+## TL;DR
+
+M4 click-counter demo is **working end-to-end in a real browser**. CircuitOnIc
+serves the Counter page, slow click (SignalR Long Polling update call) and
+fast click (query RPC, ~50 ms RTT) both increment the count. Architectural
+pivot from original plan: transport is SignalR Long Polling on the canister's
+own HTTP gateway, not IC-WebSockets — no off-chain gateway dependency.
+
+Remaining defects: one race condition (#112 ValueStopwatch on first click
+after fresh handshake), one broken build script (#111 CircuitOnIc), one
+upstream framework bug worked around at the JS layer (#80
+RenderBatchWriter strings table). See "What is NOT working" below.
 
 ## Status by session
 
@@ -14,23 +27,26 @@ Snapshot as of 2026-05-16. Companion to `m4-blazor-server-on-canister.md`
 | **S4** (#68) | Hub method dispatch (compile-time, replaces SignalR reflection) | ✅ done | `IBlazorHubFacade.cs`, `BlazorHubDispatcher.cs`, 17 dispatcher tests covering all 13 ComponentHub methods |
 | **S5** (#69) | Cecil weaver opens Microsoft.AspNetCore.Components.Server internals | ✅ done | `shared/tools/Wasp.CircuitHostWeaver/`, `Vendor/Microsoft.AspNetCore.Components.Server.dll`, `.targets` for ILC substitution, 6 vendor-DLL verification tests |
 | **S5** (#70) | StableRegion + CircuitStore (variable-size stable memory + per-principal snapshots) | ✅ done | `Wasp.IcCdk/src/StableRegion.cs`, `Wasp.AspNetCore.Blazor.Server/src/CircuitStore.cs`, 17 stable-memory tests including upgrade round-trip |
-| **S6** (#71) | Asset canister + blazor.web.js + IC-WS shim | partial | `wwwroot/ic-ws-blazor-adapter.js` (JS shim, ready), `Wasp.AspNetCore.AssetCanister.targets` (MSBuild glue, ready). Missing: vendored `blazor.web.js` + `ic-websocket-js` UMD bundle, dfx.json wiring example. |
-| **S5/S7** | `CircuitHubFacade` → real CircuitHost | mostly done | `CircuitHubFacade.Bind(transport, factory, services)` calls real `CircuitFactory.CreateCircuitHostAsync(...)` with components decoded via real `IServerComponentDeserializer.TryDeserializeComponentDescriptorCollection(...)`. **8 of 13 hub methods** forward to live CircuitHost: StartCircuit, BeginInvokeDotNetFromJS, EndInvokeJSFromDotNet, ReceiveByteArray, ReceiveJSDataChunk, OnRenderCompleted, OnLocationChanged, OnLocationChanging. Outbound `Completion` frames ship via `IcCircuitTransport.SendRawFrame`. 5 documented stubs remain (UpdateRootComponents needs IClearableStore from a second weaver pass on Components.Endpoints.dll; ConnectCircuit/ResumeCircuit/PauseCircuit need CircuitRegistry; SendDotNetStreamToJS needs StreamItem frame writer). |
-| **S7** (#60) | Live click-counter demo | **installs on local dfx** | `aot/samples/CircuitOnIc/` complete. Full stack AOT-compiled via `wasp-dotnet-build:latest` docker. Build chain: 57 MB native → 28 MB after icp-publish + wasi-stub → 17 MB after `wasm-opt -Oz` with bulk-memory/multivalue/reference-types/simd/nontrapping-fp/sign-ext features. **`TrimMode=full`** in the sample csproj brought the code section under IC's 11.5 MB limit. **`dfx canister install` succeeds on the local replica** — the backend canister runs and responds to `http_request` queries with 200. Exports correct: `canister_query http_request`, `canister_update http_request_update`, `canister_update ws_open/ws_close/ws_message`, `canister_query ws_get_messages`. Razor component pipeline returns empty body (likely a trim hint / DI registration tweak for `MapRazorComponents` on canister) — that's the next real gate. End-to-end browser verification additionally needs a local `ic-websocket-gateway` running to bridge the `/_blazor` WS into `ws_message` update calls; that's an off-chain Rust service, separate setup. |
+| **S6** (#71) | Asset canister + blazor.web.js + IC-WS shim | superseded | Pivot: shipped Blazor Server demo routes over HTTP Long Polling, not IC-WS. `wwwroot/ic-ws-blazor-adapter.js` retained as optional future path. AssetCanister MSBuild target still useful for sibling-asset-canister scenarios (#71 kept open as enhancement). |
+| **S5/S7** (#74) | `CircuitHubFacade` → real CircuitHost | ✅ done | `CircuitHubFacade.Bind(transport, factory, services)` calls real `CircuitFactory.CreateCircuitHostAsync(...)`. **12 of 13 hub methods** forward to live CircuitHost or have intentional implementations. Only `SendDotNetStreamToJS` (CircuitHubFacade.cs:536) still throws `NotImplementedException` — needs StreamItem/StreamCompletion frame writers in BlazorPackWriter; no shipped sample exercises it. `UpdateRootComponents` uses reflection to dodge the `IClearableStore` cross-assembly type collision. `ConnectCircuit`/`PauseCircuit` intentionally return false (no reconnect/no pause snapshot). `ResumeCircuit` tears down + starts fresh. |
+| **S7** (#60) | Live click-counter demo | ✅ done (HTTP Long Polling pivot) | `aot/samples/CircuitOnIc/`, canister `vb2j2-fp777-77774-qaafq-cai`. Code section 10.45 MB (under 11.5 MB cap). Two click paths: **(a) slow click** via SignalR Long Polling carried by canister `http_request_update` — count 0→1 verified in real browser on 2026-05-18; **(b) fast click** via query RPC on canister `http_request` — 52–53 ms RTT, count 1→2 verified. State persisted to stable memory across upgrades. Architectural pivot from original IC-WS plan (see #60 close comment). Known issues: #112 ValueStopwatch race on first click after fresh handshake (intermittent, reload-and-wait recovers); #111 build-and-deploy.sh broken (works only via prebuilt .canister.wasm artifact). |
 
-## Test counts (all real, all green)
+## Test counts (all real, all green — 2026-05-18)
 
 ```
-xunit             : 118 / 118
+xunit             : 133 / 133
 JS cross-decoder  :  11 /  11  (@microsoft/signalr-protocol-msgpack)
 ```
 
 Breakdown:
-- BlazorPack writer/reader/round-trip: 68
-- IcCircuitTransport (handshake, invocation, Ping, Close, completion correlation): 10
-- BlazorHubDispatcher (all 13 ComponentHub methods + error paths): 17
-- StableRegion + CircuitStore (alloc, upgrade rehydration, corruption resistance): 17
-- Vendor DLL post-weaver verification (CircuitFactory/Host/ClientProxy public, IVT stripped): 6
+- Wasp.AspNetCore.Blazor.Server.Tests: 126
+  - BlazorPack writer/reader/round-trip: 68
+  - IcCircuitTransport (handshake, invocation, Ping, Close, completion correlation): 10
+  - BlazorHubDispatcher (all 13 ComponentHub methods + error paths): 17
+  - StableRegion + CircuitStore (alloc, upgrade rehydration, corruption resistance): 17
+  - Vendor DLL post-weaver verification (CircuitFactory/Host/ClientProxy public, IVT stripped): 6
+  - Other (RenderBatch decode, marker parsing, etc.): 8
+- Wasp.AspNetCore.Tests: 7
 
 ## What is *actually* working end-to-end on a canister
 
@@ -55,67 +71,59 @@ LoadFromStable → Restore returns original bytes.
 with `CircuitFactory`, `CircuitHost`, `CircuitClientProxy`, etc. promoted
 to `public`. Verified by `MetadataLoadContext` inspection.
 
-## What is NOT working end-to-end (and what blocks it)
+## What is NOT working end-to-end (residual defects, 2026-05-18)
 
-1. **No live CircuitHost.** `CircuitHubFacade` is wired into the transport
-   correctly but its 13 hub methods throw `NotImplementedException`. To
-   close them:
-   - Construct a `Microsoft.AspNetCore.Components.Server.Circuits.CircuitHost`
-     via `CircuitFactory.CreateCircuitHostAsync(...)`.
-   - That ctor needs an `IServiceProvider` populated by
-     `services.AddRazorComponents().AddInteractiveServerRenderMode()`,
-     plus an `HttpContext`, `JS runtime`, `ResourceAssetCollection`,
-     `ServerComponentSerializer`, and a `CircuitClientProxy` wrapping our
-     `IcClientProxy`.
-   - Most of these services are AOT-clean. The exception is
-     `BlazorPackHubProtocol` — uses MessagePack reflective resolvers; we
-     either substitute via `ILLink.Substitutions.xml` or never resolve the
-     service (we already don't use SignalR protocol negotiation, so we may
-     get away with not registering `BlazorPackHubProtocol` at all).
-   - Estimate: 2–3 days of focused work to get the first
-     `StartCircuit → JS.RenderBatch` cycle running in an xunit test that
-     uses an in-memory backend.
+1. **#112 ValueStopwatch race.** First slow-click immediately after a fresh
+   circuit handshake throws
+   `InvalidOperationException: An uninitialized, or 'default', ValueStopwatch
+   cannot be used to get elapsed time.` from
+   `RemoteRenderer.ProcessPendingBatch`. The circuit disconnects.
+   Workaround: reload + wait ~18 s before clicking; subsequent clicks all
+   work. Smells like an ordering race between `StartCircuit` initial render
+   and the first `OnRenderCompletedAsync` ack.
 
-2. **No asset bundle.** Need to vendor `blazor.web.js` from
-   `Microsoft.AspNetCore.Components.Web 10.0.6` and bundle the
-   `ic-websocket-js` UMD. Both are downloads + a `.targets` addition.
-   Estimate: 1 day.
+2. **#111 CircuitOnIc build script broken.** The committed
+   `samples/CircuitOnIc/build-and-deploy.sh` references the wrong docker
+   image, uses `dotnet publish` (tripping #110 circular dep), and is missing
+   the entire post-link pipeline (icp-publish + wasi-stub) that RazorOnIc
+   has. The shipped 10.45 MB `CircuitOnIc.canister.wasm` works when
+   installed directly via `dfx canister install --wasm`. Anyone modifying
+   the sample today has to re-derive the build pipeline manually.
 
-3. **No deploy.** `samples/CircuitOnIc/` doesn't exist. Needs the
-   `CircuitHubFacade` integration above + an HTTP endpoint that serves the
-   IC-WS handshake on `/_blazor/negotiate`. The wasm artifact then deploys
-   like `aot/samples/RazorOnIc/` (which is already on mainnet).
-   Estimate: 1 day (after #1 + #2 land).
+3. **#80 Framework RenderBatchWriter strings table is empty for delta
+   batches on wasi-wasm AOT.** Workaround active in CircuitHubFacade
+   (lines 67–76): after each click we push a parallel
+   `JS.BeginInvokeJS → window.waspSetCount` so the visible counter
+   increments via direct DOM update. Upstream framework bug; the workaround
+   is sticky until the framework is patched.
+
+4. **`SendDotNetStreamToJS` still throws.** Last of the original 5
+   `IBlazorHubFacade` stubs (`CircuitHubFacade.cs:536`). Needs StreamItem
+   /StreamCompletion frame writers in BlazorPackWriter. No shipped sample
+   exercises `DotNetStreamReference` interop, so this is fence-tier.
 
 ## How to extend
 
-To make a click-counter actually round-trip:
+See `aot/samples/CircuitOnIc/Program.cs` for the wired example. The hosting
+extensions are in `BlazorOnIcHostingExtensions.cs`:
 
 ```csharp
-// In samples/CircuitOnIc/Program.cs (does not exist yet):
-WaspWs.Init(new WsHandlers
+// In samples/CircuitOnIc/Program.cs:
+var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions
 {
-    OnOpen    = registry.HandleOpen,
-    OnMessage = registry.HandleMessage,
-    OnClose   = registry.HandleClose,
+    ContentRootPath = "/canister",
+    ApplicationName = "CircuitOnIc",
 });
-
-registry.TransportConnected += transport =>
-{
-    // ← TODAY: this calls into CircuitHubFacade.Bind which sets up
-    //   dispatcher + completion sink correctly, but all 13 method
-    //   bodies throw NotImplementedException because no real
-    //   CircuitHost is constructed.
-    var facade = CircuitHubFacade.Bind(transport);
-    // To finish, CircuitHubFacade.Bind also needs to be passed an
-    // IServiceProvider so it can resolve CircuitFactory and emit:
-    //   _circuit = await factory.CreateCircuitHostAsync(...);
-    // and then forward each hub method into _circuit.
-};
+builder.AddBlazorOnIC();                              // 1. Wasp setup
+var app = builder.Build();
+app.MapBlazorOnIC<App>(typeof(Program).Assembly);     // 2. SSR + /_blazor endpoints
+// + any app-specific endpoints (query RPC, etc.)
 ```
 
 ## References
 
-- Issues: #58 ✅ closed, #66, #67, #68, #69, #70, #71, #72 (open), #60 (open, M4.3 demo)
+- Closed-as-done: #58, #60, #66, #67, #68, #69, #70, #73, #74, #87, #88, #90, #91
+- Open residual: #112 (ValueStopwatch race), #111 (build script), #80 (RenderBatchWriter), #76 (System.Text.Json reflection trim — now optional), plus the M4.S8.* extension issues #81–#86 and the M4.S9.6* MVC trim cluster #100–#105.
+- Architectural pivot: #71, #72, #75 (IC-WS path) kept open as optional future work; shipped demo uses HTTP Long Polling.
 - Source roots: `aot/Wasp.AspNetCore.Blazor.Server/`, `aot/Wasp.IcCdk/src/StableRegion.cs`, `shared/tools/Wasp.CircuitHostWeaver/`
 - Vendored: `aot/Wasp.AspNetCore.Blazor.Server/Vendor/Microsoft.AspNetCore.Components.Server.dll` (do not edit by hand — regenerate via the weaver)
