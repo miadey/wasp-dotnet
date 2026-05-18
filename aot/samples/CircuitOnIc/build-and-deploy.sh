@@ -1,48 +1,60 @@
 #!/usr/bin/env bash
 # Build CircuitOnIc to wasm32-wasi via the Linux ILC docker container,
-# then deploy both canisters (backend + assets) via dfx.
+# post-process (icp-publish + wasi-stub + wasm-opt), then deploy via dfx.
 #
 # Prereqs:
 #   - dfx running locally (dfx start --clean --background)
-#   - aot/docker/Dockerfile built and tagged as wasp-build
-#   - The Cecil weaver has produced
-#     aot/Wasp.AspNetCore.Blazor.Server/Vendor/Microsoft.AspNetCore.Components.Server.dll
-#     (run: dotnet run --project shared/tools/Wasp.CircuitHostWeaver)
-#
-# Status: as of 2026-05-16, CircuitHubFacade.StartCircuit calls
-# CircuitFactory.CreateCircuitHostAsync with an empty ComponentDescriptor
-# list. The circuit opens; no components render until
-# ServerComponentDeserializer wiring lands. See docs/m4-progress.md.
+#   - wasp-dotnet-build:latest docker image built
+#   - shared/tools/icp-publish, shared/tools/wasi-stub built
+#   - wasm-opt on PATH
+#   - aot/Wasp.AspNetCore.Blazor.Server/Vendor/Microsoft.AspNetCore.Components.Server.dll
+#     present (regenerate via:
+#     dotnet run --project shared/tools/Wasp.CircuitHostWeaver
+#     if stale or missing)
 
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+cd "$REPO"
 
-echo "[circuitonic] AOT-compiling for wasi-wasm via docker..."
-docker run --rm -v "$PWD:/src" -w /src wasp-build \
-  bash -c "cd aot/samples/CircuitOnIc && dotnet publish -c Release -r wasi-wasm"
+VENDOR_DLL="aot/Wasp.AspNetCore.Blazor.Server/Vendor/Microsoft.AspNetCore.Components.Server.dll"
+if [ ! -f "$VENDOR_DLL" ]; then
+  echo "[circuitonic] regenerating vendored Components.Server.dll via weaver..."
+  dotnet run --project shared/tools/Wasp.CircuitHostWeaver
+fi
 
-echo "[circuitonic] Post-link (transplant the wasm-relax-simd / wasm-table-merge / wasi-stub steps from RazorOnIc/build-and-deploy.sh once the AOT step succeeds)..."
+echo "[circuitonic] AOT-compiling for wasm32-wasi via docker..."
+docker run --rm --platform linux/amd64 -v "$REPO:/work" -v wasp-nuget:/nuget \
+  wasp-dotnet-build:latest \
+  bash -c "cd /work/aot/samples/CircuitOnIc && dotnet build -c Release /p:IlcLlvmTarget=wasm32-wasi"
 
-echo "[circuitonic] dfx deploy circuitonic..."
-dfx deploy circuitonic
+RAW=aot/samples/CircuitOnIc/bin/Release/net10.0/wasi-wasm/publish/CircuitOnIc.wasm
+OUT=aot/samples/CircuitOnIc/CircuitOnIc.canister.wasm
+TMP=$(mktemp -t wasp-co.XXXXXX.wasm)
+TMP2=$(mktemp -t wasp-co.XXXXXX.wasm)
 
-BACKEND_ID=$(dfx canister id circuitonic)
-echo "[circuitonic] Backend canister id: $BACKEND_ID"
+echo "[circuitonic] icp-publish $RAW -> $TMP..."
+shared/tools/icp-publish/icp-publish.sh "$RAW" "$TMP"
 
-echo "[circuitonic] Rebuilding asset-canister bootstrap with backend id..."
-cd aot/samples/CircuitOnIc
-dotnet build -c Release \
-  -p:WaspAssetCanisterBackendId="$BACKEND_ID" \
-  -p:WaspAssetCanisterGateway="wss://gateway.icws.io"
+echo "[circuitonic] wasi-stub $TMP -> $TMP2..."
+shared/tools/wasi-stub/target/release/wasi-stub "$TMP" "$TMP2"
 
-cd ../../..
-echo "[circuitonic] dfx deploy circuitonic_assets..."
-dfx deploy circuitonic_assets
+echo "[circuitonic] wasm-opt $TMP2 -> $OUT..."
+wasm-opt -Oz \
+  --enable-bulk-memory \
+  --enable-multivalue \
+  --enable-reference-types \
+  --enable-simd \
+  --enable-nontrapping-float-to-int \
+  --enable-sign-ext \
+  "$TMP2" -o "$OUT"
 
-ASSETS_ID=$(dfx canister id circuitonic_assets)
-echo
-echo "Both canisters deployed:"
-echo "  backend (CircuitHost): $BACKEND_ID"
-echo "  frontend (assets):     $ASSETS_ID"
-echo
-echo "Open: http://$ASSETS_ID.localhost:4944/"
+echo "[circuitonic] Deploying backend canister..."
+cd aot
+dfx canister create circuitonic 2>/dev/null || true
+dfx canister install circuitonic --mode reinstall --yes \
+  --wasm samples/CircuitOnIc/CircuitOnIc.canister.wasm
+
+CID=$(dfx canister id circuitonic)
+echo "[circuitonic] Canister id: $CID"
+echo "[circuitonic] Open: http://$CID.raw.localhost:4944/"

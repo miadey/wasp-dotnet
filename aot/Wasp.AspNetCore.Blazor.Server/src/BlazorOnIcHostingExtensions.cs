@@ -62,7 +62,15 @@ public static class BlazorOnIcHostingExtensions
             {
                 options.DetailedErrors = true;
             });
-        builder.Services.AddAntiforgery();
+        // Antiforgery is intentionally NOT registered. Without forms, the
+        // /_blazor Long Polling transport, the framework's static SSR
+        // pipeline, and our static-asset paths don't need CSRF tokens.
+        // Dropping the registration cuts the HMAC, cookie name derivation,
+        // token validator, and IAntiforgeryTokenStore chains from the
+        // trim graph (~200–500 KB). The framework endpoints emitted by
+        // MapRazorComponents still carry RequireAntiforgeryToken metadata
+        // but with no antiforgery middleware in the pipeline (see
+        // MapBlazorOnIC below) it's never enforced.
 
         // Replace Kestrel with the IC HTTP gateway adapter.
         builder.WebHost.UseIcCanister();
@@ -98,10 +106,14 @@ public static class BlazorOnIcHostingExtensions
         if (app is null) throw new ArgumentNullException(nameof(app));
         if (staticAssetsAssembly is null) throw new ArgumentNullException(nameof(staticAssetsAssembly));
 
-        // Antiforgery middleware — Razor Component endpoints carry
-        // RequireAntiforgeryToken metadata; without this in the pipeline
-        // every /_blazor request 400s.
-        app.UseAntiforgery();
+        // Antiforgery middleware intentionally not wired. See the matching
+        // comment in AddBlazorOnIC. The framework Razor Component endpoints
+        // carry RequireAntiforgeryToken metadata but with no antiforgery
+        // middleware in the pipeline the metadata is silently ignored —
+        // safe because: (a) our /_blazor Long Polling transport rides
+        // raw IcCircuitTransport frames, no form bodies; (b) the SSR
+        // root response (GET /) is a synthetic asset, not a real form
+        // submit; (c) we have no user-facing forms in the shipped samples.
 
         // (Legacy) marker middleware. Now a no-op since the marker pair
         // is emitted inline by the BlazorOnICRuntime component. Keeping
@@ -170,8 +182,12 @@ public static class BlazorOnIcHostingExtensions
             Reply.Print($"[BlazorOnIC] wasp-bridge.js register: {jex.GetType().Name}: {jex.Message}");
         }
 
-        // Map the Razor Components root.
-        app.MapRazorComponents<TApp>();
+        // Map the Razor Components root. .DisableAntiforgery() strips the
+        // RequireAntiforgeryToken metadata the framework adds by default;
+        // we don't register antiforgery (see AddBlazorOnIC), so the
+        // matching middleware isn't in the pipeline and the routing
+        // EndpointMiddleware would otherwise throw at dispatch time.
+        app.MapRazorComponents<TApp>().DisableAntiforgery();
 
         return app;
     }

@@ -100,6 +100,21 @@
     </type>
   </assembly>
 
+  <!-- DiagnosticListener.IsEnabled gates all framework diagnostic-event
+       emission paths (MVC's ViewResult execution events, Blazor's render
+       batch lifecycle, HttpClient request events, etc.). The framework
+       wraps every IsEnabled-returns-false branch with the actual event
+       payload construction; stubbing the gate to false makes the trimmer
+       drop all the payload-building code. No application of ours reads
+       these events, so this is a pure dead-code prune. -->
+  <assembly fullname="System.Diagnostics.DiagnosticSource">
+    <type fullname="System.Diagnostics.DiagnosticListener">
+      <method signature="System.Boolean IsEnabled()" body="stub" value="false" />
+      <method signature="System.Boolean IsEnabled(System.String)" body="stub" value="false" />
+      <method signature="System.Boolean IsEnabled(System.String,System.Object,System.Object)" body="stub" value="false" />
+    </type>
+  </assembly>
+
   <!-- PersistentServicesRegistry is hit on every Razor render via
        EndpointHtmlRenderer.InitializeStandardComponentServicesAsync. Its
        ComputeKey calls SHA256.HashData. M2 (SSR-only) does not need persistent
