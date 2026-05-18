@@ -3,9 +3,17 @@
    (gh #107). Switching on NavigationManager.Uri lets the harness exercise
    the per-page SSR while #107 stays open as a framework bug.
 
+   <NavLink> usage inline (not via MainLayout) exercises #82 active-class
+   detection while sidestepping a separate LayoutComponentBase trim issue:
+   the framework's ComponentProperties.SetProperties cannot find the
+   inherited ChildContent property on a trimmed-LayoutComponentBase even
+   with DynamicallyAccessedMemberTypes.All. File a focused issue if a
+   future sample needs MainLayout.
+
    Restore <Routes /> once #107 closes. *@
 
 @inject NavigationManager Nav
+@using Microsoft.AspNetCore.Components.Routing
 @using WaspSample.BlazorVanilla.Components.Pages
 
 <!DOCTYPE html>
@@ -16,6 +24,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blazor Vanilla on IC</title>
     <base href="/" />
+    <style>
+        body { font-family: system-ui; max-width: 760px; margin: 1rem auto; padding: 0 1rem; }
+        nav.top { display: flex; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid #cbd5f5; margin-bottom: 1rem; }
+        nav.top a { color: #475569; text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 4px; }
+        nav.top a.active { background: #1e293b; color: #f8fafc; }
+    </style>
 </head>
 
 <body>
@@ -28,6 +42,10 @@
         };
     }
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(pageType))
+    <nav class="top">
+        <NavLink href="" Match="NavLinkMatch.All" ActiveClass="active">Home</NavLink>
+        <NavLink href="counter" ActiveClass="active">Counter</NavLink>
+    </nav>
     @if (pageType == typeof(Counter))
     {
         <Counter />

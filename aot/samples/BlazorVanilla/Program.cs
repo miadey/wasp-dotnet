@@ -21,6 +21,15 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Routes))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Components.Layout.MainLayout))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Components.Layout.NavMenu))]
+    // LayoutComponentBase exposes ChildContent via inheritance; All on
+    // MainLayout only preserves declared members. Without this root the
+    // framework's ParameterView setter throws "no property matching
+    // ChildContent" at render time.
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Microsoft.AspNetCore.Components.LayoutComponentBase))]
+    // #82: NavLink (and its base CascadingValue resolution path) is
+    // used in NavMenu. Pin so the trimmer keeps the active-class
+    // diffing logic + Match enum.
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Microsoft.AspNetCore.Components.Routing.NavLink))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Home))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
     [DynamicDependency("FromMilliseconds(System.Int64)", typeof(System.TimeSpan))]
