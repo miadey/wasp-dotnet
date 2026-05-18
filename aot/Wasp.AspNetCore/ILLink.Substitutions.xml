@@ -84,7 +84,10 @@
   <assembly fullname="Microsoft.AspNetCore.Components">
     <type fullname="Microsoft.AspNetCore.Components.Infrastructure.PersistentServicesRegistry">
       <method signature="System.Void RegisterForPersistence(Microsoft.AspNetCore.Components.PersistentComponentState)" body="stub" />
-      <method signature="System.Threading.Tasks.Task RestoreStateAsync(Microsoft.AspNetCore.Components.Infrastructure.IPersistentComponentStateStore)" body="stub" />
+      <!-- gh #99 (M4.S9.5e): RestoreStateAsync(IPersistentComponentStateStore) was renamed
+           to RestoreInstanceState(object, Type, PersistentComponentState) in
+           Microsoft.AspNetCore.App 10.0.8. -->
+      <method signature="System.Void RestoreInstanceState(System.Object,System.Type,Microsoft.AspNetCore.Components.PersistentComponentState)" body="stub" />
     </type>
   </assembly>
 </linker>
