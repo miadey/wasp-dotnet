@@ -84,13 +84,19 @@
             </nav>
         </aside>
         <main>
-            @if (pageType == typeof(Counter))
-            {
-                @* <h1> stays OUTSIDE the WaspMarker pair so it survives
-                   the framework's #80 empty-strings-table render-diff wipe
-                   on circuit attach. The Counter component itself renders
-                   only the dynamic count + button — the parts that must
-                   update on click. *@
+            @* Counter shell is ALWAYS rendered (with WaspMarker pair) so
+               blazor.web.js attaches the SignalR circuit ONCE on first
+               page load and never re-handshakes — visibility is toggled
+               via the data-current-page CSS attribute on <body> and the
+               enhanced-nav JS below. The h1 stays outside the marker
+               pair to survive the framework's #80 empty-strings-table
+               render-diff wipe.
+
+               Goal: warmup amortized to background of first page load.
+               After the ~3.3 s handshake completes (invisible to user
+               browsing Home/Weather), all subsequent /counter clicks
+               are instant — no re-warmup. *@
+            <div id="counter-shell" data-page="counter">
                 <h1>Counter</h1>
                 <p id="blazor-status" style="color:#64748b; font-size:0.9rem;">
                     Connecting to Blazor Server (SignalR Long Polling)…
@@ -98,17 +104,36 @@
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Counter)))
                 <Counter />
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(Counter)))
-            }
-            else if (pageType == typeof(Weather))
-            {
+            </div>
+            <div id="weather-shell" data-page="weather">
                 <Weather />
-            }
-            else
-            {
+            </div>
+            <div id="home-shell" data-page="home">
                 <Home />
-            }
+            </div>
         </main>
     </div>
+
+    @* Page-shell visibility — only the current route's shell is shown.
+       Initial CSS state is set from server-side pageType; enhanced-nav
+       JS updates this on every transition. *@
+    <style>
+        #counter-shell, #weather-shell, #home-shell { display: none; }
+        body[data-current-page="counter"] #counter-shell,
+        body[data-current-page="weather"] #weather-shell,
+        body[data-current-page="home"] #home-shell { display: block; }
+    </style>
+    <script>
+        // Set initial data-current-page from URL (server-rendered HTML
+        // doesn't know which page we're on until the JS engines).
+        (function () {
+            const p = window.location.pathname;
+            const which =
+                p === '/counter' || p.startsWith('/counter/') ? 'counter' :
+                p === '/weather' || p.startsWith('/weather/') ? 'weather' : 'home';
+            document.body.setAttribute('data-current-page', which);
+        })();
+    </script>
 
     @* blazor.web.js + wasp-bridge.js so Counter's click handler is
        wired through a live circuit when the Counter page is shown.
@@ -139,91 +164,37 @@
                 return true;
             }
 
-            async function navigateTo(url, addToHistory) {
-                try {
-                    const r = await fetch(url, { headers: { 'X-Wasp-EnhancedNav': '1' } });
-                    if (!r.ok) {
-                        window.location.href = url;
-                        return;
-                    }
-                    const html = await r.text();
-                    const dom = new DOMParser().parseFromString(html, 'text/html');
-                    const newMain = dom.querySelector('main');
-                    const curMain = document.querySelector('main');
-                    if (newMain && curMain) {
-                        curMain.innerHTML = newMain.innerHTML;
-                        // Re-execute inline scripts in the new <main>
-                        // (the count-restoring JS, etc.). DOMParser-set
-                        // innerHTML does NOT execute scripts.
-                        curMain.querySelectorAll('script').forEach(s => {
-                            const n = document.createElement('script');
-                            if (s.src) n.src = s.src;
-                            else n.textContent = s.textContent;
-                            s.parentNode.replaceChild(n, s);
-                        });
-                    }
-                    if (dom.title) document.title = dom.title;
-                    if (addToHistory) history.pushState({ wasp: true }, '', url);
+            function navigateTo(url, addToHistory) {
+                // All three page shells (#home-shell, #counter-shell,
+                // #weather-shell) are already mounted in the DOM with the
+                // Counter circuit attached. Navigation is just a CSS
+                // visibility toggle via body[data-current-page].
+                // No fetch, no DOM splice, no circuit re-attach.
+                if (addToHistory) history.pushState({ wasp: true }, '', url);
 
-                    // Re-evaluate sidebar nav active class
-                    const path = new URL(url, document.baseURI).pathname.replace(/\/$/, '');
-                    document.querySelectorAll('aside.sidebar .nav a').forEach(link => {
-                        const lhref = link.getAttribute('href') || '';
-                        const lpath = lhref === '' ? '' : ('/' + lhref).replace(/\/$/, '');
-                        const isActive = (lpath === '' && path === '') || (lpath !== '' && path === lpath);
-                        link.classList.toggle('active', isActive);
-                    });
+                const path = new URL(url, document.baseURI).pathname;
+                const which =
+                    path === '/counter' || path.startsWith('/counter/') ? 'counter' :
+                    path === '/weather' || path.startsWith('/weather/') ? 'weather' : 'home';
+                document.body.setAttribute('data-current-page', which);
 
-                    // Fire blazor.web.js's enhanced-navigation events so
-                    // its own marker-scan logic runs over the spliced-in
-                    // content. After this dispatch the framework should
-                    // attach the circuit to any new Counter marker — or
-                    // recognise that the marker matches the already-
-                    // attached circuit and reuse it without re-handshake.
-                    document.dispatchEvent(new CustomEvent('enhancedload', {
-                        bubbles: true,
-                        cancelable: false,
-                        detail: { url: url },
-                    }));
-                    document.dispatchEvent(new CustomEvent('enhancedNavigationCompleted', {
-                        bubbles: true,
-                        cancelable: false,
-                        detail: { url: url },
-                    }));
-                    // Best-effort: also try the internal attach API in
-                    // case the events alone don't trigger it.
-                    if (window.Blazor && window.Blazor._internal &&
-                        typeof window.Blazor._internal.attachRootComponents === 'function') {
-                        try { window.Blazor._internal.attachRootComponents(); }
-                        catch (e) { /* swallow — best effort */ }
-                    }
-                } catch (e) {
-                    // Network failure or parse error — fall back to a
-                    // real navigation so the browser handles it.
-                    window.location.href = url;
-                }
+                document.title =
+                    which === 'counter' ? 'Counter' :
+                    which === 'weather' ? 'Weather' : 'Home';
+
+                // Sidebar nav active class
+                const normalized = path.replace(/\/$/, '') || '/';
+                document.querySelectorAll('aside.sidebar .nav a').forEach(link => {
+                    const lhref = link.getAttribute('href') || '';
+                    const lpath = lhref === '' ? '/' : ('/' + lhref).replace(/\/$/, '');
+                    link.classList.toggle('active', normalized === lpath);
+                });
             }
 
             document.addEventListener('click', (e) => {
                 if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
                 const a = e.target.closest && e.target.closest('a');
                 if (!isInternalLink(a)) return;
-
-                // Browser-verified gap: when we splice in /counter HTML
-                // via enhanced nav, blazor.web.js marker-discovery scan
-                // does not re-trigger from the events we dispatch, so
-                // the Counter click handler never wires up. Until we
-                // find the right framework API to force re-scan
-                // (tracked separately), let any navigation TO /counter
-                // fall through to a regular full-page reload — the page
-                // works correctly that way, even if it re-pays the 3.3 s
-                // SignalR warmup. All other transitions (/, /weather)
-                // still benefit from instant enhanced nav.
-                const targetPath = new URL(a.href, document.baseURI).pathname;
-                if (targetPath === '/counter' || targetPath.startsWith('/counter/')) {
-                    return; // let the browser do a real navigation
-                }
-
                 e.preventDefault();
                 navigateTo(a.href, /*addToHistory*/ true);
             });
