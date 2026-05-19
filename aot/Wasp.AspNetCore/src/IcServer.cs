@@ -219,8 +219,13 @@ public sealed class IcServer : IServer
                     // Dynamic query handlers — match by exact path,
                     // handler computes body from full URL (incl. query
                     // string). Used for stateless RPC patterns like
-                    // /api/click?c=5 → {"count":6}.
-                    if (probeReq.Method == "GET"
+                    // /api/click?c=5 → {"count":6} and stateless
+                    // metadata endpoints like POST /_blazor/negotiate
+                    // (the SignalR Long Polling handshake's first
+                    // round-trip — see gh #113). Accepts GET or POST;
+                    // the registered handler is server-controlled, so
+                    // exposing both methods on the same path is safe.
+                    if ((probeReq.Method == "GET" || probeReq.Method == "POST")
                         && _queryHandlers.TryGetValue(lookupPath, out var handler))
                     {
                         var (hBody, hContentType) = handler(probeReq.Url);

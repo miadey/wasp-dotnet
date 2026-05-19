@@ -28,6 +28,15 @@ namespace Wasp.AspNetCore.Blazor.Server;
 /// </summary>
 public static class BlazorOnIcHostingExtensions
 {
+    // Monotonic counter for negotiate connectionId disambiguation (see
+    // the negotiate query handler in MapBlazorOnIC). Bumped via
+    // Interlocked.Increment from a query-call context — safe because
+    // even though the increment is rolled back at end of query (no
+    // state persists), each call sees a monotonically advancing
+    // pre-increment value within the canister process lifetime, which
+    // is what we need to disambiguate same-nanosecond negotiate calls.
+    private static long _negotiateSeq;
+
     /// <summary>
     /// Register all DI services Blazor Server needs to run on a canister:
     /// data protection no-op, encoders, Razor Components stack with
@@ -175,6 +184,46 @@ public static class BlazorOnIcHostingExtensions
             "/_blazor/initializers",
             System.Text.Encoding.UTF8.GetBytes("[]"),
             "application/json; charset=utf-8");
+
+        // gh #113 — POST /_blazor/negotiate is the first round-trip of
+        // the SignalR Long Polling handshake. The response is purely
+        // stateless metadata (a freshly-minted connectionId + transport
+        // list); no canister state mutation needed. Serving it from the
+        // query path drops ~2–4 s of IC consensus latency per page-load
+        // warmup. The lazy-create branch in MapWaspBlazorLongPolling
+        // already handles the case where the first POST /_blazor?id=...
+        // arrives with a connectionId the server hasn't pre-registered,
+        // so deferring `registry.CreateLongPollingConnection` until then
+        // is safe. (If enableInteractiveServer=false, the registry isn't
+        // wired anyway; this handler still returns a valid negotiate
+        // response which the client can use to detect the absence of an
+        // actual circuit.)
+        if (enableInteractiveServer)
+        {
+            IcServer.RegisterQueryHandler("/_blazor/negotiate", _ =>
+            {
+                // Per-call-unique id from Ic0.time() (nanosecond ticks)
+                // + a monotonic counter to disambiguate calls in the
+                // same nanosecond. Guid.NewGuid() is deterministic on
+                // canister because wasi-stub no-ops __wasi_random_get,
+                // so two browsers hitting negotiate get the same id —
+                // unusable. Hex-encoded time+counter is unique enough
+                // for SignalR's connectionId.
+                ulong now = Wasp.IcCdk.Ic0.time();
+                ulong seq = (ulong)System.Threading.Interlocked.Increment(ref _negotiateSeq);
+                string id = now.ToString("x16",
+                                System.Globalization.CultureInfo.InvariantCulture) +
+                            seq.ToString("x16",
+                                System.Globalization.CultureInfo.InvariantCulture);
+                string body =
+                    "{\"connectionId\":\"" + id +
+                    "\",\"connectionToken\":\"" + id +
+                    "\",\"negotiateVersion\":1,\"availableTransports\":[" +
+                    "{\"transport\":\"LongPolling\",\"transferFormats\":[\"Text\",\"Binary\"]}]}";
+                return (System.Text.Encoding.UTF8.GetBytes(body),
+                        "application/json; charset=utf-8");
+            });
+        }
 
         // The Wasp JS bridge — waspSetCount, the fetch wrapper, the
         // pre-registered interop bridge. Lives in an embedded resource
