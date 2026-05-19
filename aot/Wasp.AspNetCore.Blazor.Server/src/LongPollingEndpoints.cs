@@ -162,6 +162,14 @@ public static class LongPollingEndpoints
             ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/octet-stream";
             ctx.Response.ContentLength = bytes.Length;
+            // The IC HTTP gateway caches query AND update responses for
+            // ~10 s by default. For long-polling, a cached response means
+            // the boundary re-serves the same bytes — most fatally a
+            // duplicate handshake ack on a later poll, which blazorpack
+            // reads as a length-prefixed frame (0x7B = 123 → "Message is
+            // incomplete"). Disable boundary caching so every poll hits
+            // the canister and gets the freshly-drained queue contents.
+            ctx.Response.Headers["Cache-Control"] = "no-store";
             if (bytes.Length > 0)
             {
                 await ctx.Response.Body.WriteAsync(bytes);

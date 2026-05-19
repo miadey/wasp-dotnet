@@ -248,6 +248,20 @@ public sealed class IcServer : IServer
                         var result = handler(probeReq.Url, probeReq.Method);
                         if (result is { } r)
                         {
+                            // cache-control: no-store is CRITICAL for dynamic
+                            // query handlers. The IC boundary node caches
+                            // query responses for ~10 s by default (we've
+                            // observed x-cache-ttl: 10 on responses). For
+                            // stateless metadata that's fine, but for
+                            // anything stateful — most notably the SignalR
+                            // Long-Polling /_blazor poll — a cached handshake
+                            // ack returned twice causes blazor.web.js's
+                            // blazorpack parser to read the second `{}\x1e`
+                            // as a length-prefixed frame (0x7B = 123) and
+                            // throw "Message is incomplete." Forcing
+                            // no-store makes the boundary re-ask the canister
+                            // on every poll, which is what the long-polling
+                            // protocol requires.
                             Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
                             {
                                 StatusCode = 200,
@@ -257,6 +271,7 @@ public sealed class IcServer : IServer
                                     new KeyValuePair<string, string>("content-type", r.ContentType),
                                     new KeyValuePair<string, string>("content-length", r.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                                     new KeyValuePair<string, string>("access-control-allow-origin", "*"),
+                                    new KeyValuePair<string, string>("cache-control", "no-store"),
                                 },
                             }));
                             return;
@@ -474,6 +489,20 @@ public sealed class IcServer : IServer
             headers.Add(new KeyValuePair<string, string>(
                 "content-length",
                 body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        }
+
+        // Default to cache-control: no-store on update responses. The IC
+        // boundary node otherwise stamps a 10 s x-cache-ttl header and
+        // serves the same body to subsequent identical requests, which
+        // breaks any endpoint whose body depends on canister state —
+        // most visibly /api/count returning a stale value after another
+        // user POST /api/click, and the SignalR Long-Polling poll
+        // returning a duplicate handshake ack that blazor.web.js can't
+        // parse. Apps that DO want the boundary to cache can set their
+        // own cache-control header (we only add no-store if absent).
+        if (!aspResp.Headers.ContainsKey("cache-control"))
+        {
+            headers.Add(new KeyValuePair<string, string>("cache-control", "no-store"));
         }
 
         return new IcHttpResponse
