@@ -57,6 +57,11 @@ public sealed class IcServer : IServer
         if (path is null) throw new ArgumentNullException(nameof(path));
         if (body is null) throw new ArgumentNullException(nameof(body));
         _staticAssets[path] = (body, contentType);
+        // Push sha256(body) into the asset cert tree so the boundary
+        // can verify subsequent query responses on the non-raw subdomain.
+        // Insert is a no-op outside an update context, so calling from
+        // canister_init / post_upgrade / any update handler is safe.
+        IcCertifiedAssets.Insert(path, body);
     }
 
     /// <summary>
@@ -169,6 +174,7 @@ public sealed class IcServer : IServer
         }
 
         _staticAssets[path] = (icResp.Body, contentType);
+        IcCertifiedAssets.Insert(path, icResp.Body);
         Reply.Print($"[icserver] RegisterRenderedPath({path}) OK — {icResp.Body.Length} bytes registered as static");
     }
 
@@ -201,12 +207,44 @@ public sealed class IcServer : IServer
     [UnmanagedCallersOnly(EntryPoint = "canister_update__http_request_update")]
     public static void HttpRequestUpdate() => Dispatch(isUpdate: true);
 
+    // Exporting canister_init forces the IC to invoke us during install in
+    // a replicated update context. This is the FIRST managed-code call,
+    // which triggers .NET's ModuleInitializer (the consumer's Program.cs
+    // Init) — and crucially, since we're in update mode at this point,
+    // certified_data_set inside IcCertifiedAssets.Insert succeeds rather
+    // than trapping. Without this export, the first request after install
+    // might be a query, in which case the cert would be set lazily and
+    // the boundary would reject the response on the non-raw subdomain.
+    //
+    // canister_post_upgrade is the same idea for upgrade-mode installs —
+    // post-upgrade runs in update context, asset registration replays,
+    // cert tree gets re-built and committed before any real traffic.
+    [UnmanagedCallersOnly(EntryPoint = "canister_init")]
+    public static void CanisterInit()
+    {
+        try { IcCertifiedAssets.FlushPendingIfUpdate(); }
+        catch (Exception ex) { Reply.Print("[icserver] canister_init: " + ex.Message); }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "canister_post_upgrade")]
+    public static void CanisterPostUpgrade()
+    {
+        try { IcCertifiedAssets.FlushPendingIfUpdate(); }
+        catch (Exception ex) { Reply.Print("[icserver] canister_post_upgrade: " + ex.Message); }
+    }
+
     // ─── Core dispatch ────────────────────────────────────────────────────────
 
     private static void Dispatch(bool isUpdate)
     {
         try
         {
+            // Flush any deferred certified-data set the IcCertifiedAssets
+            // store accumulated during ModuleInitializer (which may have
+            // fired in a query context where certified_data_set traps).
+            // No-op when nothing is pending or we're still in query mode.
+            if (isUpdate) IcCertifiedAssets.FlushPendingIfUpdate();
+
             // Query fast path: GET requests for registered static assets
             // are served directly as a query response — no upgrade to an
             // update call. ~50 ms vs ~3 s round trip on local dfx.
@@ -234,6 +272,27 @@ public sealed class IcServer : IServer
                     int qIdx = probeReq.Url.IndexOf('?');
                     string lookupPath = qIdx >= 0 ? probeReq.Url.Substring(0, qIdx) : probeReq.Url;
 
+                    // Detect whether the request is coming through the
+                    // ".raw." subdomain. If yes, the boundary node will
+                    // serve our query response WITHOUT cert verification —
+                    // so dynamic query handlers (whose responses can't be
+                    // pre-certified) are safe to use. If no (canonical
+                    // <canister>.icp0.io), the boundary REQUIRES cert; an
+                    // uncerted dynamic body returns 503
+                    // backend_response_verification. In that case we
+                    // bail to the update path, whose response is signed
+                    // by consensus and doesn't need per-call cert.
+                    bool isRawSubdomain = false;
+                    foreach (var h in probeReq.Headers)
+                    {
+                        if (string.Equals(h.Key, "host", StringComparison.OrdinalIgnoreCase)
+                            && h.Value.Contains(".raw."))
+                        {
+                            isRawSubdomain = true;
+                            break;
+                        }
+                    }
+
                     // Dynamic query handlers — match by exact path,
                     // handler computes body from (url, method). Used
                     // for stateless RPC (/api/click), metadata
@@ -242,7 +301,12 @@ public sealed class IcServer : IServer
                     // (gh #115). The method-aware handler may return
                     // null to bail to the update path when query
                     // semantics can't satisfy the request.
-                    if ((probeReq.Method == "GET" || probeReq.Method == "POST")
+                    //
+                    // Only run dynamic query handlers on .raw.; on the
+                    // canonical subdomain we fall through to update so
+                    // the boundary accepts the response.
+                    if (isRawSubdomain
+                        && (probeReq.Method == "GET" || probeReq.Method == "POST")
                         && _queryHandlers.TryGetValue(lookupPath, out var handler))
                     {
                         var result = handler(probeReq.Url, probeReq.Method);
@@ -282,16 +346,30 @@ public sealed class IcServer : IServer
                     if (probeReq.Method == "GET"
                         && _staticAssets.TryGetValue(lookupPath, out var asset))
                     {
+                        // Asset certification v1: the boundary node on the
+                        // non-raw subdomain requires every query response
+                        // to carry an IC-Certificate header proving the
+                        // body matches a hash the canister certified from
+                        // an update context. On the .raw. subdomain the
+                        // boundary skips this check; in either case it's
+                        // safe to include the header (the .raw. path just
+                        // ignores it).
+                        var headers = new List<KeyValuePair<string, string>>(5)
+                        {
+                            new("content-type", asset.ContentType),
+                            new("content-length", asset.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                            new("access-control-allow-origin", "*"),
+                        };
+                        var certHeader = IcCertifiedAssets.BuildHeaderValue(lookupPath);
+                        if (certHeader is not null)
+                        {
+                            headers.Add(new KeyValuePair<string, string>("ic-certificate", certHeader));
+                        }
                         Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
                         {
                             StatusCode = 200,
                             Body = asset.Body,
-                            Headers = new[]
-                            {
-                                new KeyValuePair<string, string>("content-type", asset.ContentType),
-                                new KeyValuePair<string, string>("content-length", asset.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                                new KeyValuePair<string, string>("access-control-allow-origin", "*"),
-                            },
+                            Headers = headers,
                         }));
                         return;
                     }

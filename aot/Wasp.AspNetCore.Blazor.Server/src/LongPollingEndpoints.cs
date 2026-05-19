@@ -31,6 +31,12 @@ namespace Wasp.AspNetCore.Blazor.Server;
 //     app.MapWaspBlazorLongPolling(registry);
 public static class LongPollingEndpoints
 {
+    // Monotonic counter to disambiguate negotiate calls landing in the
+    // same Ic0.time() nanosecond. Same scheme as the query-path negotiate
+    // handler in BlazorOnIcHostingExtensions so connectionIds look
+    // consistent regardless of which path generated them.
+    private static long _negotiateSeq;
+
     public static IEndpointRouteBuilder MapWaspBlazorLongPolling(
         this IEndpointRouteBuilder endpoints,
         IcCircuitTransportRegistry registry,
@@ -62,10 +68,22 @@ public static class LongPollingEndpoints
         // SignalR negotiate. We only advertise LongPolling — Blazor's client
         // honors the order and picks the first transport it supports, so this
         // bypasses the WebSocket/SSE fallback dance.
+        //
+        // ConnectionId scheme: Ic0.time() (ns) + monotonic counter,
+        // hex-encoded. Guid.NewGuid is deterministic under wasi-stub
+        // (no __wasi_random_get), so two clients hitting negotiate at
+        // the same moment would get the same id — unusable. The query-
+        // handler path in BlazorOnIcHostingExtensions uses the same
+        // scheme so an upgraded POST yields a consistent id format.
         endpoints.MapPost(pattern + "/negotiate", async (HttpContext ctx) =>
         {
-            string connectionId = Guid.NewGuid().ToString("N");
-            registry.CreateLongPollingConnection(connectionId);
+            ulong now = Wasp.IcCdk.Ic0.time();
+            ulong seq = (ulong)System.Threading.Interlocked.Increment(ref _negotiateSeq);
+            string connectionId =
+                now.ToString("x16", System.Globalization.CultureInfo.InvariantCulture)
+                + seq.ToString("x16", System.Globalization.CultureInfo.InvariantCulture);
+            // Lazy-create the connection on first POST /_blazor?id=… —
+            // see same comment on the inbound POST handler below.
 
             string json =
                 "{\"connectionId\":\"" + connectionId +
