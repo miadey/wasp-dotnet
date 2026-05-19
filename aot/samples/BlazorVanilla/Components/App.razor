@@ -105,6 +105,25 @@
                 <p id="blazor-status" style="color:#64748b; font-size:0.9rem;">
                     Connecting to Blazor Server (SignalR Long Polling)…
                 </p>
+                @* Visible UI lives OUTSIDE the WaspMarker pair so it
+                   survives the framework's #80 empty-strings-table
+                   render-diff wipe on circuit attach. The count display
+                   + button + status are pure HTML; clicks go through
+                   the JS query-RPC path (waspFastClick) for sub-2s
+                   round-trips. The Counter component still exists for
+                   the architectural demo — its WaspMarker pair makes
+                   blazor.web.js attach the SignalR circuit once on
+                   first page load — but the visible button doesn't
+                   depend on that circuit. *@
+                <p role="status">Current count: <span id="wasp-count">0</span></p>
+                <div style="display:flex; gap:0.75rem; flex-wrap:wrap; margin-top:0.5rem;">
+                    <button class="btn btn-primary" type="button" onclick="waspFastClick()">
+                        Click me
+                    </button>
+                </div>
+                <p id="wasp-fast-status" style="margin-top:0.75rem; color:#64748b; font-size:0.9rem;">
+                    Click round-trip via query RPC (~1 s on local dfx).
+                </p>
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Counter)))
                 <Counter />
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(Counter)))
