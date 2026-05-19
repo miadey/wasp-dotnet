@@ -117,6 +117,90 @@
        one. *@
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
 
+    @* Enhanced in-page navigation — intercepts internal <a href> clicks,
+       fetches the target URL (~50 ms from the pre-rendered query path),
+       splices the new <main> into the DOM, updates history. No full page
+       reload means blazor.web.js and any attached circuit stay alive
+       across page changes — handshake warmup happens once per session
+       instead of per page visit. *@
+    <script>
+        (function () {
+            function isInternalLink(a) {
+                if (!a) return false;
+                const href = a.getAttribute('href');
+                if (!href) return false;
+                if (href.startsWith('http://') || href.startsWith('https://')) return false;
+                if (href.startsWith('#')) return false;
+                if (href.startsWith('mailto:') || href.startsWith('tel:')) return false;
+                if (a.getAttribute('target') === '_blank') return false;
+                return true;
+            }
+
+            async function navigateTo(url, addToHistory) {
+                try {
+                    const r = await fetch(url, { headers: { 'X-Wasp-EnhancedNav': '1' } });
+                    if (!r.ok) {
+                        window.location.href = url;
+                        return;
+                    }
+                    const html = await r.text();
+                    const dom = new DOMParser().parseFromString(html, 'text/html');
+                    const newMain = dom.querySelector('main');
+                    const curMain = document.querySelector('main');
+                    if (newMain && curMain) {
+                        curMain.innerHTML = newMain.innerHTML;
+                        // Re-execute inline scripts in the new <main>
+                        // (the count-restoring JS, etc.). DOMParser-set
+                        // innerHTML does NOT execute scripts.
+                        curMain.querySelectorAll('script').forEach(s => {
+                            const n = document.createElement('script');
+                            if (s.src) n.src = s.src;
+                            else n.textContent = s.textContent;
+                            s.parentNode.replaceChild(n, s);
+                        });
+                    }
+                    if (dom.title) document.title = dom.title;
+                    if (addToHistory) history.pushState({ wasp: true }, '', url);
+
+                    // Re-evaluate sidebar nav active class
+                    const path = new URL(url, document.baseURI).pathname.replace(/\/$/, '');
+                    document.querySelectorAll('aside.sidebar .nav a').forEach(link => {
+                        const lhref = link.getAttribute('href') || '';
+                        const lpath = lhref === '' ? '' : ('/' + lhref).replace(/\/$/, '');
+                        const isActive = (lpath === '' && path === '') || (lpath !== '' && path === lpath);
+                        link.classList.toggle('active', isActive);
+                    });
+
+                    // If the new <main> contains a Blazor server marker
+                    // (Counter page), let blazor.web.js know to scan it.
+                    if (curMain && curMain.innerHTML.indexOf('<!--Blazor:') !== -1) {
+                        if (window.Blazor && window.Blazor._internal &&
+                            typeof window.Blazor._internal.attachRootComponents === 'function') {
+                            try { window.Blazor._internal.attachRootComponents(); }
+                            catch (e) { /* best effort */ }
+                        }
+                    }
+                } catch (e) {
+                    // Network failure or parse error — fall back to a
+                    // real navigation so the browser handles it.
+                    window.location.href = url;
+                }
+            }
+
+            document.addEventListener('click', (e) => {
+                if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+                const a = e.target.closest && e.target.closest('a');
+                if (!isInternalLink(a)) return;
+                e.preventDefault();
+                navigateTo(a.href, /*addToHistory*/ true);
+            });
+
+            window.addEventListener('popstate', () => {
+                navigateTo(window.location.href, /*addToHistory*/ false);
+            });
+        })();
+    </script>
+
     @* Fast-click path + handshake-status hider. waspFastClick() hits the
        /api/click query endpoint (~50 ms RTT). The MutationObserver
        watches for blazor.web.js's "connected" log signal and hides the

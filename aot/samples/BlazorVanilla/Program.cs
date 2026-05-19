@@ -89,9 +89,16 @@ public static class Program
             // .GetResult() without disposing the host.
             app.RunOnIC();
 
-            // Pre-render the SSR shell for the home route so cold loads
-            // serve from the ~5 ms query path.
+            // Pre-render every page so each route serves from the
+            // ~5-50 ms query-path static-asset cache instead of running
+            // the full ASP.NET render pipeline through update consensus
+            // on each request. Navigation between pages then feels
+            // instant. The Counter page's WaspMarker stays embedded in
+            // the cached HTML — blazor.web.js still attaches its circuit
+            // on first Counter load.
             IcServer.RegisterRenderedPath("/");
+            IcServer.RegisterRenderedPath("/counter");
+            IcServer.RegisterRenderedPath("/weather");
         }
         catch (System.Exception ex)
         {
