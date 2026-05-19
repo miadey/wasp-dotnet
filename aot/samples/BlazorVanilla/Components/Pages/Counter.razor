@@ -1,20 +1,16 @@
 @page "/counter"
 
-@* Interactivity comes from WaspMarkers.ServerStart wrapping this
-   component in App.razor — NOT from @rendermode InteractiveServer,
-   which trips the framework's ServerComponentSerializer.GetTypeInfo
-   reflection path (JsonSerializerIsReflectionDisabled per #76). The
-   Wasp marker + CircuitHubFacade chain delivers the same interactive
-   semantics without the JSON reflection. *@
+@* Counter component — interactivity via WaspMarkers wrapping in App.razor
+   (not @rendermode InteractiveServer — that path trips #76 JSON reflection).
 
-<PageTitle>Counter</PageTitle>
+   The component intentionally renders ONLY the dynamic parts (count value
+   + button). The static <h1>Counter</h1> + <PageTitle> live in App.razor
+   outside the marker boundary so they survive #80's empty-strings-table
+   delta-batch wipe on circuit attach. *@
 
-<h1>Counter</h1>
-
-@* id="wasp-count" is required so the wasp-bridge.js workaround for #80
-   (RenderBatchWriter strings table empty for delta batches on wasm32-wasi
-   AOT) can find this span and inject the post-click count value. Without
-   it the framework's delta-batch DOM patch leaves the span empty. *@
+@* id="wasp-count" is required so the wasp-bridge.js post-click count
+   restore (CircuitHubFacade._wapsClickCount + JS.BeginInvokeJS
+   waspSetCount) can find this span. *@
 <p role="status">Current count: <span id="wasp-count">@currentCount</span></p>
 
 <button class="btn btn-primary" @onclick="IncrementCount">

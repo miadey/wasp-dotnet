@@ -86,11 +86,12 @@
         <main>
             @if (pageType == typeof(Counter))
             {
-                @* Wasp markers wrap ONLY the interactive Counter so
-                   blazor.web.js opens a circuit just for it. Sidebar
-                   stays static. Avoids the framework's @rendermode
-                   InteractiveServer path (which trips
-                   JsonSerializerIsReflectionDisabled — #76). *@
+                @* <h1> stays OUTSIDE the WaspMarker pair so it survives
+                   the framework's #80 empty-strings-table render-diff wipe
+                   on circuit attach. The Counter component itself renders
+                   only the dynamic count + button — the parts that must
+                   update on click. *@
+                <h1>Counter</h1>
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Counter)))
                 <Counter />
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(Counter)))
