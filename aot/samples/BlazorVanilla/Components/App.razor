@@ -122,7 +122,10 @@
                     </button>
                 </div>
                 <p id="wasp-fast-status" style="margin-top:0.75rem; color:#64748b; font-size:0.9rem;">
-                    Click round-trip via query RPC (~1 s on local dfx).
+                    Count is global — persisted in canister stable memory at
+                    offset 0, shared across all users. Click round-trip is an
+                    update call (~2–4 s consensus) because the write hits
+                    stable memory.
                 </p>
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Counter)))
                 <Counter />
@@ -227,23 +230,36 @@
        "Connecting…" status when the slow path becomes responsive. *@
     <script>
         (function () {
-            let _waspCount = 0;
             window.waspFastClick = async function () {
                 const span = document.getElementById('wasp-count');
                 const status = document.getElementById('wasp-fast-status');
                 const t0 = performance.now();
+                if (status) status.textContent = 'Sending update call to canister…';
                 try {
-                    const r = await fetch('/api/click?c=' + _waspCount);
+                    const r = await fetch('/api/click', { method: 'POST' });
                     const j = await r.json();
-                    _waspCount = j.count;
                     if (span) span.textContent = String(j.count);
                     const dur = Math.round(performance.now() - t0);
                     if (status) status.textContent =
-                        'Fast click round-trip: ' + dur + ' ms (count=' + j.count + ')';
+                        'Update round-trip: ' + dur + ' ms — count is now ' + j.count +
+                        ' (shared across all users, persisted in stable memory).';
                 } catch (e) {
-                    if (status) status.textContent = 'Fast click error: ' + e.message;
+                    if (status) status.textContent = 'Click error: ' + e.message;
                 }
             };
+
+            // Fetch the current global count on initial page load so the
+            // <span> shows the real value instead of the static "0" baked
+            // into the pre-rendered HTML. Query call — fast (~50 ms).
+            (async function () {
+                const span = document.getElementById('wasp-count');
+                if (!span) return;
+                try {
+                    const r = await fetch('/api/count');
+                    const j = await r.json();
+                    span.textContent = String(j.count);
+                } catch (_) { /* leave the "0" baseline */ }
+            })();
 
             // Hide the "Connecting…" banner once the Blazor circuit is
             // actually connected. blazor.web.js logs to console; we

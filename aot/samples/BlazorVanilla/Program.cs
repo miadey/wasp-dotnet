@@ -61,24 +61,26 @@ public static class Program
 
             var app = builder.Build();
 
-            // Fast-click query endpoint — GET /api/click?c=N → {"count": N+1}.
-            // Runs as an IC query call (no consensus, ~50 ms RTT) so it
-            // gives near-instant feedback while the SignalR Long Polling
-            // handshake for the slow-click path is still warming up.
-            // No persistence — the JS client keeps the running count.
-            // Writes the response directly to HttpResponse to avoid the
-            // RequestDelegateGenerator's JsonTypeInfo source-gen path,
-            // which fails under reflection-disabled JSON.
-            app.MapGet("/api/click", async (Microsoft.AspNetCore.Http.HttpContext ctx) =>
+            // Click counter — shared global state in stable memory at
+            // offset 0. POST /api/click increments and persists; GET
+            // /api/count fast-reads the current value. Every browser
+            // session sees the same count, and it survives upgrades.
+            //
+            // The cost: POST goes through http_request_update (~2–4 s
+            // consensus) because writes to stable memory must reach
+            // consensus. GET stays on the query fast-path (~50 ms).
+            app.MapPost("/api/click", async (Microsoft.AspNetCore.Http.HttpContext ctx) =>
             {
-                int c = 0;
-                if (ctx.Request.Query.TryGetValue("c", out var raw)
-                    && int.TryParse(raw.ToString(), out var parsed))
-                {
-                    c = parsed;
-                }
+                int count = ClickCounterStableStore.Increment();
                 ctx.Response.ContentType = "application/json; charset=utf-8";
-                await ctx.Response.WriteAsync("{\"count\":" + (c + 1) + "}");
+                await ctx.Response.WriteAsync("{\"count\":" + count + "}");
+            });
+
+            app.MapGet("/api/count", async (Microsoft.AspNetCore.Http.HttpContext ctx) =>
+            {
+                int count = ClickCounterStableStore.Read();
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                await ctx.Response.WriteAsync("{\"count\":" + count + "}");
             });
 
             // Weather "file in stable memory" — GET /api/weather dumps the
