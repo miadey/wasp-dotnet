@@ -64,16 +64,20 @@
     </style>
 </head>
 
-<body>
-    @{
-        var path = "/" + Nav.ToBaseRelativePath(Nav.Uri).TrimStart('/').Split('?')[0];
-        Type pageType = path switch
-        {
-            "/counter" => typeof(Counter),
-            "/weather" => typeof(Weather),
-            _ => typeof(Home),
-        };
-    }
+@{
+    var path = "/" + Nav.ToBaseRelativePath(Nav.Uri).TrimStart('/').Split('?')[0];
+    Type pageType = path switch
+    {
+        "/counter" => typeof(Counter),
+        "/weather" => typeof(Weather),
+        _ => typeof(Home),
+    };
+    string currentPage = pageType == typeof(Counter) ? "counter"
+                        : pageType == typeof(Weather) ? "weather"
+                        : "home";
+}
+<body data-current-page="@currentPage">
+
     <div class="page">
         <aside class="sidebar">
             <a class="brand" href="/">Blazor on ICP</a>
@@ -123,17 +127,10 @@
         body[data-current-page="weather"] #weather-shell,
         body[data-current-page="home"] #home-shell { display: block; }
     </style>
-    <script>
-        // Set initial data-current-page from URL (server-rendered HTML
-        // doesn't know which page we're on until the JS engines).
-        (function () {
-            const p = window.location.pathname;
-            const which =
-                p === '/counter' || p.startsWith('/counter/') ? 'counter' :
-                p === '/weather' || p.startsWith('/weather/') ? 'weather' : 'home';
-            document.body.setAttribute('data-current-page', which);
-        })();
-    </script>
+    @* Server-side render sets body[data-current-page] from pageType.
+       JS below updates it on enhanced-nav transitions. No flash of
+       all-shells-hidden because CSS picks the right one from initial
+       HTML. *@
 
     @* blazor.web.js + wasp-bridge.js so Counter's click handler is
        wired through a live circuit when the Counter page is shown.
