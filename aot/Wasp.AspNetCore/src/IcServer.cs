@@ -71,10 +71,28 @@ public sealed class IcServer : IServer
     /// are NOT persisted — queries roll back state changes at the end
     /// of the call.
     /// </summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Func<string, (byte[] Body, string ContentType)>> _queryHandlers =
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Func<string, string, (byte[] Body, string ContentType)?>> _queryHandlers =
         new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Simple registration: handler always returns a body, ignores HTTP
+    /// method. Used by metadata endpoints like /_blazor/negotiate where
+    /// the response is always the same shape.
+    /// </summary>
     public static void RegisterQueryHandler(string pathPrefix, Func<string, (byte[] Body, string ContentType)> handler)
+    {
+        if (pathPrefix is null) throw new ArgumentNullException(nameof(pathPrefix));
+        if (handler is null) throw new ArgumentNullException(nameof(handler));
+        _queryHandlers[pathPrefix] = (url, _) => handler(url);
+    }
+
+    /// <summary>
+    /// Method-aware registration with opt-out: handler receives (url, method)
+    /// and may return null to bail to the update path. Used by the /_blazor
+    /// long-poll endpoint to serve empty-queue polls from query (~50 ms) and
+    /// fall through to update only when there's queued data to drain (gh #115).
+    /// </summary>
+    public static void RegisterQueryHandler(string pathPrefix, Func<string, string, (byte[] Body, string ContentType)?> handler)
     {
         if (pathPrefix is null) throw new ArgumentNullException(nameof(pathPrefix));
         if (handler is null) throw new ArgumentNullException(nameof(handler));
@@ -217,30 +235,33 @@ public sealed class IcServer : IServer
                     string lookupPath = qIdx >= 0 ? probeReq.Url.Substring(0, qIdx) : probeReq.Url;
 
                     // Dynamic query handlers — match by exact path,
-                    // handler computes body from full URL (incl. query
-                    // string). Used for stateless RPC patterns like
-                    // /api/click?c=5 → {"count":6} and stateless
-                    // metadata endpoints like POST /_blazor/negotiate
-                    // (the SignalR Long Polling handshake's first
-                    // round-trip — see gh #113). Accepts GET or POST;
-                    // the registered handler is server-controlled, so
-                    // exposing both methods on the same path is safe.
+                    // handler computes body from (url, method). Used
+                    // for stateless RPC (/api/click), metadata
+                    // (POST /_blazor/negotiate — gh #113), and the
+                    // empty-queue fast path for the long-poll GET
+                    // (gh #115). The method-aware handler may return
+                    // null to bail to the update path when query
+                    // semantics can't satisfy the request.
                     if ((probeReq.Method == "GET" || probeReq.Method == "POST")
                         && _queryHandlers.TryGetValue(lookupPath, out var handler))
                     {
-                        var (hBody, hContentType) = handler(probeReq.Url);
-                        Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
+                        var result = handler(probeReq.Url, probeReq.Method);
+                        if (result is { } r)
                         {
-                            StatusCode = 200,
-                            Body = hBody,
-                            Headers = new[]
+                            Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
                             {
-                                new KeyValuePair<string, string>("content-type", hContentType),
-                                new KeyValuePair<string, string>("content-length", hBody.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                                new KeyValuePair<string, string>("access-control-allow-origin", "*"),
-                            },
-                        }));
-                        return;
+                                StatusCode = 200,
+                                Body = r.Body,
+                                Headers = new[]
+                                {
+                                    new KeyValuePair<string, string>("content-type", r.ContentType),
+                                    new KeyValuePair<string, string>("content-length", r.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                    new KeyValuePair<string, string>("access-control-allow-origin", "*"),
+                                },
+                            }));
+                            return;
+                        }
+                        // Handler returned null → fall through to upgrade.
                     }
 
                     if (probeReq.Method == "GET"

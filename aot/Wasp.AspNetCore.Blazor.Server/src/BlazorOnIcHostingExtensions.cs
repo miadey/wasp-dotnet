@@ -165,6 +165,65 @@ public static class BlazorOnIcHostingExtensions
                 }
             };
             app.MapWaspBlazorLongPolling(registry);
+
+            // gh #115 — fast-path empty long-poll GETs through canister_query.
+            // Most polls during warmup return an empty body because the
+            // server has nothing queued yet (waiting on circuit init or
+            // user events). Each currently costs ~1.2 s of consensus
+            // because IcServer.Dispatch upgrades all /_blazor GETs to
+            // update. Looking up the connection + checking Outbound.IsEmpty
+            // is purely read-only — perfectly safe in a query call.
+            //
+            // Handler returns:
+            //   - empty body (200 application/octet-stream) when the
+            //     connection doesn't exist (lazy-create deferred to the
+            //     next POST) or the outbound queue is empty
+            //   - null when there's queued data → bails to the update
+            //     path, where MapGet's DrainOutbound mutates the queue
+            //     and returns the actual bytes
+            IcServer.RegisterQueryHandler("/_blazor", (url, method) =>
+            {
+                if (method != "GET")
+                {
+                    // POST handshake / StartCircuit / DELETE close all
+                    // need to mutate state — fall through to update.
+                    return null;
+                }
+
+                // Extract `id` from query string. Format: /_blazor?id=X[&...]
+                string? id = null;
+                int q = url.IndexOf('?');
+                if (q >= 0)
+                {
+                    foreach (var pair in url.Substring(q + 1).Split('&'))
+                    {
+                        if (pair.StartsWith("id=", StringComparison.Ordinal))
+                        {
+                            id = pair.Substring(3);
+                            break;
+                        }
+                    }
+                }
+
+                if (string.IsNullOrEmpty(id))
+                {
+                    // Malformed — let the update path 400 it.
+                    return null;
+                }
+
+                var conn = registry.GetLongPollingConnection(id);
+                if (conn is null || conn.Outbound.IsEmpty)
+                {
+                    // Connection doesn't exist yet (negotiate ran but no
+                    // POST has lazy-created it) OR queue is empty. Either
+                    // way, the response is just empty bytes — serve from
+                    // query, save ~1.2 s of consensus.
+                    return (Array.Empty<byte>(), "application/octet-stream");
+                }
+
+                // Queue has data → drain needs to mutate → upgrade.
+                return null;
+            });
         }
 
         // Embedded static-asset endpoint (blazor.web.js) AND the in-
