@@ -81,6 +81,31 @@ public static class Program
                 await ctx.Response.WriteAsync("{\"count\":" + (c + 1) + "}");
             });
 
+            // Weather "file in stable memory" — GET /api/weather dumps the
+            // raw CSV; POST /api/weather/seed writes the default 5 rows.
+            // GET is a query call (~50 ms RTT, reads stable memory).
+            // POST is an update call (~2–4 s, the IC gateway upgrades all
+            // POSTs to http_request_update), which is what lets the write
+            // actually persist across messages and canister upgrades.
+            app.MapGet("/api/weather", async (Microsoft.AspNetCore.Http.HttpContext ctx) =>
+            {
+                var csv = WeatherStableStore.ReadCsvOrEmpty();
+                ctx.Response.ContentType = "text/csv; charset=utf-8";
+                await ctx.Response.WriteAsync(csv);
+            });
+
+            app.MapPost("/api/weather/seed", async (Microsoft.AspNetCore.Http.HttpContext ctx) =>
+            {
+                var csv = WeatherStableStore.DefaultCsv();
+                WeatherStableStore.WriteCsv(csv);
+                // Refresh the pre-rendered /weather cache so the next GET
+                // serves HTML that reflects the just-persisted bytes.
+                IcServer.RegisterRenderedPath("/weather");
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                await ctx.Response.WriteAsync(
+                    "{\"seeded\":true,\"bytes\":" + System.Text.Encoding.UTF8.GetByteCount(csv) + "}");
+            });
+
             // App-side mirror — auto-detects the BlazorOnIcMarker via DI
             // and wires Long-Polling / JS bridge / static assets.
             app.UseInternetComputer();
