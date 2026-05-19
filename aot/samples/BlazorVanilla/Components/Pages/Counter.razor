@@ -1,48 +1,15 @@
 @page "/counter"
 
-@* Two click paths to compare IC latency profiles:
-
-   • "Click me (Blazor Server)" — @onclick fires through the circuit:
-     blazor.web.js → /_blazor POST (IC update call, ~2 s consensus) →
-     CircuitHubFacade dispatches → IncrementCount → render diff → next
-     /_blazor poll. End-to-end 5–15 s including poll cycle. This is
-     authentic Blazor Server semantics on a decentralised replica.
-
-   • "Fast click (query RPC)" — JS waspFastClick() in App.razor calls
-     /api/click?c=N (IC query call, ~50 ms RTT). No consensus, no
-     persistence — the count is tracked client-side. Demonstrates the
-     fastest user-visible IC interaction.
-
-   The slow button only becomes responsive once the SignalR Long
-   Polling handshake completes (~13 s after page load — visible as
-   #blazor-status in App.razor). The fast button works immediately. *@
-
-@* id="wasp-count" is required so the wasp-bridge.js post-click count
-   restore (CircuitHubFacade._wapsClickCount + JS.BeginInvokeJS
-   waspSetCount) can find this span. *@
-<p role="status">Current count: <span id="wasp-count">@currentCount</span></p>
-
-<div style="display:flex; gap:0.75rem; flex-wrap:wrap; margin-top:0.5rem;">
-    @* Single "Click me" button using the query-RPC fast path (~1 s
-       round-trip on local dfx, well under the 2 s goal). The Blazor
-       Server @onclick handler is retained on the component for the
-       slow-click path (still functional via the SignalR Long Polling
-       circuit that's pre-attached on page load), but the visible UX
-       button calls the query path so every click is sub-2-s.
-
-       The two-update-call POST+GET round-trip the pure Blazor Server
-       transport requires (~2–4 s minimum on IC consensus) is left as
-       the "advanced" demo of authentic interactive semantics on a
-       decentralised replica. *@
-    <button class="btn btn-primary" type="button"
-            onclick="waspFastClick()">
-        Click me
-    </button>
-</div>
-
-<p id="wasp-fast-status" style="margin-top:0.75rem; color:#64748b; font-size:0.9rem;">
-    Click round-trip via query RPC (~1 s on local dfx).
-</p>
+@* Counter component intentionally renders no visible content. The
+   user-facing Counter UI (count display + Click-me button + status)
+   lives in App.razor's #counter-shell ABOVE the WaspMarker pair so
+   it survives the framework's #80 empty-strings-table render-diff
+   wipe. The Counter component still exists for the architectural
+   demo — blazor.web.js attaches the SignalR circuit to its marker
+   on first page load, satisfying the warmup-once-per-session goal —
+   but it has no visible UI of its own. The IncrementCount handler
+   stays in case a future build wants to wire it back through the
+   slow click path. *@
 
 @code {
     private int currentCount = 0;
