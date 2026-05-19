@@ -117,12 +117,15 @@
        one. *@
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
 
-    @* Enhanced in-page navigation — intercepts internal <a href> clicks,
-       fetches the target URL (~50 ms from the pre-rendered query path),
-       splices the new <main> into the DOM, updates history. No full page
-       reload means blazor.web.js and any attached circuit stay alive
-       across page changes — handshake warmup happens once per session
-       instead of per page visit. *@
+    @* Custom enhanced navigation. blazor.web.js's NATIVE enhanced nav
+       (which would handle marker rescan correctly via its internal APIs)
+       doesn't engage on our pages because the framework's auto-detection
+       relies on a stock <Router>-driven page tree we don't have (see
+       #107). Custom JS below intercepts <a href> clicks, fetches the
+       new page, splices <main>. /counter destinations are special-cased
+       to fall back to full reload because splicing alone leaves the
+       Counter click handler unwired (tracked in #116 — needs the
+       framework-internal attachRootComponentToLogicalElement call). *@
     <script>
         (function () {
             function isInternalLink(a) {
