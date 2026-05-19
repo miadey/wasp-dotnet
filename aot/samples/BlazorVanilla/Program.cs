@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Wasp.AspNetCore;
 using Wasp.AspNetCore.Blazor.Server;
 using Wasp.IcCdk;
@@ -59,6 +60,26 @@ public static class Program
             builder.UseInternetComputer<App>();
 
             var app = builder.Build();
+
+            // Fast-click query endpoint — GET /api/click?c=N → {"count": N+1}.
+            // Runs as an IC query call (no consensus, ~50 ms RTT) so it
+            // gives near-instant feedback while the SignalR Long Polling
+            // handshake for the slow-click path is still warming up.
+            // No persistence — the JS client keeps the running count.
+            // Writes the response directly to HttpResponse to avoid the
+            // RequestDelegateGenerator's JsonTypeInfo source-gen path,
+            // which fails under reflection-disabled JSON.
+            app.MapGet("/api/click", async (Microsoft.AspNetCore.Http.HttpContext ctx) =>
+            {
+                int c = 0;
+                if (ctx.Request.Query.TryGetValue("c", out var raw)
+                    && int.TryParse(raw.ToString(), out var parsed))
+                {
+                    c = parsed;
+                }
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                await ctx.Response.WriteAsync("{\"count\":" + (c + 1) + "}");
+            });
 
             // App-side mirror — auto-detects the BlazorOnIcMarker via DI
             // and wires Long-Polling / JS bridge / static assets.

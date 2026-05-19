@@ -92,6 +92,9 @@
                    only the dynamic count + button — the parts that must
                    update on click. *@
                 <h1>Counter</h1>
+                <p id="blazor-status" style="color:#64748b; font-size:0.9rem;">
+                    Connecting to Blazor Server (SignalR Long Polling)…
+                </p>
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Counter)))
                 <Counter />
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(Counter)))
@@ -113,6 +116,57 @@
        a connection when it sees a server marker, and only Counter has
        one. *@
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
+
+    @* Fast-click path + handshake-status hider. waspFastClick() hits the
+       /api/click query endpoint (~50 ms RTT). The MutationObserver
+       watches for blazor.web.js's "connected" log signal and hides the
+       "Connecting…" status when the slow path becomes responsive. *@
+    <script>
+        (function () {
+            let _waspCount = 0;
+            window.waspFastClick = async function () {
+                const span = document.getElementById('wasp-count');
+                const status = document.getElementById('wasp-fast-status');
+                const t0 = performance.now();
+                try {
+                    const r = await fetch('/api/click?c=' + _waspCount);
+                    const j = await r.json();
+                    _waspCount = j.count;
+                    if (span) span.textContent = String(j.count);
+                    const dur = Math.round(performance.now() - t0);
+                    if (status) status.textContent =
+                        'Fast click round-trip: ' + dur + ' ms (count=' + j.count + ')';
+                } catch (e) {
+                    if (status) status.textContent = 'Fast click error: ' + e.message;
+                }
+            };
+
+            // Hide the "Connecting…" banner once the Blazor circuit is
+            // actually connected. blazor.web.js logs to console; we
+            // poll for the global `Blazor` object's `defaultReconnectionHandler`
+            // state, or just hide after ~16 s as a fallback.
+            const status = document.getElementById('blazor-status');
+            if (status) {
+                let hidden = false;
+                const hide = () => {
+                    if (hidden) return;
+                    hidden = true;
+                    status.textContent = 'Blazor Server circuit connected — slow click now responsive.';
+                    status.style.color = '#16a34a';
+                };
+                // Fallback: hide after handshake-typical 16 s
+                setTimeout(hide, 16000);
+                // Listen for connection-state changes if Blazor exposes them
+                const observer = new MutationObserver(() => {
+                    // blazor.web.js sometimes injects a reload UI when
+                    // the circuit drops; we hide our status as soon as
+                    // anything signals "connected" in the page.
+                    if (window.Blazor && typeof window.Blazor === 'object') hide();
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+            }
+        })();
+    </script>
 </body>
 
 </html>

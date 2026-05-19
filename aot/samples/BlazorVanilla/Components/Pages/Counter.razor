@@ -1,21 +1,40 @@
 @page "/counter"
 
-@* Counter component — interactivity via WaspMarkers wrapping in App.razor
-   (not @rendermode InteractiveServer — that path trips #76 JSON reflection).
+@* Two click paths to compare IC latency profiles:
 
-   The component intentionally renders ONLY the dynamic parts (count value
-   + button). The static <h1>Counter</h1> + <PageTitle> live in App.razor
-   outside the marker boundary so they survive #80's empty-strings-table
-   delta-batch wipe on circuit attach. *@
+   • "Click me (Blazor Server)" — @onclick fires through the circuit:
+     blazor.web.js → /_blazor POST (IC update call, ~2 s consensus) →
+     CircuitHubFacade dispatches → IncrementCount → render diff → next
+     /_blazor poll. End-to-end 5–15 s including poll cycle. This is
+     authentic Blazor Server semantics on a decentralised replica.
+
+   • "Fast click (query RPC)" — JS waspFastClick() in App.razor calls
+     /api/click?c=N (IC query call, ~50 ms RTT). No consensus, no
+     persistence — the count is tracked client-side. Demonstrates the
+     fastest user-visible IC interaction.
+
+   The slow button only becomes responsive once the SignalR Long
+   Polling handshake completes (~13 s after page load — visible as
+   #blazor-status in App.razor). The fast button works immediately. *@
 
 @* id="wasp-count" is required so the wasp-bridge.js post-click count
    restore (CircuitHubFacade._wapsClickCount + JS.BeginInvokeJS
    waspSetCount) can find this span. *@
 <p role="status">Current count: <span id="wasp-count">@currentCount</span></p>
 
-<button class="btn btn-primary" @onclick="IncrementCount">
-    Click me
-</button>
+<div style="display:flex; gap:0.75rem; flex-wrap:wrap; margin-top:0.5rem;">
+    <button class="btn btn-primary" @onclick="IncrementCount">
+        Click me (Blazor Server, 5–15 s)
+    </button>
+    <button class="btn" type="button" style="background:#16a34a;"
+            onclick="waspFastClick()">
+        Fast click (query RPC, ~50 ms)
+    </button>
+</div>
+
+<p id="wasp-fast-status" style="margin-top:0.75rem; color:#64748b; font-size:0.9rem;">
+    Click the green button to compare latencies.
+</p>
 
 @code {
     private int currentCount = 0;
