@@ -110,7 +110,7 @@
         </main>
     </div>
 
-    @* blazor.web.js + wasp-bridge.js so Counter's @onclick handler is
+    @* blazor.web.js + wasp-bridge.js so Counter's click handler is
        wired through a live circuit when the Counter page is shown.
        Loading on every page is harmless — blazor.web.js only initiates
        a connection when it sees a server marker, and only Counter has
@@ -171,14 +171,28 @@
                         link.classList.toggle('active', isActive);
                     });
 
-                    // If the new <main> contains a Blazor server marker
-                    // (Counter page), let blazor.web.js know to scan it.
-                    if (curMain && curMain.innerHTML.indexOf('<!--Blazor:') !== -1) {
-                        if (window.Blazor && window.Blazor._internal &&
-                            typeof window.Blazor._internal.attachRootComponents === 'function') {
-                            try { window.Blazor._internal.attachRootComponents(); }
-                            catch (e) { /* best effort */ }
-                        }
+                    // Fire blazor.web.js's enhanced-navigation events so
+                    // its own marker-scan logic runs over the spliced-in
+                    // content. After this dispatch the framework should
+                    // attach the circuit to any new Counter marker — or
+                    // recognise that the marker matches the already-
+                    // attached circuit and reuse it without re-handshake.
+                    document.dispatchEvent(new CustomEvent('enhancedload', {
+                        bubbles: true,
+                        cancelable: false,
+                        detail: { url: url },
+                    }));
+                    document.dispatchEvent(new CustomEvent('enhancedNavigationCompleted', {
+                        bubbles: true,
+                        cancelable: false,
+                        detail: { url: url },
+                    }));
+                    // Best-effort: also try the internal attach API in
+                    // case the events alone don't trigger it.
+                    if (window.Blazor && window.Blazor._internal &&
+                        typeof window.Blazor._internal.attachRootComponents === 'function') {
+                        try { window.Blazor._internal.attachRootComponents(); }
+                        catch (e) { /* swallow — best effort */ }
                     }
                 } catch (e) {
                     // Network failure or parse error — fall back to a
@@ -191,6 +205,22 @@
                 if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
                 const a = e.target.closest && e.target.closest('a');
                 if (!isInternalLink(a)) return;
+
+                // Browser-verified gap: when we splice in /counter HTML
+                // via enhanced nav, blazor.web.js marker-discovery scan
+                // does not re-trigger from the events we dispatch, so
+                // the Counter click handler never wires up. Until we
+                // find the right framework API to force re-scan
+                // (tracked separately), let any navigation TO /counter
+                // fall through to a regular full-page reload — the page
+                // works correctly that way, even if it re-pays the 3.3 s
+                // SignalR warmup. All other transitions (/, /weather)
+                // still benefit from instant enhanced nav.
+                const targetPath = new URL(a.href, document.baseURI).pathname;
+                if (targetPath === '/counter' || targetPath.startsWith('/counter/')) {
+                    return; // let the browser do a real navigation
+                }
+
                 e.preventDefault();
                 navigateTo(a.href, /*addToHistory*/ true);
             });
