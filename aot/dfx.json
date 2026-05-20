@@ -19,6 +19,12 @@
       "candid": "samples/HelloWeb/helloweb.did",
       "build": []
     },
+    "issue80repro": {
+      "type": "custom",
+      "wasm": "samples/Issue80Repro/Issue80Repro.canister.wasm",
+      "candid": "samples/Issue80Repro/issue80repro.did",
+      "build": []
+    },
     "hellofetch": {
       "type": "custom",
       "wasm": "samples/HelloFetch/HelloFetch.canister.wasm",
