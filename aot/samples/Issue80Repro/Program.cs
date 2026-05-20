@@ -77,6 +77,19 @@ public static class Issue80ReproCanister
         var arrViaMethod = new MiniFrame[1];
         CopyToSlot(src, arrViaMethod, 0);
 
+        // Variant D: field-by-field assignment. AVOIDS the GT_STORE_BLK
+        // codegen path. If my theory about line 2468 of llvmcodegen.cpp
+        // is right (pointer fields don't advance bytesStored, then the
+        // subsequent padding-fill memcpy overwrites them), this variant
+        // should preserve BOTH fields because we never go through
+        // storeObjAtAddress — each field is set via stind.ref / stfld.
+        var arrFieldwise = new MiniFrame[1];
+        arrFieldwise[0].Sequence = src.Sequence;
+        arrFieldwise[0].Tag = src.Tag;
+        arrFieldwise[0].IntegerUnion = src.IntegerUnion;
+        arrFieldwise[0].StringField = src.StringField;
+        arrFieldwise[0].SecondaryRef = src.SecondaryRef;
+
         // Read back. If the AOT-LLVM struct-copy lost offset 16, the
         // string is null.
         var roundTripped = arr[0];
@@ -99,12 +112,14 @@ public static class Issue80ReproCanister
         object? rr = roundTripped.SecondaryRef;
         lines.AppendLine($"sb==null? {sb==null}  rb==null? {rb==null}  sr==null? {sr==null}  rr==null? {rr==null}");
 
-        // Variant B/C readback
+        // Variant B/C/D readback
         lines.AppendLine();
-        lines.AppendLine($"arrDirect[0].StringField    = {Describe(arrDirect[0].StringField)}");
-        lines.AppendLine($"arrDirect[0].SecondaryRef   = {Describe(arrDirect[0].SecondaryRef)}");
-        lines.AppendLine($"arrViaMethod[0].StringField = {Describe(arrViaMethod[0].StringField)}");
-        lines.AppendLine($"arrViaMethod[0].SecondaryRef= {Describe(arrViaMethod[0].SecondaryRef)}");
+        lines.AppendLine($"arrDirect[0].StringField     = {Describe(arrDirect[0].StringField)}");
+        lines.AppendLine($"arrDirect[0].SecondaryRef    = {Describe(arrDirect[0].SecondaryRef)}");
+        lines.AppendLine($"arrViaMethod[0].StringField  = {Describe(arrViaMethod[0].StringField)}");
+        lines.AppendLine($"arrViaMethod[0].SecondaryRef = {Describe(arrViaMethod[0].SecondaryRef)}");
+        lines.AppendLine($"arrFieldwise[0].StringField  = {Describe(arrFieldwise[0].StringField)}  ← field-by-field bypass");
+        lines.AppendLine($"arrFieldwise[0].SecondaryRef = {Describe(arrFieldwise[0].SecondaryRef)}");
 
         bool stringLost = sb != null && rb == null;
         bool secondaryLost = sr != null && rr == null;
