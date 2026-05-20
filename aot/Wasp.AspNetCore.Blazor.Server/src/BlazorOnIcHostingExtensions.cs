@@ -150,18 +150,22 @@ public static class BlazorOnIcHostingExtensions
             // traffic into IcCircuitTransport frames the CircuitHubFacade
             // can dispatch.
             var registry = app.Services.GetRequiredService<IcCircuitTransportRegistry>();
-            CircuitHubFacade? boundFacade = null;
             registry.TransportConnected += transport =>
             {
+                // One facade per circuit, keyed in the registry by the
+                // transport's connectionId. The earlier single-variable
+                // capture worked for one tab but silently overwrote the
+                // previous facade when a second tab connected, breaking
+                // any cross-circuit interaction.
                 var factory = app.Services.GetRequiredService<ICircuitFactory>();
-                boundFacade = CircuitHubFacade.Bind(transport, factory, app.Services);
+                var facade = CircuitHubFacade.Bind(transport, factory, app.Services);
+                registry.RegisterBoundFacade(transport.ConnectionId, facade);
             };
-            registry.TransportDisconnected += async _ =>
+            registry.TransportDisconnected += async transport =>
             {
-                if (boundFacade is not null)
+                if (registry.TryRemoveBoundFacade(transport.ConnectionId, out var facade))
                 {
-                    await boundFacade.DisposeAsync();
-                    boundFacade = null;
+                    await facade.DisposeAsync();
                 }
             };
             app.MapWaspBlazorLongPolling(registry);
@@ -212,12 +216,30 @@ public static class BlazorOnIcHostingExtensions
                 }
 
                 var conn = registry.GetLongPollingConnection(id);
-                if (conn is null || conn.Outbound.IsEmpty)
+                if (conn is null)
                 {
                     // Connection doesn't exist yet (negotiate ran but no
-                    // POST has lazy-created it) OR queue is empty. Either
-                    // way, the response is just empty bytes — serve from
-                    // query, save ~1.2 s of consensus.
+                    // POST has lazy-created it). Cheap empty response.
+                    return (Array.Empty<byte>(), "application/octet-stream");
+                }
+
+                // If the connection has a bound circuit facade, the GET
+                // must go through the update path so MapGet can pump
+                // this circuit's RendererSynchronizationContext.
+                // Otherwise a peer circuit's cross-circuit event would
+                // leave StateHasChanged stuck queued — outbox shows
+                // empty, fast-path returns 0 bytes, the pending diff
+                // never ships. The pump only runs in the update-path
+                // GET handler.
+                if (registry.TryGetBoundFacade(id, out _))
+                {
+                    return null;
+                }
+
+                if (conn.Outbound.IsEmpty)
+                {
+                    // No facade yet (pre-circuit-init handshake polls)
+                    // AND queue is empty → cheap empty response.
                     return (Array.Empty<byte>(), "application/octet-stream");
                 }
 
@@ -244,45 +266,19 @@ public static class BlazorOnIcHostingExtensions
             System.Text.Encoding.UTF8.GetBytes("[]"),
             "application/json; charset=utf-8");
 
-        // gh #113 — POST /_blazor/negotiate is the first round-trip of
-        // the SignalR Long Polling handshake. The response is purely
-        // stateless metadata (a freshly-minted connectionId + transport
-        // list); no canister state mutation needed. Serving it from the
-        // query path drops ~2–4 s of IC consensus latency per page-load
-        // warmup. The lazy-create branch in MapWaspBlazorLongPolling
-        // already handles the case where the first POST /_blazor?id=...
-        // arrives with a connectionId the server hasn't pre-registered,
-        // so deferring `registry.CreateLongPollingConnection` until then
-        // is safe. (If enableInteractiveServer=false, the registry isn't
-        // wired anyway; this handler still returns a valid negotiate
-        // response which the client can use to detect the absence of an
-        // actual circuit.)
-        if (enableInteractiveServer)
-        {
-            IcServer.RegisterQueryHandler("/_blazor/negotiate", _ =>
-            {
-                // Per-call-unique id from Ic0.time() (nanosecond ticks)
-                // + a monotonic counter to disambiguate calls in the
-                // same nanosecond. Guid.NewGuid() is deterministic on
-                // canister because wasi-stub no-ops __wasi_random_get,
-                // so two browsers hitting negotiate get the same id —
-                // unusable. Hex-encoded time+counter is unique enough
-                // for SignalR's connectionId.
-                ulong now = Wasp.IcCdk.Ic0.time();
-                ulong seq = (ulong)System.Threading.Interlocked.Increment(ref _negotiateSeq);
-                string id = now.ToString("x16",
-                                System.Globalization.CultureInfo.InvariantCulture) +
-                            seq.ToString("x16",
-                                System.Globalization.CultureInfo.InvariantCulture);
-                string body =
-                    "{\"connectionId\":\"" + id +
-                    "\",\"connectionToken\":\"" + id +
-                    "\",\"negotiateVersion\":1,\"availableTransports\":[" +
-                    "{\"transport\":\"LongPolling\",\"transferFormats\":[\"Text\",\"Binary\"]}]}";
-                return (System.Text.Encoding.UTF8.GetBytes(body),
-                        "application/json; charset=utf-8");
-            });
-        }
+        // POST /_blazor/negotiate is now handled by the update-path
+        // MapPost in LongPollingEndpoints. The earlier query-fast-path
+        // optimization here (gh #113) saved ~2 s of consensus per
+        // session but broke multi-tab: query-context mutations are
+        // rolled back, so Interlocked.Increment on the monotonic
+        // sequence counter resets between calls, and two browsers
+        // negotiating in the same Ic0.time() nanosecond received the
+        // same connectionId. The handshake POST then routed to a
+        // single shared transport whose _handshakeComplete was already
+        // true, and the second tab's handshake bytes got parsed as
+        // blazorpack — "frame body length 123 exceeds remaining
+        // payload 37". Running negotiate in update mode keeps the
+        // sequence persistent across calls and guarantees unique ids.
 
         // The Wasp JS bridge — waspSetCount, the fetch wrapper, the
         // pre-registered interop bridge. Lives in an embedded resource

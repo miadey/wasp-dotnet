@@ -41,6 +41,16 @@ public static class Program
         DynamicallyAccessedMemberTypes.NonPublicFields,
         "Microsoft.AspNetCore.Components.Rendering.RendererSynchronizationContextDispatcher",
         "Microsoft.AspNetCore.Components")]
+    // Counter.razor's OnCounterChanged reflects into RenderHandle to get
+    // the component's own renderer so it can install the renderer's
+    // RSC as Current and call StateHasChanged synchronously — needed
+    // for cross-circuit reactivity when no thread pool is available.
+    [DynamicDependency(
+        DynamicallyAccessedMemberTypes.NonPublicFields | DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.NonPublicProperties,
+        typeof(Microsoft.AspNetCore.Components.RenderHandle))]
+    [DynamicDependency(
+        "_renderHandle",
+        typeof(Microsoft.AspNetCore.Components.ComponentBase))]
     [ModuleInitializer]
     internal static void Init()
     {

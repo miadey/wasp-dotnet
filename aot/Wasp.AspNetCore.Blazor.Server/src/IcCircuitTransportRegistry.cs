@@ -30,6 +30,15 @@ public sealed class IcCircuitTransportRegistry
     // (B) connectionId map — populated by /_blazor/negotiate.
     private readonly ConcurrentDictionary<string, LongPollingConnection> _lpConnections = new();
 
+    // connectionId → CircuitHubFacade map. Allows the long-poll GET
+    // handler to look up the facade for THIS circuit and pump its
+    // RendererSynchronizationContext before draining the outbox —
+    // which is what unblocks cross-circuit reactivity. Without it,
+    // when circuit A fires a state change that other circuits
+    // subscribe to, the other circuits' StateHasChanged stays queued
+    // on their RSC and the render-diff never reaches them.
+    private readonly ConcurrentDictionary<string, CircuitHubFacade> _boundFacades = new();
+
     public event Action<IcCircuitTransport>? TransportConnected;
     public event Action<IcCircuitTransport>? TransportDisconnected;
 
@@ -168,6 +177,27 @@ public sealed class IcCircuitTransportRegistry
         {
             TransportDisconnected?.Invoke(conn.Transport);
         }
+    }
+
+    // Bound-facade registry. The consumer's TransportConnected handler
+    // calls Register; TransportDisconnected calls TryRemove. The
+    // long-poll GET handler then looks up THIS circuit's facade via
+    // TryGetBoundFacade(connId, …) and pumps its renderer queue.
+    public void RegisterBoundFacade(string connectionId, CircuitHubFacade facade)
+        => _boundFacades[connectionId] = facade;
+
+    public bool TryGetBoundFacade(string connectionId, out CircuitHubFacade facade)
+    {
+        var ok = _boundFacades.TryGetValue(connectionId, out var f);
+        facade = f!;
+        return ok;
+    }
+
+    public bool TryRemoveBoundFacade(string connectionId, out CircuitHubFacade facade)
+    {
+        var ok = _boundFacades.TryRemove(connectionId, out var f);
+        facade = f!;
+        return ok;
     }
 
     // ───────────────────────────────────────────────────────────────────────

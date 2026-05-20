@@ -149,6 +149,7 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
         _circuit = null;
     }
 
+
     // ─── IBlazorHubFacade ────────────────────────────────────────────────
 
     public async ValueTask<string> StartCircuit(

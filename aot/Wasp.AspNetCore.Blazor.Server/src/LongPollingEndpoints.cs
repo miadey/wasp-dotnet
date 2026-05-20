@@ -77,13 +77,36 @@ public static class LongPollingEndpoints
         // scheme so an upgraded POST yields a consistent id format.
         endpoints.MapPost(pattern + "/negotiate", async (HttpContext ctx) =>
         {
+            // ConnectionId scheme: 64-bit Ic0.time() nanoseconds, hex, +
+            // a per-call message-counter byte mixed in from the host
+            // header hash (cheap entropy that's NOT rolled back by
+            // query-context). Two clients negotiating within the same
+            // nanosecond are vanishingly rare, but combining the
+            // request-derived suffix makes the collision surface
+            // empirically zero.
             ulong now = Wasp.IcCdk.Ic0.time();
             ulong seq = (ulong)System.Threading.Interlocked.Increment(ref _negotiateSeq);
+            // Mix in arg-data hash so even if Interlocked rolls back
+            // (it shouldn't in update context but defensive) we still
+            // get uniqueness from the request URL / headers.
+            ulong argHash = 0;
+            foreach (var h in ctx.Request.Headers)
+            {
+                if (h.Key.Equals("host", StringComparison.OrdinalIgnoreCase) ||
+                    h.Key.Equals("user-agent", StringComparison.OrdinalIgnoreCase) ||
+                    h.Key.Equals("traceparent", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var v in h.Value)
+                    {
+                        if (v is null) continue;
+                        foreach (var c in v) argHash = (argHash * 31) + c;
+                    }
+                }
+            }
             string connectionId =
                 now.ToString("x16", System.Globalization.CultureInfo.InvariantCulture)
-                + seq.ToString("x16", System.Globalization.CultureInfo.InvariantCulture);
-            // Lazy-create the connection on first POST /_blazor?id=… —
-            // see same comment on the inbound POST handler below.
+                + (seq ^ argHash).ToString("x16", System.Globalization.CultureInfo.InvariantCulture);
+            Wasp.IcCdk.Reply.Print($"[negotiate] id={connectionId} now={now} seq={seq} argHash={argHash}");
 
             string json =
                 "{\"connectionId\":\"" + connectionId +
@@ -168,6 +191,16 @@ public static class LongPollingEndpoints
             // works even when the first request is a GET poll.
             var conn = registry.GetLongPollingConnection(id)
                        ?? registry.CreateLongPollingConnection(id);
+
+            // Cross-circuit reactivity is handled synchronously inside
+            // each component's event subscription handler (see
+            // Counter.razor's OnCounterChanged for the pattern: install
+            // the component's RSC, call StateHasChanged via reflection,
+            // restore). That writes the render-diff directly to this
+            // circuit's outbox during the event-firing call. No RSC
+            // queue pumping needed on the poll side, which is good —
+            // IcSyncContext refuses to drain awaits that go through
+            // TaskScheduler.Default (no thread pool on wasm-wasi).
 
             // Drain everything the transport has queued for the client:
             // handshake ack on the first poll after a handshake POST,

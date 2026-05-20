@@ -12,33 +12,53 @@
 <button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
 
 <p style="margin-top:0.75rem; color:#64748b; font-size:0.9rem;">
-    Count is shared across all browsers (read from stable memory on
-    page load) and persisted across canister upgrades. Each tab sees
-    its own click via Blazor's render-diff; other tabs catch up the
-    next time they reload — real-time cross-circuit push needs
-    per-circuit RSC pumping that this canister doesn't drive yet.
+    Count is shared across every browser viewing this canister
+    (read from stable memory on page load, persisted across upgrades)
+    AND every connected tab updates in real time — when one user
+    clicks, every other tab's display ticks via Blazor's render-diff
+    without any client-side polling.
 </p>
 
 @code {
     protected override void OnInitialized()
-    {
-        CounterState.Changed += OnCounterChanged;
-    }
+        => CounterState.Changed += OnCounterChanged;
 
     public void Dispose()
-    {
-        CounterState.Changed -= OnCounterChanged;
-    }
+        => CounterState.Changed -= OnCounterChanged;
 
     private void OnCounterChanged()
     {
-        // Dispatch back onto this circuit's renderer thread so the diff
-        // gets queued on OUR outbound, not on the clicker's circuit.
-        _ = InvokeAsync(StateHasChanged);
+        // Synchronously run StateHasChanged on THIS component's renderer
+        // — bypassing the async InvokeAsync(StateHasChanged) path that
+        // a stock Blazor Server app would use. In our IC environment
+        // there is no thread pool to drain RendererSynchronizationContext
+        // queues, so an async InvokeAsync from a peer circuit's event
+        // handler would queue StateHasChanged forever (until that
+        // circuit happened to dispatch its own event). Instead, we
+        // reach into RenderHandle → Dispatcher → its internal RSC,
+        // install the RSC as the current SynchronizationContext, and
+        // call StateHasChanged directly. The renderer immediately
+        // processes the dirty mark and writes a render-batch onto
+        // THIS circuit's transport outbox, which the very next GET
+        // poll on this circuit drains.
+        var rhField = typeof(Microsoft.AspNetCore.Components.ComponentBase)
+            .GetField("_renderHandle", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        if (rhField is null) return;
+        var rh = rhField.GetValue(this);
+        if (rh is null) return;
+        var dispatcher = rh.GetType()
+            .GetProperty("Dispatcher", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            ?.GetValue(rh) as Microsoft.AspNetCore.Components.Dispatcher;
+        if (dispatcher is null) return;
+        var rsc = dispatcher.GetType()
+            .GetField("_context", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+            ?.GetValue(dispatcher) as System.Threading.SynchronizationContext;
+        if (rsc is null) return;
+        var prev = System.Threading.SynchronizationContext.Current;
+        System.Threading.SynchronizationContext.SetSynchronizationContext(rsc);
+        try { StateHasChanged(); }
+        finally { System.Threading.SynchronizationContext.SetSynchronizationContext(prev); }
     }
 
-    private void IncrementCount()
-    {
-        CounterState.Increment();
-    }
+    private void IncrementCount() => CounterState.Increment();
 }
