@@ -27,12 +27,17 @@ internal static unsafe class ClickCounterStableStore
 
     public static int Increment()
     {
+        int value = Read() + 1;
+        Write(value);
+        return value;
+    }
+
+    public static void Write(int value)
+    {
         if (Ic0.stable64_size() == 0)
         {
             Ic0.stable64_grow(1);
         }
-        int value = Read() + 1;
         Ic0.stable64_write(CounterOffset, (ulong)(nint)(&value), sizeof(int));
-        return value;
     }
 }

@@ -1,14 +1,11 @@
 // Wasp Blazor-on-IC bridge. Loaded automatically by the
 // BlazorOnICRuntime component.
 //
-// Three pieces here:
-//   1. waspSetCount — workaround for gh #80 (RenderBatchWriter empty
-//      strings table on wasi-wasm AOT). Razor components call this
-//      via IJSRuntime.InvokeVoidAsync to update a span directly.
-//   2. fetch wrapper — retries empty /_blazor poll responses a few
+// Two pieces here:
+//   1. fetch wrapper — retries empty /_blazor poll responses a few
 //      times before giving up so the SignalR client's initial
 //      handshake probe doesn't see a flapping connection.
-//   3. Pre-registered renderer interop bridge — trimming kills the
+//   2. Pre-registered renderer interop bridge — trimming kills the
 //      framework's WebRendererInteropMethods registration path; we
 //      install a manual bridge before Blazor.start that proxies
 //      .NET-from-JS calls back through the captured SignalR hub.
@@ -16,21 +13,7 @@
   if (window._waspBridgeLoaded) return;
   window._waspBridgeLoaded = true;
 
-  // ─── 1. waspSetCount (Razor IJSRuntime invokes this) ─────────────
-  // Generic span text setter keyed by element id. Consumer Razor:
-  //   await JS.InvokeVoidAsync("waspSetCount", count);
-  // is the simplest pattern, but you can also call:
-  //   await JS.InvokeVoidAsync("waspSetText", "my-id", "hello");
-  window.waspSetCount = function (val) {
-    var el = document.getElementById('wasp-count');
-    if (el) el.textContent = String(val);
-  };
-  window.waspSetText = function (id, val) {
-    var el = document.getElementById(id);
-    if (el) el.textContent = String(val);
-  };
-
-  // ─── 2. /_blazor poll-retry wrapper ──────────────────────────────
+  // ─── 1. /_blazor poll-retry wrapper ──────────────────────────────
   var origFetch = window.fetch;
   var POLL_RETRY = 6;
   var POLL_DELAY = [50, 100, 150, 200, 250, 300];
@@ -53,7 +36,7 @@
   }
   window.fetch = _wrappedFetch;
 
-  // ─── 3. Pre-registered renderer interop bridge ───────────────────
+  // ─── 2. Pre-registered renderer interop bridge ───────────────────
   // Trimming on wasi-wasm AOT removes the framework's
   // WebRendererInteropMethods + DotNetObjectReference registration,
   // so blazor.web.js's `determinePendingOperation` returns null and

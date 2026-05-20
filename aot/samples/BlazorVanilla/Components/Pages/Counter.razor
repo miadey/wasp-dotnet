@@ -1,18 +1,44 @@
 @page "/counter"
+@using WaspSample.BlazorVanilla
+@inject CounterService CounterState
+@implements IDisposable
 
 <PageTitle>Counter</PageTitle>
 
 <h1>Counter</h1>
 
-<p role="status">Current count: @currentCount</p>
+<p role="status">Current count: @CounterState.Count</p>
 
 <button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
 
+<p style="margin-top:0.75rem; color:#64748b; font-size:0.9rem;">
+    Count is shared across all browsers (read from stable memory on
+    page load) and persisted across canister upgrades. Each tab sees
+    its own click via Blazor's render-diff; other tabs catch up the
+    next time they reload — real-time cross-circuit push needs
+    per-circuit RSC pumping that this canister doesn't drive yet.
+</p>
+
 @code {
-    private int currentCount = 0;
+    protected override void OnInitialized()
+    {
+        CounterState.Changed += OnCounterChanged;
+    }
+
+    public void Dispose()
+    {
+        CounterState.Changed -= OnCounterChanged;
+    }
+
+    private void OnCounterChanged()
+    {
+        // Dispatch back onto this circuit's renderer thread so the diff
+        // gets queued on OUR outbound, not on the clicker's circuit.
+        _ = InvokeAsync(StateHasChanged);
+    }
 
     private void IncrementCount()
     {
-        currentCount++;
+        CounterState.Increment();
     }
 }

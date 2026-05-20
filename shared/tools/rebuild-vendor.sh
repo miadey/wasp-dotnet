@@ -93,4 +93,51 @@ run_weaver_in_docker \
     "$FRAMEWORK_CONTAINER/Microsoft.AspNetCore.Components.Server.dll" \
     "aot/Wasp.AspNetCore.Blazor.Server/Vendor/Microsoft.AspNetCore.Components.Server.dll"
 
+# 4. Patched LLVM JIT for gh #80 (PR #3259 cherry-picked onto the source
+#    matching our ILC package). The shared library lives at
+#    runtime/inputs/libclrjit_universal_wasm32_x64.patched-issue80.so;
+#    we swap it into the docker nuget volume so subsequent wasm builds
+#    use the fixed JIT. Idempotent — keeps a .stock backup so the swap
+#    is reversible.
+#
+#    See aot/samples/Issue80Repro/REBUILD_JIT.md for how the .so was
+#    produced and how to regenerate it for a future package version.
+ILC_PKG="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm/10.0.0-alpha.1.25162.1"
+JIT_FILE="libclrjit_universal_wasm32_x64.so"
+PATCHED_JIT_HOST="$REPO/runtime/inputs/libclrjit_universal_wasm32_x64.patched-issue80.so"
+PATCHED_SHA="eec1df0e9367758c5301543a9fc4940d9164d82497fd9d4b458ba13b5638a8d5"
+
+if [ ! -f "$PATCHED_JIT_HOST" ]; then
+    echo "[rebuild-vendor] WARN: $PATCHED_JIT_HOST missing — skipping JIT swap"
+elif [ "$(shasum -a 256 "$PATCHED_JIT_HOST" | cut -d' ' -f1)" != "$PATCHED_SHA" ]; then
+    echo "[rebuild-vendor] WARN: patched JIT sha mismatch — skipping swap"
+else
+    echo "[rebuild-vendor] JIT swap: checking docker nuget cache"
+    docker run --rm --platform linux/amd64 \
+        -v "$REPO:/work" -v wasp-nuget:/nuget \
+        "$DOCKER_IMAGE" \
+        bash -c "
+            set -e
+            target=/nuget/$ILC_PKG/tools/$JIT_FILE
+            backup=\$target.stock
+            patched=/work/runtime/inputs/$(basename "$PATCHED_JIT_HOST")
+            if [ ! -f \"\$target\" ]; then
+                echo '[rebuild-vendor]   no stock JIT in cache yet — first build will install it'
+                exit 0
+            fi
+            installed_sha=\$(sha256sum \"\$target\" | cut -d' ' -f1)
+            patched_sha=\$(sha256sum \"\$patched\" | cut -d' ' -f1)
+            if [ \"\$installed_sha\" = \"\$patched_sha\" ]; then
+                echo '[rebuild-vendor]   JIT already patched'
+                exit 0
+            fi
+            if [ ! -f \"\$backup\" ]; then
+                cp \"\$target\" \"\$backup\"
+                echo '[rebuild-vendor]   saved stock JIT → '\"\$backup\"
+            fi
+            cp \"\$patched\" \"\$target\"
+            echo '[rebuild-vendor]   installed patched JIT (#80 fix)'
+        "
+fi
+
 echo "[rebuild-vendor] done"

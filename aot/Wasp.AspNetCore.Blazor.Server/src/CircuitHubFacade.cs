@@ -64,17 +64,6 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
     private readonly IServiceProvider _services;
     private CircuitHost? _circuit;
 
-    // Workaround for gh #80 (framework RenderBatchWriter emits empty
-    // strings-table on wasm32-wasi AOT for delta batches): after each
-    // click we ALSO push a JS.BeginInvokeJS call to window.waspSetCount
-    // so the visible counter increments via direct DOM update. We
-    // track the count parallel to Counter.currentCount — the
-    // framework's broken delta batch wipes the span; our subsequent
-    // JS.BeginInvokeJS restores the correct value. The two messages
-    // ride the same outbound queue so they apply in order on the next
-    // GET poll.
-    private int _wapsClickCount;
-
     // gh #79 helper: pull the tracked .NET object id out of a
     // DotNetObjectReference. The property is internal so we get at it
     // via reflection — same trick the framework's
@@ -376,7 +365,6 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
             try { await _circuit.DisposeAsync(); } catch { /* swallow on resume */ }
             _circuit = null;
         }
-        _wapsClickCount = 0;
         return await StartCircuit(baseUri, uri, rootComponents, applicationState);
     }
 
@@ -462,27 +450,6 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
                     System.Threading.SynchronizationContext.SetSynchronizationContext(prev);
                 }
                 TraceLog($"[facade] DispatchEventAsync dispatched OK");
-
-                // gh #80 workaround: the framework's delta RenderBatch
-                // it just enqueued wipes the <span id="wasp-count">'s
-                // text. Push a JS.BeginInvokeJS that calls
-                // window.waspSetCount(<count>) immediately after — the
-                // client applies them in queue order, so the JS call
-                // arrives second and restores the correct value.
-                _wapsClickCount++;
-                var jsArgsJson = "[\"" + _wapsClickCount.ToString() + "\"]";
-                try
-                {
-                    await _transport.SendCoreAsync(
-                        "JS.BeginInvokeJS",
-                        new object?[] { 0L, "waspSetCount", jsArgsJson, 0, 0L },
-                        CancellationToken.None);
-                    TraceLog($"[facade]   waspSetCount({_wapsClickCount}) queued");
-                }
-                catch (Exception jsEx)
-                {
-                    TraceLog($"[facade]   waspSetCount queue FAILED: {jsEx.GetType().Name}: {jsEx.Message}");
-                }
                 return;
             }
             catch (Exception ex)

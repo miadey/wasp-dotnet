@@ -2,6 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Wasp.AspNetCore;
 using Wasp.AspNetCore.Blazor.Server;
 using Wasp.IcCdk;
@@ -59,29 +60,15 @@ public static class Program
             // browser via blazor.web.js.
             builder.UseInternetComputer<App>();
 
+            // Shared click counter (cross-circuit reactivity + stable-
+            // memory persistence). Counter.razor injects this and
+            // subscribes to its Changed event. Every connected browser
+            // sees the same Count and gets a render-diff when ANY user
+            // clicks — needs the gh #80 JIT fix to be in effect, so
+            // the diff bytes ship with a correct strings table.
+            builder.Services.AddSingleton<CounterService>();
+
             var app = builder.Build();
-
-            // Click counter — shared global state in stable memory at
-            // offset 0. POST /api/click increments and persists; GET
-            // /api/count fast-reads the current value. Every browser
-            // session sees the same count, and it survives upgrades.
-            //
-            // The cost: POST goes through http_request_update (~2–4 s
-            // consensus) because writes to stable memory must reach
-            // consensus. GET stays on the query fast-path (~50 ms).
-            app.MapPost("/api/click", async (Microsoft.AspNetCore.Http.HttpContext ctx) =>
-            {
-                int count = ClickCounterStableStore.Increment();
-                ctx.Response.ContentType = "application/json; charset=utf-8";
-                await ctx.Response.WriteAsync("{\"count\":" + count + "}");
-            });
-
-            app.MapGet("/api/count", async (Microsoft.AspNetCore.Http.HttpContext ctx) =>
-            {
-                int count = ClickCounterStableStore.Read();
-                ctx.Response.ContentType = "application/json; charset=utf-8";
-                await ctx.Response.WriteAsync("{\"count\":" + count + "}");
-            });
 
             // Weather "file in stable memory" — GET /api/weather dumps the
             // raw CSV; POST /api/weather/seed writes the default 5 rows.
