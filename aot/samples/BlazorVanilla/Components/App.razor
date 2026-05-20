@@ -101,31 +101,15 @@
                browsing Home/Weather), all subsequent /counter clicks
                are instant — no re-warmup. *@
             <div id="counter-shell" data-page="counter">
-                <h1>Counter</h1>
+                @* Stock Counter with real Blazor @@onclick reactivity.
+                   Works because the JIT now correctly serializes
+                   RenderTreeFrame struct-copies on wasm32-wasi (gh #80
+                   fix: cherry-picked dotnet/runtimelab PR #3259). The
+                   WaspMarker pair attaches the SignalR circuit on first
+                   page load; each click ships a render-diff that
+                   correctly carries the strings table. *@
                 <p id="blazor-status" style="color:#64748b; font-size:0.9rem;">
                     Connecting to Blazor Server (SignalR Long Polling)…
-                </p>
-                @* Visible UI lives OUTSIDE the WaspMarker pair so it
-                   survives the framework's #80 empty-strings-table
-                   render-diff wipe on circuit attach. The count display
-                   + button + status are pure HTML; clicks go through
-                   the JS query-RPC path (waspFastClick) for sub-2s
-                   round-trips. The Counter component still exists for
-                   the architectural demo — its WaspMarker pair makes
-                   blazor.web.js attach the SignalR circuit once on
-                   first page load — but the visible button doesn't
-                   depend on that circuit. *@
-                <p role="status">Current count: <span id="wasp-count">0</span></p>
-                <div style="display:flex; gap:0.75rem; flex-wrap:wrap; margin-top:0.5rem;">
-                    <button class="btn btn-primary" type="button" onclick="waspFastClick()">
-                        Click me
-                    </button>
-                </div>
-                <p id="wasp-fast-status" style="margin-top:0.75rem; color:#64748b; font-size:0.9rem;">
-                    Count is global — persisted in canister stable memory at
-                    offset 0, shared across all users. Click round-trip is an
-                    update call (~2–4 s consensus) because the write hits
-                    stable memory.
                 </p>
                 @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Counter)))
                 <Counter />

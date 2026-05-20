@@ -1,15 +1,12 @@
 @page "/counter"
 
-@* Counter component intentionally renders no visible content. The
-   user-facing Counter UI (count display + Click-me button + status)
-   lives in App.razor's #counter-shell ABOVE the WaspMarker pair so
-   it survives the framework's #80 empty-strings-table render-diff
-   wipe. The Counter component still exists for the architectural
-   demo — blazor.web.js attaches the SignalR circuit to its marker
-   on first page load, satisfying the warmup-once-per-session goal —
-   but it has no visible UI of its own. The IncrementCount handler
-   stays in case a future build wants to wire it back through the
-   slow click path. *@
+<PageTitle>Counter</PageTitle>
+
+<h1>Counter</h1>
+
+<p role="status">Current count: @currentCount</p>
+
+<button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
 
 @code {
     private int currentCount = 0;

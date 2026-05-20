@@ -1,0 +1,23 @@
+FROM wasp-dotnet-build:latest
+
+# Add LLVM-18 dev headers/cmake configs and ninja for the runtimelab JIT
+# build. clang-18 + cmake are already in the base image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    llvm-18-dev \
+    libpolly-18-dev \
+    ninja-build \
+    pkg-config \
+    libicu-dev \
+    libcurl4-openssl-dev \
+    zlib1g-dev \
+    libssl-dev \
+    libkrb5-dev \
+    liblttng-ust-dev \
+    libnuma-dev \
+    libunwind-dev \
+    libzstd-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set the LLVM cmake config path the runtimelab build looks for.
+ENV LLVM_CMAKE_CONFIG_RELEASE=/usr/lib/llvm-18/lib/cmake/llvm
+ENV LLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm
