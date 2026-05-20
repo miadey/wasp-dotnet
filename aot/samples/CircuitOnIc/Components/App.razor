@@ -1,6 +1,7 @@
-@* App.razor — Wasp surface is now three @((MarkupString)…) calls
-   plus the per-app fast-click bits. The Counter component below is
-   100% stock from `dotnet new blazorserver`. *@
+@* App.razor — three @((MarkupString)…) calls of Wasp.AspNetCore.Blazor.Server's
+   surface API plus the stock @page-routed Counter. With the gh #80 JIT
+   patch shipped, the `@onclick` handler ticks the visible count via
+   Blazor's render-diff pipeline; no JS fast-click bypass needed. *@
 
 <!DOCTYPE html>
 <html lang="en">
@@ -21,79 +22,11 @@
     <Counter />
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(WaspSample.CircuitOnIc.Components.Pages.Counter)))
 
-    @* App-specific extra: the green query-RPC fast-click button. Stays
-       outside the Counter marker pair so Blazor's renderer doesn't
-       strip it during hydration. *@
-    <button class="btn btn-success" type="button"
-            onclick="waspFastClick()"
-            style="margin-top: 0.5rem;">
-        Fast click (query RPC, ~15 ms)
-    </button>
-    <p style="margin-top: 0.5rem; color: #888;">
-        <span id="wasp-fast-ms">click the green button to measure</span>
-    </p>
-
     <hr />
     <small>SignalR transport pinned to <code>HttpTransportType.LongPolling</code> (value 4). <code>/_blazor/negotiate</code>, POST <code>/_blazor</code> (send), and GET <code>/_blazor</code> (poll) all route to this canister's <code>http_request_update</code>.</small>
 
     @* Wasp scripts (blazor.web.js + wasp-bridge.js). *@
     @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
-
-    @* App-specific fast-click + sync — lives in app, not framework. *@
-    <script>
-      let _waspLocalCount = 0;
-      let _waspLastSyncedCount = 0;
-
-      window.waspFastClick = async function () {
-        const span = document.getElementById('wasp-count');
-        const t0 = performance.now();
-        try {
-          const r = await fetch('/api/click?c=' + _waspLocalCount);
-          const j = await r.json();
-          _waspLocalCount = j.count;
-          if (span) span.textContent = String(j.count);
-          const dur = Math.round(performance.now() - t0);
-          const ms = document.getElementById('wasp-fast-ms');
-          if (ms) ms.textContent = 'fast click round-trip: ' + dur + ' ms (count=' + j.count
-              + ', unsynced delta: ' + (j.count - _waspLastSyncedCount) + ')';
-        } catch (e) {
-          const ms = document.getElementById('wasp-fast-ms');
-          if (ms) ms.textContent = 'fast click error: ' + e.message;
-        }
-      };
-
-      // Pull persisted count on load.
-      (async () => {
-        try {
-          const r = await fetch('/api/state');
-          const j = await r.json();
-          _waspLocalCount = j.count;
-          _waspLastSyncedCount = j.count;
-          const span = document.getElementById('wasp-count');
-          if (span) span.textContent = String(j.count);
-        } catch { /* cold canister */ }
-      })();
-
-      // Periodic sync — every 3 s, flush diffed count to stable memory.
-      setInterval(async () => {
-        if (_waspLocalCount === _waspLastSyncedCount) return;
-        const target = _waspLocalCount;
-        try {
-          await fetch('/api/sync?c=' + target, { method: 'POST' });
-          _waspLastSyncedCount = target;
-          const ms = document.getElementById('wasp-fast-ms');
-          if (ms && ms.textContent.includes('unsynced')) {
-            ms.textContent = ms.textContent.replace(/unsynced delta: \d+/, 'persisted (synced=' + target + ')');
-          }
-        } catch { /* retry next tick */ }
-      }, 3000);
-
-      window.addEventListener('beforeunload', () => {
-        if (_waspLocalCount !== _waspLastSyncedCount) {
-          navigator.sendBeacon('/api/sync?c=' + _waspLocalCount);
-        }
-      });
-    </script>
 </body>
 
 </html>
