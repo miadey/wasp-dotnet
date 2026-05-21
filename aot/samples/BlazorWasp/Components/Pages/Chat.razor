@@ -1,44 +1,71 @@
-@* Chat.razor — real-time multi-user chat showcasing cross-device
-   reactivity. Open in two devices; both stay in sync via 3s render
-   polling (faster right after a local click via the adaptive bridge).
-   Messages persist in stable memory. *@
+@* Chat.razor — real-time multi-user chat. Vanilla Razor.
+   Open in two devices to see cross-device reactivity via the bridge's
+   adaptive polling. Messages persist in stable memory. *@
 
 @inject WaspSample.BlazorWasp.ChatService ChatState
 
 <PageTitle>Chat</PageTitle>
 
-<h1>Chat</h1>
+<div class="chat-container">
+    <header class="chat-header">
+        <h1>Chat</h1>
+        <p class="chat-subtitle">
+            @ChatState.Messages.Count message@(ChatState.Messages.Count == 1 ? "" : "s")
+            · persisted on-chain · open in two devices
+        </p>
+    </header>
 
-<p>Open this page on your phone too — both devices will see new
-messages within ~3 s (and instantly when you've just posted). All
-messages persist in stable memory.</p>
+    <div class="chat-scroll" id="chat-scroll">
+        @if (ChatState.Messages.Count == 0)
+        {
+            <p class="chat-empty">No messages yet. Be the first to say hi.</p>
+        }
+        @foreach (var msg in ChatState.Messages)
+        {
+            <article class="chat-message">
+                <header class="chat-message-header">
+                    <span class="chat-avatar" style="@AvatarStyle(msg.Sender)">@AvatarLetter(msg.Sender)</span>
+                    <span class="chat-sender">@msg.Sender</span>
+                    <time class="chat-time" datetime="@msg.AtMs">@FormatTime(msg.AtMs)</time>
+                </header>
+                <p class="chat-body">@msg.Text</p>
+            </article>
+        }
+    </div>
 
-<ul class="chat-messages">
-    @foreach (var msg in ChatState.Messages)
-    {
-        <li>
-            <span class="chat-sender">@msg.Sender</span>
-            <span class="chat-text">@msg.Text</span>
-        </li>
-    }
-</ul>
-
-<form class="chat-form">
-    <input name="text" type="text" placeholder="Type a message…" autocomplete="off" required />
-    <button class="btn btn-primary" @onclick="HandleSend">Send</button>
-</form>
+    <form class="chat-composer" autocomplete="off">
+        <textarea name="text" class="chat-input" rows="2" placeholder="Write a message — Enter to send, Shift+Enter for newline" required></textarea>
+        <button type="button" class="chat-send" @onclick="HandleSend">Send</button>
+    </form>
+</div>
 
 @code {
     void HandleSend()
     {
-        // The bridge collected the form's input values and shipped
-        // them as args. WaspContext exposes them ambient to the
-        // handler so we don't need to invent a custom @onclick
-        // signature (Razor's compiler restricts @onclick to
-        // EventCallback-compatible delegates).
         if (Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs.TryGetValue("text", out var text))
         {
             ChatState.Post(new Dictionary<string, string> { ["text"] = text });
         }
+    }
+
+    string AvatarLetter(string sender)
+        => string.IsNullOrEmpty(sender) ? "?" : sender.Substring(0, 1).ToUpper();
+
+    // Deterministic colour per sender id so the same user looks the same
+    // across messages without persisting palette state.
+    string AvatarStyle(string sender)
+    {
+        var h = 0;
+        foreach (var c in sender) { h = (h * 31 + c) & 0xFFFFFF; }
+        var hue = h % 360;
+        return $"background: hsl({hue}, 60%, 55%);";
+    }
+
+    string FormatTime(long unixMs)
+    {
+        // Show time of day in the canister's UTC. Coarse — DateTime
+        // formatting is full of culture pulls; we keep it manual.
+        var t = DateTimeOffset.FromUnixTimeMilliseconds(unixMs);
+        return $"{t.Hour:D2}:{t.Minute:D2}";
     }
 }

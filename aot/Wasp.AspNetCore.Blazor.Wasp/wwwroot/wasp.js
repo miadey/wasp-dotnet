@@ -52,6 +52,24 @@
       var fd = new FormData(form);
       fd.forEach(function (v, k) { args[k] = String(v); });
     }
+    // Optimistic UX: disable the source button + clear the form's
+    // text inputs immediately, so the user can keep typing while
+    // consensus runs. If the POST errors, we restore.
+    var disabledEls = [];
+    var clearedEls = [];
+    var btn = e.currentTarget;
+    if (btn && btn.tagName === 'BUTTON' && !btn.disabled) {
+      btn.disabled = true;
+      disabledEls.push(btn);
+    }
+    if (form) {
+      form.querySelectorAll('input[type=text], input:not([type]), textarea').forEach(function (el) {
+        if (el.value) {
+          clearedEls.push({ el: el, prev: el.value });
+          el.value = '';
+        }
+      });
+    }
     try {
       var resp = await fetch('/_wasp/event', {
         method: 'POST',
@@ -69,12 +87,17 @@
       });
       if (!resp.ok) {
         console.warn('[wasp] event POST failed', resp.status);
+        // Restore optimistic clears so the user can retry.
+        clearedEls.forEach(function (c) { c.el.value = c.prev; });
         return;
       }
       var batch = await resp.json();
       _applyBatch(batch);
     } catch (err) {
       console.warn('[wasp] event error', err);
+      clearedEls.forEach(function (c) { c.el.value = c.prev; });
+    } finally {
+      disabledEls.forEach(function (el) { el.disabled = false; });
     }
   }
 
@@ -89,7 +112,29 @@
     target.innerHTML = batch.html;
     lastBatchId = batch.batchId || lastBatchId;
     _wireEvents(target);
+    // After applying, autoscroll any "follow tail" scrollbox to its
+    // bottom — chat list, log viewer, etc. Looks for a #chat-scroll
+    // id for now; generalise to a data-wasp-stick attribute when the
+    // need arises.
+    var scroller = document.getElementById('chat-scroll');
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }
+
+  // Enter-to-send on chat-style textareas. Shift+Enter inserts a
+  // newline. Looks for a `data-wasp-enter-submits` opt-in attribute,
+  // OR a sibling element with data-wasp-evt-click (which is what the
+  // composer pattern naturally produces).
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+    var ta = e.target;
+    if (!ta || ta.tagName !== 'TEXTAREA') return;
+    var form = ta.closest && ta.closest('form');
+    if (!form) return;
+    var sendBtn = form.querySelector('[data-wasp-evt-click]');
+    if (!sendBtn) return;
+    e.preventDefault();
+    sendBtn.click();
+  });
 
   // ─── SPA-style nav ────────────────────────────────────────────────
   // Intercept clicks on internal links, GET /_wasp/render for the new
