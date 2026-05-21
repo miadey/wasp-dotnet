@@ -134,9 +134,50 @@
     set lastBatchId(v) { lastBatchId = v; },
   };
 
+  // ─── Cross-device reactivity poll ─────────────────────────────────
+  // Render-as-query has no server push (canisters can't initiate
+  // connections), so to see another user/device's changes the client
+  // has to ask. Every POLL_INTERVAL_MS we GET /_wasp/render for the
+  // current path; if the returned batchId differs from what we last
+  // applied we swap in the new render. Each poll is a v2-cert query
+  // (~300 ms on mainnet, ~10 ms on local) so the idle traffic is one
+  // tiny request every few seconds.
+  var REACTIVITY_POLL_MS = 3000;
+
+  async function _reactivityPoll() {
+    while (true) {
+      try {
+        await new Promise(function (r) { setTimeout(r, REACTIVITY_POLL_MS); });
+        // Note: we don't gate on document.hidden — mobile browsers
+        // throttle background tabs hard anyway, and gating here makes
+        // headless / driver-controlled tabs never poll at all.
+        var headers = { 'accept': 'application/json' };
+        if (lastBatchId) headers['if-none-match'] = lastBatchId;
+        var resp = await origFetch('/_wasp/render?path=' + encodeURIComponent(location.pathname), { headers: headers });
+        if (!resp.ok) continue;
+        var ct = resp.headers.get('content-type') || '';
+        if (ct.indexOf('json') < 0) continue;
+        var batch = await resp.json();
+        if (batch.unchanged) continue; // server signaled no diff
+        if (batch.batchId && batch.batchId === lastBatchId) continue;
+        _applyBatch(batch);
+      } catch (e) {
+        // network blip — try again next interval
+      }
+    }
+  }
+
+  // Use origFetch (not the wrapped fetch) for the reactivity poll —
+  // these are background requests, no event triggers.
+  var origFetch = window.fetch;
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () { _wireEvents(); });
+    document.addEventListener('DOMContentLoaded', function () {
+      _wireEvents();
+      _reactivityPoll();
+    });
   } else {
     _wireEvents();
+    _reactivityPoll();
   }
 })();
