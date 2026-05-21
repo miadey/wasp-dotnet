@@ -84,6 +84,7 @@ public sealed class WaspHtmlRenderer : Renderer
         if (!typeof(IComponent).IsAssignableFrom(componentType))
             throw new ArgumentException($"{componentType} does not implement IComponent");
         var component = (IComponent)Activator.CreateInstance(componentType)!;
+        InjectServices(component);
         int componentId = AssignRootComponentId(component);
         Dispatcher.InvokeAsync(() => RenderRootComponentAsync(componentId, parameters)).GetAwaiter().GetResult();
         var sb = new StringBuilder();

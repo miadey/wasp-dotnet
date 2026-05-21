@@ -79,6 +79,53 @@
     _wireEvents(target);
   }
 
+  // ─── SPA-style nav ────────────────────────────────────────────────
+  // Intercept clicks on internal links, GET /_wasp/render for the new
+  // path, swap innerHTML. No full page reload → no fresh fetch of
+  // wasp.js or the page shell.
+  async function _navigateTo(path, push) {
+    try {
+      var resp = await fetch('/_wasp/render?path=' + encodeURIComponent(path), {
+        headers: { 'accept': 'application/json' },
+      });
+      if (!resp.ok) {
+        // Fall back to full load on error.
+        location.href = path;
+        return;
+      }
+      var batch = await resp.json();
+      _applyBatch(batch);
+      if (push) history.pushState({ wasp: true, path: path }, '', path);
+      // Update active class on sidebar links (re-query on each nav).
+      document.querySelectorAll('aside.sidebar .nav a').forEach(function (a) {
+        var href = a.getAttribute('href');
+        a.classList.toggle('active', href === path);
+      });
+    } catch (e) {
+      console.warn('[wasp] nav error', e);
+      location.href = path;
+    }
+  }
+
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+    var a = e.target.closest && e.target.closest('a');
+    if (!a) return;
+    var href = a.getAttribute('href');
+    if (!href) return;
+    if (href.startsWith('http://') || href.startsWith('https://')) return;
+    if (href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+    if (a.getAttribute('target') === '_blank') return;
+    // Resolve relative href to a path.
+    var url = new URL(a.href, location.origin);
+    if (url.origin !== location.origin) return;
+    e.preventDefault();
+    _navigateTo(url.pathname, /*push*/ true);
+  });
+  window.addEventListener('popstate', function () {
+    _navigateTo(location.pathname, /*push*/ false);
+  });
+
   // ─── Public surface ──────────────────────────────────────────────
   window.wasp = {
     rewire: _wireEvents,

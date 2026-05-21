@@ -10,20 +10,17 @@ using Wasp.AspNetCore.Blazor.Wasp;
 using Wasp.IcCdk;
 using WaspSample.BlazorWasp.Components.Pages;
 
-// BlazorWasp — gh #118 v2: stock vanilla Razor with @onclick driving
-// the render-as-query protocol. No SignalR, no Long Polling, no
-// negotiate handshake. Just two HTTP endpoints:
-//   GET  /_wasp/render → canister_query  (sub-300ms on mainnet)
-//   POST /_wasp/event  → canister_update (one consensus round per click)
-
 namespace WaspSample.BlazorWasp;
 
 public static class Program
 {
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Home))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Weather))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CounterService))]
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspComponentRenderer<Counter>))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WeatherService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspRouter))]
     [ModuleInitializer]
     internal static void Init()
     {
@@ -35,10 +32,18 @@ public static class Program
                 ApplicationName = "BlazorWasp",
             });
 
-            // Singletons: state survives across calls. Component
-            // instances are throwaway (re-created each render).
             builder.Services.AddSingleton<CounterService>();
-            builder.Services.AddSingleton<IWaspRenderer, WaspComponentRenderer<Counter>>();
+            builder.Services.AddSingleton<WeatherService>();
+            // Router is configured at registration time with the route map.
+            builder.Services.AddSingleton<IWaspRenderer>(sp =>
+            {
+                var r = new WaspRouter(sp);
+                r.AddRoute<Home>("/");
+                r.AddRoute<Counter>("/counter");
+                r.AddRoute<Weather>("/weather");
+                r.WrapShell((path, inner) => WrapWithSidebar(path, inner));
+                return r;
+            });
 
             builder.UseInternetComputerWasp();
 
@@ -46,20 +51,14 @@ public static class Program
             app.UseInternetComputerWasp();
             app.StartAsync().GetAwaiter().GetResult();
 
-            // SSR pre-render: shell with the Counter's initial HTML
-            // inlined. Bridge hydrates by wiring event listeners on
-            // the existing DOM.
+            // Pre-render each route's SSR shell + register as a
+            // certified static asset. Subsequent GETs to "/" / "/counter"
+            // / "/weather" hit the query path (~300 ms on canonical
+            // mainnet).
             var renderer = app.Services.GetRequiredService<IWaspRenderer>();
-            var initial = renderer.Render(new WaspRenderRequest { Path = "/" });
-            var shellHtml = BuildShell(initial.Html);
-            var shellBytes = Encoding.UTF8.GetBytes(shellHtml);
-            IcServer.RegisterStaticAsset("/", shellBytes, "text/html; charset=utf-8");
-            IcCertifiedAssets.Insert("/", shellBytes);
-            // Alias /counter to the same shell (back-compat for users
-            // who bookmarked the BlazorVanilla /counter path during the
-            // SignalR-based iteration).
-            IcServer.RegisterStaticAsset("/counter", shellBytes, "text/html; charset=utf-8");
-            IcCertifiedAssets.Insert("/counter", shellBytes);
+            RegisterShell(renderer, "/");
+            RegisterShell(renderer, "/counter");
+            RegisterShell(renderer, "/weather");
         }
         catch (Exception ex)
         {
@@ -70,7 +69,35 @@ public static class Program
         }
     }
 
-    private static string BuildShell(string initialHtml)
+    private static void RegisterShell(IWaspRenderer renderer, string path)
+    {
+        var batch = renderer.Render(new WaspRenderRequest { Path = path });
+        var shell = BuildPage(batch.Html);
+        var bytes = Encoding.UTF8.GetBytes(shell);
+        IcServer.RegisterStaticAsset(path, bytes, "text/html; charset=utf-8");
+        IcCertifiedAssets.Insert(path, bytes);
+    }
+
+    private static string WrapWithSidebar(string currentPath, string innerHtml)
+    {
+        string Active(string p) => string.Equals(p, currentPath, StringComparison.OrdinalIgnoreCase)
+            ? " class=\"active\"" : "";
+        var sb = new StringBuilder();
+        sb.Append("<div class=\"page\">");
+        sb.Append("<aside class=\"sidebar\">");
+        sb.Append("<a class=\"brand\" href=\"/\">Blazor on ICP</a>");
+        sb.Append("<nav class=\"nav\">");
+        sb.Append("<a href=\"/\"").Append(Active("/")).Append(">Home</a>");
+        sb.Append("<a href=\"/counter\"").Append(Active("/counter")).Append(">Counter</a>");
+        sb.Append("<a href=\"/weather\"").Append(Active("/weather")).Append(">Weather</a>");
+        sb.Append("</nav>");
+        sb.Append("</aside>");
+        sb.Append("<main>").Append(innerHtml).Append("</main>");
+        sb.Append("</div>");
+        return sb.ToString();
+    }
+
+    private static string BuildPage(string contentHtml)
     {
         return
 @"<!DOCTYPE html>
@@ -78,32 +105,43 @@ public static class Program
 <head>
     <meta charset=""utf-8"" />
     <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"" />
-    <title>Blazor on ICP — render-as-query</title>
+    <title>Blazor on ICP</title>
     <style>
-        body { font-family: system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1e293b; }
-        h1 { color: #2563eb; }
+        html, body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #1e293b; background: #f8fafc; }
+        .page { display: flex; min-height: 100vh; }
+        .sidebar {
+            width: 250px;
+            background: linear-gradient(180deg, rgb(5, 39, 103) 0%, #3a0647 70%);
+            color: #f8fafc;
+            padding: 1.25rem 0;
+        }
+        .brand {
+            color: #f8fafc; text-decoration: none; font-size: 1.1rem; font-weight: 600;
+            padding: 0 1.25rem 1rem 1.25rem; display: block;
+            border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 1rem;
+        }
+        .nav a {
+            display: block; color: #cbd5f5; text-decoration: none;
+            padding: 0.6rem 1.25rem; border-left: 4px solid transparent; font-size: 0.95rem;
+        }
+        .nav a:hover { background: rgba(255,255,255,0.1); color: #fff; }
+        .nav a.active { background: rgba(255,255,255,0.18); color: #fff; border-left-color: #fff; }
+        main { flex: 1; padding: 2rem; max-width: 960px; }
+        main h1 { color: #1e3a8a; margin-top: 0; }
+        main code { background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
         button.btn-primary {
             background: #2563eb; color: #fff; border: 0;
-            padding: 0.5rem 1.25rem; border-radius: 4px; cursor: pointer;
-            font-size: 1rem;
+            padding: 0.45rem 1rem; border-radius: 4px; cursor: pointer; font-size: 0.95rem;
         }
         button.btn-primary:hover { background: #1d4ed8; }
+        .table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+        .table th, .table td { padding: 0.5rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
+        .table th { background: #f1f5f9; border-bottom-color: #cbd5f5; }
         p[role=""status""] { font-size: 1.1rem; }
-        .badge {
-            display: inline-block; padding: 0.15rem 0.4rem; border-radius: 3px;
-            background: #ecfdf5; color: #047857; font-size: 0.85rem;
-            font-family: ui-monospace, monospace;
-        }
     </style>
 </head>
 <body>
-    <p class=""badge"">stock @@onclick — render-as-query — no SignalR</p>
-    <div id=""wasp-root"">" + initialHtml + @"</div>
-    <p style=""color:#64748b;font-size:0.85rem;margin-top:2rem"">
-        Counter.razor is vanilla Blazor markup: <code>@@onclick=""Counter.Increment""</code>.
-        Each click is one IC update call (~2 s consensus) with the
-        post-event render inline. No warmup, no polling.
-    </p>
+    <div id=""wasp-root"">" + contentHtml + @"</div>
     <script src=""/_wasp/wasp.js""></script>
 </body>
 </html>";
