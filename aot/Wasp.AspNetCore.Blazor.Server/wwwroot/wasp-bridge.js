@@ -13,24 +13,48 @@
   if (window._waspBridgeLoaded) return;
   window._waspBridgeLoaded = true;
 
-  // ─── 1. /_blazor poll-retry wrapper ──────────────────────────────
+  // ─── 1. Negotiate nonce + client-side long-poll proxy ─────────────
+  //
+  // Two responsibilities:
+  //
+  // (a) Negotiate nonce injection — per-request nonce defeats the IC
+  //     boundary's ~10 s query cache for byte-identical multi-tab
+  //     negotiate POSTs. Server-side the nonce mixes into the
+  //     SHA-256-derived connectionId so each tab still gets a unique
+  //     id.
+  //
+  // (b) Long-poll proxy for /_blazor?id GETs — vanilla Blazor Server
+  //     uses true long polling: the server holds the GET open for up
+  //     to ~90 s and returns the moment data arrives. On IC the
+  //     canister can't hold a query call open (no async wait between
+  //     calls), so SignalR's natural "fire-next-poll-as-soon-as-
+  //     previous-returns" loop hits the canister 4–5×/second. We
+  //     emulate the hold on the CLIENT: when a poll comes back empty,
+  //     re-poll the canister every POLL_INTERVAL_MS until either data
+  //     arrives or HOLD_TIMEOUT_MS elapses. SignalR sees one slow
+  //     response, not many fast ones.
   var origFetch = window.fetch;
-  var POLL_RETRY = 6;
-  var POLL_DELAY = [50, 100, 150, 200, 250, 300];
+  var POLL_INTERVAL_MS = 1000;   // canister poll cadence inside the hold
+  var HOLD_TIMEOUT_MS = 25000;   // max hold for an ESTABLISHED connection
+
+  // SignalR's LongPolling connect sequence:
+  //   1. POST /_blazor/negotiate         (we already speed this up via v2)
+  //   2. open GET /_blazor?id=X          (waits for FIRST response)
+  //   3. send POST /_blazor?id=X         (handshake frame)
+  //   4. next GET poll picks up the ack from server
+  // If we hold step 2 for 25 s waiting for data, SignalR never sends
+  // step 3 — the connection appears dead. So we only hold AFTER we've
+  // observed at least one non-empty response on this connection id
+  // (= server has sent something, handshake or render-diff).
+  var _establishedIds = new Object();
+  function _extractId(url) {
+    var m = url.match(/[?&]id=([^&]+)/);
+    return m ? m[1] : null;
+  }
+
   async function _wrappedFetch(input, init) {
     var url = typeof input === 'string' ? input : input.url;
     var method = (init && init.method) || 'GET';
-    // SignalR's POST /_blazor/negotiate carries no body and stock
-    // headers. Two browser tabs opened simultaneously emit
-    // byte-identical requests, which the IC HTTP gateway's ~10 s query
-    // response cache deduplicates → both tabs get the same
-    // connectionId and the second tab's handshake POSTs land on a
-    // transport whose _handshakeComplete is already true. Append a
-    // crypto-random nonce query param to make every negotiate request
-    // distinct at the bytes level, busting the cache. Server-side the
-    // nonce is hashed into the connectionId via the rich query handler
-    // in BlazorOnIcHostingExtensions.cs, so each tab still gets a
-    // unique id.
     if (url && url.indexOf('/_blazor/negotiate') >= 0 && method === 'POST') {
       var nonce = (window.crypto && window.crypto.randomUUID)
         ? window.crypto.randomUUID()
@@ -44,14 +68,33 @@
       }
     }
     if (url && url.match(/\/_blazor\?id=/) && method === 'GET') {
-      for (var i = 0; i < POLL_RETRY; i++) {
+      var id = _extractId(url);
+      var seenBefore = !!(id && _establishedIds[id]);
+      if (id) _establishedIds[id] = true;
+      if (!seenBefore) {
+        // First poll on this connection — pass-through (no hold), so
+        // SignalR's transport-open probe completes quickly and it
+        // proceeds to send the handshake POST.
+        return await origFetch(input, init);
+      }
+      // Subsequent polls — emulate server-side long polling. Inspect
+      // each response via Content-Length header WITHOUT consuming the
+      // body stream; SignalR needs the body intact for blazorpack
+      // parsing. The server always sets content-length.
+      var start = Date.now();
+      while (Date.now() - start < HOLD_TIMEOUT_MS) {
         if (init && init.signal && init.signal.aborted) break;
         var resp = await origFetch(input, init);
         if (resp.status !== 200) return resp;
-        var cloned = resp.clone();
-        var bytes = await cloned.arrayBuffer();
-        if (bytes.byteLength > 0) return resp;
-        await new Promise(function (r) { setTimeout(r, POLL_DELAY[i] || 300); });
+        var cl = parseInt(resp.headers.get('content-length') || '-1', 10);
+        if (cl > 0 || cl < 0) {
+          // cl > 0: data present, hand off untouched.
+          // cl < 0: header missing — be safe, hand off too.
+          return resp;
+        }
+        // cl === 0: empty payload, wait and re-poll. The discarded
+        // resp's body is empty so closing it is harmless.
+        await new Promise(function (r) { setTimeout(r, POLL_INTERVAL_MS); });
       }
       return await origFetch(input, init);
     }
