@@ -99,6 +99,12 @@
       "wasm": "samples/MvcVanilla/MvcVanilla.canister.wasm",
       "candid": "samples/MvcVanilla/mvcvanilla.did",
       "build": []
+    },
+    "blazorwasp": {
+      "type": "custom",
+      "wasm": "samples/BlazorWasp/BlazorWasp.canister.wasm",
+      "candid": "samples/BlazorWasp/blazorwasp.did",
+      "build": []
     }
   },
   "networks": {
