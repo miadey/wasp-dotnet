@@ -82,7 +82,7 @@
         <aside class="sidebar">
             <a class="brand" href="/">Blazor on ICP</a>
             <nav class="nav">
-                <WaspNavLink href="" Match="NavLinkMatch.All" ActiveClass="active">Home</WaspNavLink>
+                <WaspNavLink href="/" Match="NavLinkMatch.All" ActiveClass="active">Home</WaspNavLink>
                 <WaspNavLink href="counter" ActiveClass="active">Counter</WaspNavLink>
                 <WaspNavLink href="weather" ActiveClass="active">Weather</WaspNavLink>
             </nav>
@@ -159,7 +159,10 @@
             function isInternalLink(a) {
                 if (!a) return false;
                 const href = a.getAttribute('href');
-                if (!href) return false;
+                if (href === null) return false;
+                // empty-string href is HTML's "same URL" — still an
+                // internal link we want to intercept (otherwise the
+                // browser does a full page reload, killing the circuit).
                 if (href.startsWith('http://') || href.startsWith('https://')) return false;
                 if (href.startsWith('#')) return false;
                 if (href.startsWith('mailto:') || href.startsWith('tel:')) return false;
