@@ -1,0 +1,13 @@
+@* Counter.razor — stock vanilla Blazor. The framework translates
+   @onclick into a data-wasp-evt-click attribute via WaspHtmlRenderer.
+   State lives in CounterService (singleton, backed by stable memory)
+   because the render-as-query model re-instantiates components on
+   every call. *@
+
+@inject WaspSample.BlazorWasp.CounterService CounterState
+
+<h1>Counter</h1>
+
+<p role="status">Current count: @CounterState.Count</p>
+
+<button class="btn btn-primary" @onclick="CounterState.Increment">Click me</button>

@@ -8,10 +8,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Wasp.AspNetCore;
 using Wasp.AspNetCore.Blazor.Wasp;
 using Wasp.IcCdk;
+using WaspSample.BlazorWasp.Components.Pages;
 
-// BlazorWasp — proof of concept for gh #118 (IC-native render-as-query).
-// One Counter, no SignalR, no Long Polling, no negotiate handshake.
-// Two endpoints behind the IC HTTP gateway:
+// BlazorWasp — gh #118 v2: stock vanilla Razor with @onclick driving
+// the render-as-query protocol. No SignalR, no Long Polling, no
+// negotiate handshake. Just two HTTP endpoints:
 //   GET  /_wasp/render → canister_query  (sub-300ms on mainnet)
 //   POST /_wasp/event  → canister_update (one consensus round per click)
 
@@ -19,7 +20,10 @@ namespace WaspSample.BlazorWasp;
 
 public static class Program
 {
-    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CounterRenderer))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CounterService))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspComponentRenderer<Counter>))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
     [ModuleInitializer]
     internal static void Init()
     {
@@ -31,22 +35,20 @@ public static class Program
                 ApplicationName = "BlazorWasp",
             });
 
-            // Renderer is a normal DI singleton. v1: developer writes
-            // an IWaspRenderer by hand; v2 will autogenerate it from
-            // Razor markup.
-            builder.Services.AddSingleton<IWaspRenderer, CounterRenderer>();
+            // Singletons: state survives across calls. Component
+            // instances are throwaway (re-created each render).
+            builder.Services.AddSingleton<CounterService>();
+            builder.Services.AddSingleton<IWaspRenderer, WaspComponentRenderer<Counter>>();
 
-            // One line of IC hosting setup.
             builder.UseInternetComputerWasp();
 
             var app = builder.Build();
             app.UseInternetComputerWasp();
             app.StartAsync().GetAwaiter().GetResult();
 
-            // SSR pre-render: the index page is just a tiny shell that
-            // loads the wasp.js bridge and includes the initial render
-            // inline so the user sees something immediately. The bridge
-            // hydrates by wiring events on the existing DOM.
+            // SSR pre-render: shell with the Counter's initial HTML
+            // inlined. Bridge hydrates by wiring event listeners on
+            // the existing DOM.
             var renderer = app.Services.GetRequiredService<IWaspRenderer>();
             var initial = renderer.Render(new WaspRenderRequest { Path = "/" });
             var shellHtml = BuildShell(initial.Html);
@@ -92,12 +94,12 @@ public static class Program
     </style>
 </head>
 <body>
-    <p class=""badge"">render-as-query — no SignalR</p>
+    <p class=""badge"">stock @@onclick — render-as-query — no SignalR</p>
     <div id=""wasp-root"">" + initialHtml + @"</div>
     <p style=""color:#64748b;font-size:0.85rem;margin-top:2rem"">
-        Click the button. Each click is one IC update call (~2 s consensus).
-        No warmup, no polling. View state always reflects the canister's
-        latest certified state.
+        Counter.razor is vanilla Blazor markup: <code>@@onclick=""Counter.Increment""</code>.
+        Each click is one IC update call (~2 s consensus) with the
+        post-event render inline. No warmup, no polling.
     </p>
     <script src=""/_wasp/wasp.js""></script>
 </body>
