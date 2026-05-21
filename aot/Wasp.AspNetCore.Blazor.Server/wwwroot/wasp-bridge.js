@@ -34,8 +34,15 @@
   //     arrives or HOLD_TIMEOUT_MS elapses. SignalR sees one slow
   //     response, not many fast ones.
   var origFetch = window.fetch;
-  var POLL_INTERVAL_MS = 1000;   // canister poll cadence inside the hold
-  var HOLD_TIMEOUT_MS = 25000;   // max hold for an ESTABLISHED connection
+  // Per-connection warmup window — keep polls tight while the circuit
+  // is still bootstrapping (handshake → StartCircuit → initial
+  // render-diff, each ~2 s consensus), then back off so the network
+  // panel isn't dominated by idle polls. Measured from the first poll
+  // on a given connection id.
+  var WARMUP_WINDOW_MS = 10000;
+  var POLL_FAST_MS = 150;
+  var POLL_SLOW_MS = 1000;
+  var HOLD_TIMEOUT_MS = 25000;
 
   // SignalR's LongPolling connect sequence:
   //   1. POST /_blazor/negotiate         (we already speed this up via v2)
@@ -47,9 +54,49 @@
   // observed at least one non-empty response on this connection id
   // (= server has sent something, handshake or render-diff).
   var _establishedIds = new Object();
+  var _firstPollAt = new Object();
+  // Handshake-batching state. Blazor Server's connect sequence is:
+  //   1. SignalR POST handshake {"protocol":"blazorpack","version":1}\x1e
+  //   2. Server queues ack {}\x1e in outbox            ← update call
+  //   3. Client GET poll picks up ack
+  //   4. Blazor POST circuit-init (UpdateRootComponents / AttachToCircuit)
+  //   5. Server processes, queues initial render-diff   ← update call
+  //   6. Client GET poll picks up diff
+  // On IC each ← update call is ~2 s consensus. Combining steps 1 and 4
+  // into one POST cuts one full round trip. The trick: SignalR awaits the
+  // handshake ack before firing the circuit-init POST. We resolve that
+  // wait *locally* by synthesizing the ack into the next GET response;
+  // SignalR proceeds; the circuit-init POST arrives; we combine it with
+  // the buffered handshake bytes and fire ONE real POST. The server then
+  // processes both frames in a single update call and queues only the
+  // render-diff (or queues ack + diff, in which case we strip the
+  // duplicate ack on the way back).
+  var _pendingHandshake = new Object();   // id → Uint8Array of handshake bytes
+  var _ackInjected = new Object();        // id → boolean
+  var _stripDupAck = new Object();        // id → boolean
   function _extractId(url) {
     var m = url.match(/[?&]id=([^&]+)/);
     return m ? m[1] : null;
+  }
+  function _bytesStartWith(bytes, prefix) {
+    if (bytes.length < prefix.length) return false;
+    for (var i = 0; i < prefix.length; i++) if (bytes[i] !== prefix[i]) return false;
+    return true;
+  }
+  // {"protocol":  — the handshake frame's leading characters (JSON, sent
+  // before blazorpack binary begins).
+  var HANDSHAKE_PREFIX = new Uint8Array([0x7B, 0x22, 0x70, 0x72, 0x6F, 0x74, 0x6F, 0x63, 0x6F, 0x6C, 0x22, 0x3A]);
+  // {}<RS> — handshake ack
+  var ACK_BYTES = new Uint8Array([0x7B, 0x7D, 0x1E]);
+  function _signalCircuitReady() {
+    // Fire once per page-load. App.razor (or any host page) can listen
+    // for this and hide its "Connecting…" UI without waiting on the
+    // 16-s MutationObserver fallback.
+    if (window._waspCircuitReadySignalled) return;
+    window._waspCircuitReadySignalled = true;
+    try {
+      window.dispatchEvent(new CustomEvent('wasp:circuit-ready'));
+    } catch (_) { /* old browsers — fine */ }
   }
 
   async function _wrappedFetch(input, init) {
@@ -67,8 +114,76 @@
         input = new Request(newUrl, input);
       }
     }
+    // POST /_blazor?id=…  — batching of handshake + circuit-init
+    if (url && url.match(/\/_blazor\?id=/) && method === 'POST') {
+      var pid = _extractId(url);
+      var body = init && init.body;
+      var bodyBytes;
+      if (body instanceof Uint8Array) {
+        bodyBytes = body;
+      } else if (body instanceof ArrayBuffer) {
+        bodyBytes = new Uint8Array(body);
+      } else if (body) {
+        bodyBytes = new Uint8Array(await new Response(body).arrayBuffer());
+      } else {
+        bodyBytes = new Uint8Array(0);
+      }
+      var isHandshake = _bytesStartWith(bodyBytes, HANDSHAKE_PREFIX);
+      if (isHandshake && pid && !_pendingHandshake[pid]) {
+        // Buffer the handshake bytes and fake a 200 to SignalR so it
+        // proceeds to await the ack. We'll inject the ack on the next
+        // GET poll.
+        _pendingHandshake[pid] = bodyBytes;
+        _ackInjected[pid] = false;
+        // Safety net: if the circuit-init POST never arrives within
+        // FLUSH_ALONE_MS, fire the handshake alone so the connection
+        // doesn't stall.
+        setTimeout(function () {
+          if (_pendingHandshake[pid]) {
+            var alone = _pendingHandshake[pid];
+            delete _pendingHandshake[pid];
+            origFetch(input, { method: 'POST', body: alone, headers: init && init.headers })
+              .catch(function () { /* best effort */ });
+          }
+        }, 400);
+        return new Response('', {
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream', 'content-length': '0' },
+        });
+      }
+      if (pid && _pendingHandshake[pid]) {
+        // Combine buffered handshake + this POST's bytes and fire ONE
+        // real POST to the canister. The server's HandleInbound parses
+        // multiple length-prefixed frames natively.
+        var hs = _pendingHandshake[pid];
+        delete _pendingHandshake[pid];
+        var combined = new Uint8Array(hs.length + bodyBytes.length);
+        combined.set(hs, 0);
+        combined.set(bodyBytes, hs.length);
+        _stripDupAck[pid] = true;
+        var newInit = { method: 'POST', body: combined };
+        if (init && init.headers) newInit.headers = init.headers;
+        if (init && init.signal) newInit.signal = init.signal;
+        return await origFetch(input, newInit);
+      }
+      // Not a handshake or circuit-init batch — pass through.
+      return await origFetch(input, init);
+    }
     if (url && url.match(/\/_blazor\?id=/) && method === 'GET') {
       var id = _extractId(url);
+      // Fake-ack injection: if we've buffered a handshake POST for this
+      // id and haven't yet handed an ack to SignalR, do so now. This
+      // resolves SignalR's _handshakeCompleted so it fires the next
+      // (circuit-init) POST, which we'll combine with the buffered
+      // handshake bytes.
+      if (id && _pendingHandshake[id] && !_ackInjected[id]) {
+        _ackInjected[id] = true;
+        if (id) _establishedIds[id] = true;
+        return new Response(ACK_BYTES, {
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream', 'content-length': '3' },
+        });
+      }
       var seenBefore = !!(id && _establishedIds[id]);
       if (id) _establishedIds[id] = true;
       if (!seenBefore) {
@@ -80,7 +195,16 @@
       // Subsequent polls — emulate server-side long polling. Inspect
       // each response via Content-Length header WITHOUT consuming the
       // body stream; SignalR needs the body intact for blazorpack
-      // parsing. The server always sets content-length.
+      // parsing.
+      //
+      // Polling cadence is per-CONNECTION (not per-cycle): if the
+      // connection is still inside its warmup window (first 10 s),
+      // poll every POLL_FAST_MS so the handshake-ack → StartCircuit
+      // → initial render-diff sequence isn't gated on slow polls.
+      // After warmup, poll every POLL_SLOW_MS — idle network looks
+      // like one HTTP request per second, comparable to vanilla
+      // long-poll cadence.
+      if (id && !_firstPollAt[id]) _firstPollAt[id] = Date.now();
       var start = Date.now();
       while (Date.now() - start < HOLD_TIMEOUT_MS) {
         if (init && init.signal && init.signal.aborted) break;
@@ -88,13 +212,32 @@
         if (resp.status !== 200) return resp;
         var cl = parseInt(resp.headers.get('content-length') || '-1', 10);
         if (cl > 0 || cl < 0) {
-          // cl > 0: data present, hand off untouched.
-          // cl < 0: header missing — be safe, hand off too.
+          // If we're owed a duplicate-ack strip (we fed SignalR a fake
+          // ack during the batching), strip the server's real ack
+          // prefix `{}\x1e` here so SignalR's blazorpack parser doesn't
+          // re-process it as a frame.
+          if (id && _stripDupAck[id]) {
+            delete _stripDupAck[id];
+            var rb = new Uint8Array(await resp.arrayBuffer());
+            if (_bytesStartWith(rb, ACK_BYTES)) {
+              var rest = rb.slice(ACK_BYTES.length);
+              _signalCircuitReady();
+              return new Response(rest, {
+                status: 200,
+                headers: { 'content-type': 'application/octet-stream', 'content-length': String(rest.length) },
+              });
+            }
+            _signalCircuitReady();
+            return new Response(rb, {
+              status: 200,
+              headers: { 'content-type': 'application/octet-stream', 'content-length': String(rb.length) },
+            });
+          }
+          _signalCircuitReady();
           return resp;
         }
-        // cl === 0: empty payload, wait and re-poll. The discarded
-        // resp's body is empty so closing it is harmless.
-        await new Promise(function (r) { setTimeout(r, POLL_INTERVAL_MS); });
+        var inWarmup = id && (Date.now() - _firstPollAt[id]) < WARMUP_WINDOW_MS;
+        await new Promise(function (r) { setTimeout(r, inWarmup ? POLL_FAST_MS : POLL_SLOW_MS); });
       }
       return await origFetch(input, init);
     }
@@ -135,6 +278,11 @@
     Blazor.start({
       circuit: {
         configureSignalR: function (builder) {
+          // NOTE: skipNegotiation=true would save the /_blazor/negotiate
+          // round trip, BUT SignalR's client enforces "skipNegotiation
+          // can only be used with WebSocket transport." LongPolling
+          // mandates negotiate. The negotiate POST goes via our v2
+          // query path (~300 ms) so the cost is bounded.
           builder
             .withUrl('/_blazor', { transport: 4 /* LongPolling */ })
             .configureLogging(1);
