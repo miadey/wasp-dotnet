@@ -80,9 +80,21 @@ public sealed class IcServer : IServer
         new(StringComparer.Ordinal);
 
     /// <summary>
+    /// Rich query handler: receives the full <see cref="IcHttpRequest"/>
+    /// (headers + body in addition to url/method) and may return null to
+    /// bail to the update path. Used by handlers that need per-request
+    /// entropy unavailable in query context — most notably the SignalR
+    /// negotiate (gh #113), where the connectionId is derived from
+    /// (traceparent ∥ Ic0.time ∥ body) hashing rather than a rolled-back
+    /// canister counter.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Func<IcHttpRequest, (byte[] Body, string ContentType)?>> _richQueryHandlers =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
     /// Simple registration: handler always returns a body, ignores HTTP
-    /// method. Used by metadata endpoints like /_blazor/negotiate where
-    /// the response is always the same shape.
+    /// method. Used by metadata endpoints where the response is always
+    /// the same shape.
     /// </summary>
     public static void RegisterQueryHandler(string pathPrefix, Func<string, (byte[] Body, string ContentType)> handler)
     {
@@ -102,6 +114,22 @@ public sealed class IcServer : IServer
         if (pathPrefix is null) throw new ArgumentNullException(nameof(pathPrefix));
         if (handler is null) throw new ArgumentNullException(nameof(handler));
         _queryHandlers[pathPrefix] = handler;
+    }
+
+    /// <summary>
+    /// Rich registration: handler receives the full <see cref="IcHttpRequest"/>
+    /// (so it can read headers and body) and may return null to bail to
+    /// the update path. Required for the SignalR negotiate fast-path,
+    /// whose connectionId is derived from per-request entropy
+    /// (traceparent, time, body) — canister-side counters get rolled
+    /// back at query end, so the handler must source entropy from the
+    /// request itself.
+    /// </summary>
+    public static void RegisterQueryHandler(string pathPrefix, Func<IcHttpRequest, (byte[] Body, string ContentType)?> handler)
+    {
+        if (pathPrefix is null) throw new ArgumentNullException(nameof(pathPrefix));
+        if (handler is null) throw new ArgumentNullException(nameof(handler));
+        _richQueryHandlers[pathPrefix] = handler;
     }
 
     /// <summary>
@@ -305,6 +333,33 @@ public sealed class IcServer : IServer
                     // Only run dynamic query handlers on .raw.; on the
                     // canonical subdomain we fall through to update so
                     // the boundary accepts the response.
+                    // Rich handlers run first: they get the full request
+                    // (headers + body) and are how negotiate sources its
+                    // per-request entropy.
+                    if (isRawSubdomain
+                        && (probeReq.Method == "GET" || probeReq.Method == "POST")
+                        && _richQueryHandlers.TryGetValue(lookupPath, out var richHandler))
+                    {
+                        var richResult = richHandler(probeReq);
+                        if (richResult is { } rr)
+                        {
+                            Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
+                            {
+                                StatusCode = 200,
+                                Body = rr.Body,
+                                Headers = new[]
+                                {
+                                    new KeyValuePair<string, string>("content-type", rr.ContentType),
+                                    new KeyValuePair<string, string>("content-length", rr.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                    new KeyValuePair<string, string>("access-control-allow-origin", "*"),
+                                    new KeyValuePair<string, string>("cache-control", "no-store"),
+                                },
+                            }));
+                            return;
+                        }
+                        // null → fall through to the simple handler / update path.
+                    }
+
                     if (isRawSubdomain
                         && (probeReq.Method == "GET" || probeReq.Method == "POST")
                         && _queryHandlers.TryGetValue(lookupPath, out var handler))

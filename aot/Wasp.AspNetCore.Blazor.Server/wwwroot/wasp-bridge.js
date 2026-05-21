@@ -20,6 +20,29 @@
   async function _wrappedFetch(input, init) {
     var url = typeof input === 'string' ? input : input.url;
     var method = (init && init.method) || 'GET';
+    // SignalR's POST /_blazor/negotiate carries no body and stock
+    // headers. Two browser tabs opened simultaneously emit
+    // byte-identical requests, which the IC HTTP gateway's ~10 s query
+    // response cache deduplicates → both tabs get the same
+    // connectionId and the second tab's handshake POSTs land on a
+    // transport whose _handshakeComplete is already true. Append a
+    // crypto-random nonce query param to make every negotiate request
+    // distinct at the bytes level, busting the cache. Server-side the
+    // nonce is hashed into the connectionId via the rich query handler
+    // in BlazorOnIcHostingExtensions.cs, so each tab still gets a
+    // unique id.
+    if (url && url.indexOf('/_blazor/negotiate') >= 0 && method === 'POST') {
+      var nonce = (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID()
+        : Math.random().toString(36).slice(2) + Date.now().toString(36);
+      var sep = url.indexOf('?') >= 0 ? '&' : '?';
+      var newUrl = url + sep + 'wasp-nonce=' + encodeURIComponent(nonce);
+      if (typeof input === 'string') {
+        input = newUrl;
+      } else {
+        input = new Request(newUrl, input);
+      }
+    }
     if (url && url.match(/\/_blazor\?id=/) && method === 'GET') {
       for (var i = 0; i < POLL_RETRY; i++) {
         if (init && init.signal && init.signal.aborted) break;

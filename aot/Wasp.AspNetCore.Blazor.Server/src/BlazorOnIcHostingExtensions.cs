@@ -28,15 +28,6 @@ namespace Wasp.AspNetCore.Blazor.Server;
 /// </summary>
 public static class BlazorOnIcHostingExtensions
 {
-    // Monotonic counter for negotiate connectionId disambiguation (see
-    // the negotiate query handler in MapBlazorOnIC). Bumped via
-    // Interlocked.Increment from a query-call context — safe because
-    // even though the increment is rolled back at end of query (no
-    // state persists), each call sees a monotonically advancing
-    // pre-increment value within the canister process lifetime, which
-    // is what we need to disambiguate same-nanosecond negotiate calls.
-    private static long _negotiateSeq;
-
     /// <summary>
     /// Register all DI services Blazor Server needs to run on a canister:
     /// data protection no-op, encoders, Razor Components stack with
@@ -266,19 +257,93 @@ public static class BlazorOnIcHostingExtensions
             System.Text.Encoding.UTF8.GetBytes("[]"),
             "application/json; charset=utf-8");
 
-        // POST /_blazor/negotiate is now handled by the update-path
-        // MapPost in LongPollingEndpoints. The earlier query-fast-path
-        // optimization here (gh #113) saved ~2 s of consensus per
-        // session but broke multi-tab: query-context mutations are
-        // rolled back, so Interlocked.Increment on the monotonic
-        // sequence counter resets between calls, and two browsers
-        // negotiating in the same Ic0.time() nanosecond received the
-        // same connectionId. The handshake POST then routed to a
-        // single shared transport whose _handshakeComplete was already
-        // true, and the second tab's handshake bytes got parsed as
-        // blazorpack — "frame body length 123 exceeds remaining
-        // payload 37". Running negotiate in update mode keeps the
-        // sequence persistent across calls and guarantees unique ids.
+        // POST /_blazor/negotiate served from the query path (gh #113).
+        // Vanilla SignalR's ConnectionIdGenerator is
+        // `Guid.NewGuid().ToString()` — opaque random token, no state.
+        // We can't call Guid.NewGuid on wasm32-wasi (no entropy
+        // syscall), and we can't use ic0.raw_rand (update-only). We
+        // also can't rely on a canister-side counter — query-call
+        // mutations are rolled back, so Interlocked.Increment resets
+        // between calls and two clients negotiating in the same
+        // Ic0.time() nanosecond would collide on the suffix.
+        //
+        // Instead we derive the id from per-request entropy that's
+        // immutable inside the canister: the W3C `traceparent`
+        // header (the IC boundary node attaches a fresh trace-id /
+        // span-id per request — 24 bytes of pseudo-random), plus
+        // Ic0.time() and the raw request body. SHA-256 of that
+        // concatenation, truncated to 16 bytes, formatted as a
+        // canonical lowercase GUID. Blazor never inspects the bytes;
+        // round-tripping a 36-char hex-with-dashes token is what
+        // matters.
+        //
+        // Saves the ~2 s update-call upgrade on every page load that
+        // attaches a new circuit. Multi-tab is safe because each tab's
+        // request carries a distinct traceparent.
+        IcServer.RegisterQueryHandler("/_blazor/negotiate", (req) =>
+        {
+            if (req.Method != "POST") return null;
+
+            // Collect entropy. Inputs:
+            //   - Method + Url (the wasp-bridge.js fetch wrapper appends
+            //     a per-request crypto-random `?wasp-nonce=…` query
+            //     param specifically so two tabs hitting negotiate
+            //     within the boundary's ~10 s query response cache get
+            //     byte-distinct requests).
+            //   - traceparent / x-request-id / host / user-agent
+            //     headers (gateway-attached entropy where present).
+            //   - Ic0.time() nanoseconds.
+            //   - Raw POST body.
+            // SHA-256 of the concatenation, truncated to 16 bytes,
+            // formatted as a canonical lowercase GUID.
+            using var ms = new System.IO.MemoryStream(capacity: 256);
+            var ml = System.Text.Encoding.UTF8.GetBytes(req.Method + " " + req.Url + "\n");
+            ms.Write(ml, 0, ml.Length);
+            foreach (var h in req.Headers)
+            {
+                if (h.Key.Equals("traceparent", StringComparison.OrdinalIgnoreCase)
+                    || h.Key.Equals("x-request-id", StringComparison.OrdinalIgnoreCase)
+                    || h.Key.Equals("host", StringComparison.OrdinalIgnoreCase)
+                    || h.Key.Equals("user-agent", StringComparison.OrdinalIgnoreCase))
+                {
+                    var kvBytes = System.Text.Encoding.UTF8.GetBytes(h.Key + ":" + (h.Value ?? "") + "\n");
+                    ms.Write(kvBytes, 0, kvBytes.Length);
+                }
+            }
+            ulong now = Ic0.time();
+            Span<byte> timeBuf = stackalloc byte[8];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(timeBuf, now);
+            ms.Write(timeBuf);
+            if (req.Body is { Length: > 0 } body) ms.Write(body, 0, body.Length);
+
+            byte[] hash = Wasp.WebSockets.Sha256.Hash(ms.ToArray());
+
+            static char HexChar(int v) => (char)(v < 10 ? '0' + v : 'a' + (v - 10));
+            var idChars = new char[36];
+            int pos = 0;
+            int[] groups = { 4, 2, 2, 2, 6 };
+            int hi = 0;
+            for (int g = 0; g < groups.Length; g++)
+            {
+                if (g > 0) idChars[pos++] = '-';
+                for (int j = 0; j < groups[g]; j++)
+                {
+                    byte b = hash[hi++];
+                    idChars[pos++] = HexChar(b >> 4);
+                    idChars[pos++] = HexChar(b & 0x0F);
+                }
+            }
+            string connectionId = new string(idChars);
+
+            string json =
+                "{\"connectionId\":\"" + connectionId +
+                "\",\"connectionToken\":\"" + connectionId +
+                "\",\"negotiateVersion\":1,\"availableTransports\":[" +
+                "{\"transport\":\"LongPolling\",\"transferFormats\":[\"Text\",\"Binary\"]}]}";
+
+            Reply.Print($"[negotiate-q] id={connectionId} now={now} bodyLen={(req.Body?.Length ?? 0)}");
+            return (System.Text.Encoding.UTF8.GetBytes(json), "application/json; charset=utf-8");
+        });
 
         // The Wasp JS bridge — waspSetCount, the fetch wrapper, the
         // pre-registered interop bridge. Lives in an embedded resource
