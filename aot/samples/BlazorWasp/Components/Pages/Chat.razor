@@ -1,0 +1,44 @@
+@* Chat.razor — real-time multi-user chat showcasing cross-device
+   reactivity. Open in two devices; both stay in sync via 3s render
+   polling (faster right after a local click via the adaptive bridge).
+   Messages persist in stable memory. *@
+
+@inject WaspSample.BlazorWasp.ChatService ChatState
+
+<PageTitle>Chat</PageTitle>
+
+<h1>Chat</h1>
+
+<p>Open this page on your phone too — both devices will see new
+messages within ~3 s (and instantly when you've just posted). All
+messages persist in stable memory.</p>
+
+<ul class="chat-messages">
+    @foreach (var msg in ChatState.Messages)
+    {
+        <li>
+            <span class="chat-sender">@msg.Sender</span>
+            <span class="chat-text">@msg.Text</span>
+        </li>
+    }
+</ul>
+
+<form class="chat-form">
+    <input name="text" type="text" placeholder="Type a message…" autocomplete="off" required />
+    <button class="btn btn-primary" @onclick="HandleSend">Send</button>
+</form>
+
+@code {
+    void HandleSend()
+    {
+        // The bridge collected the form's input values and shipped
+        // them as args. WaspContext exposes them ambient to the
+        // handler so we don't need to invent a custom @onclick
+        // signature (Razor's compiler restricts @onclick to
+        // EventCallback-compatible delegates).
+        if (Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs.TryGetValue("text", out var text))
+        {
+            ChatState.Post(new Dictionary<string, string> { ["text"] = text });
+        }
+    }
+}

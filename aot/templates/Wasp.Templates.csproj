@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageType>Template</PackageType>
+    <PackageId>Wasp.Templates</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Title>Wasp Project Templates</Title>
+    <Authors>Wasp</Authors>
+    <Description>Project templates for Wasp — Blazor and ASP.NET Core on the Internet Computer.</Description>
+    <PackageTags>dotnet-new;templates;blazor;aspnetcore;internet-computer;icp</PackageTags>
+
+    <TargetFramework>net10.0</TargetFramework>
+    <IncludeContentInPack>true</IncludeContentInPack>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <ContentTargetFolders>content</ContentTargetFolders>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <NoDefaultExcludes>true</NoDefaultExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="blazor-on-icp\**\*" Exclude="blazor-on-icp\bin\**;blazor-on-icp\obj\**" />
+    <Compile Remove="**\*" />
+  </ItemGroup>
+
+</Project>

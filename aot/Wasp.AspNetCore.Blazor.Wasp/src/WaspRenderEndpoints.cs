@@ -100,6 +100,7 @@ public static class WaspRenderEndpoints
                 HandlerId = ExtractJsonString(bodyJson, "handlerId") ?? "",
                 EventName = ExtractJsonString(bodyJson, "eventName") ?? "click",
                 LastBatchId = ExtractJsonString(bodyJson, "lastBatchId"),
+                Args = ExtractJsonStringMap(bodyJson, "args"),
             };
             try
             {
@@ -196,6 +197,60 @@ public static class WaspRenderEndpoints
             if (h.Key.Equals(name, StringComparison.OrdinalIgnoreCase))
                 return h.Value;
         return null;
+    }
+
+    /// <summary>
+    /// Extract a string→string map nested under "field":{...}. v1
+    /// trimmed parser — only supports flat string values, no
+    /// escaping beyond what the bridge produces.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> ExtractJsonStringMap(string json, string field)
+    {
+        var dict = new Dictionary<string, string>();
+        var marker = "\"" + field + "\":{";
+        int i = json.IndexOf(marker, StringComparison.Ordinal);
+        if (i < 0) return dict;
+        i += marker.Length;
+        // Walk pairs "k":"v" until matching '}'.
+        while (i < json.Length && json[i] != '}')
+        {
+            while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+            if (i >= json.Length || json[i] != '"') break;
+            i++;
+            var keyStart = i;
+            while (i < json.Length && json[i] != '"') i++;
+            if (i >= json.Length) break;
+            var key = json.Substring(keyStart, i - keyStart);
+            i++; // closing "
+            while (i < json.Length && (json[i] == ':' || char.IsWhiteSpace(json[i]))) i++;
+            if (i >= json.Length || json[i] != '"') break;
+            i++;
+            var valStart = i;
+            // Decode value until non-escaped closing quote.
+            var sb = new StringBuilder();
+            while (i < json.Length)
+            {
+                char c = json[i];
+                if (c == '\\' && i + 1 < json.Length)
+                {
+                    char esc = json[i + 1];
+                    if (esc == 'n') sb.Append('\n');
+                    else if (esc == 'r') sb.Append('\r');
+                    else if (esc == 't') sb.Append('\t');
+                    else sb.Append(esc);
+                    i += 2;
+                    continue;
+                }
+                if (c == '"') break;
+                sb.Append(c);
+                i++;
+            }
+            if (i >= json.Length) break;
+            dict[key] = sb.ToString();
+            i++; // closing "
+            while (i < json.Length && (json[i] == ',' || char.IsWhiteSpace(json[i]))) i++;
+        }
+        return dict;
     }
 
     /// <summary>

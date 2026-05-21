@@ -41,6 +41,17 @@
     var handlerId = e.currentTarget.getAttribute('data-wasp-evt-click');
     if (!handlerId) return;
     e.preventDefault();
+    _markLocalEvent();
+    // Collect form-field values: if the button is inside a <form>, we
+    // serialise the form's inputs and ship them as args. Lets handlers
+    // that take an IDictionary<string,string> read submitted text
+    // (chat sample) without needing JS interop or @bind plumbing.
+    var args = {};
+    var form = e.currentTarget.closest && e.currentTarget.closest('form');
+    if (form) {
+      var fd = new FormData(form);
+      fd.forEach(function (v, k) { args[k] = String(v); });
+    }
     try {
       var resp = await fetch('/_wasp/event', {
         method: 'POST',
@@ -53,6 +64,7 @@
           handlerId: handlerId,
           lastBatchId: lastBatchId,
           eventName: 'click',
+          args: args,
         }),
       });
       if (!resp.ok) {
@@ -142,15 +154,29 @@
   // applied we swap in the new render. Each poll is a v2-cert query
   // (~300 ms on mainnet, ~10 ms on local) so the idle traffic is one
   // tiny request every few seconds.
-  var REACTIVITY_POLL_MS = 3000;
+  // Adaptive polling: fast burst right after a local event (user
+  // clicked, their click POST is in flight — the response will set
+  // the new state, but if another tab/device is racing we want their
+  // change too). Falls back to relaxed cadence when nothing has
+  // happened for a while.
+  var POLL_FAST_MS = 500;
+  var POLL_RELAXED_MS = 3000;
+  var POLL_HIDDEN_MS = 15000;    // background tabs
+  var FAST_WINDOW_MS = 5000;     // stay in fast mode this long after an event
+
+  var lastLocalEventAt = 0;
+  function _markLocalEvent() { lastLocalEventAt = Date.now(); }
+
+  function _nextInterval() {
+    if (document.hidden) return POLL_HIDDEN_MS;
+    if (Date.now() - lastLocalEventAt < FAST_WINDOW_MS) return POLL_FAST_MS;
+    return POLL_RELAXED_MS;
+  }
 
   async function _reactivityPoll() {
     while (true) {
       try {
-        await new Promise(function (r) { setTimeout(r, REACTIVITY_POLL_MS); });
-        // Note: we don't gate on document.hidden — mobile browsers
-        // throttle background tabs hard anyway, and gating here makes
-        // headless / driver-controlled tabs never poll at all.
+        await new Promise(function (r) { setTimeout(r, _nextInterval()); });
         var headers = { 'accept': 'application/json' };
         if (lastBatchId) headers['if-none-match'] = lastBatchId;
         var resp = await origFetch('/_wasp/render?path=' + encodeURIComponent(location.pathname), { headers: headers });
@@ -158,7 +184,7 @@
         var ct = resp.headers.get('content-type') || '';
         if (ct.indexOf('json') < 0) continue;
         var batch = await resp.json();
-        if (batch.unchanged) continue; // server signaled no diff
+        if (batch.unchanged) continue;
         if (batch.batchId && batch.batchId === lastBatchId) continue;
         _applyBatch(batch);
       } catch (e) {

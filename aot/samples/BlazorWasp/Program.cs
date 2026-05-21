@@ -17,8 +17,10 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Home))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Weather))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Chat))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CounterService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WeatherService))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(ChatService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspRouter))]
     [ModuleInitializer]
@@ -34,6 +36,7 @@ public static class Program
 
             builder.Services.AddSingleton<CounterService>();
             builder.Services.AddSingleton<WeatherService>();
+            builder.Services.AddSingleton<ChatService>();
             // Router is configured at registration time with the route map.
             builder.Services.AddSingleton<IWaspRenderer>(sp =>
             {
@@ -41,6 +44,7 @@ public static class Program
                 r.AddRoute<Home>("/");
                 r.AddRoute<Counter>("/counter");
                 r.AddRoute<Weather>("/weather");
+                r.AddRoute<Chat>("/chat");
                 r.WrapShell((path, inner) => WrapWithSidebar(path, inner));
                 return r;
             });
@@ -59,6 +63,7 @@ public static class Program
             RegisterShell(renderer, "/");
             RegisterShell(renderer, "/counter");
             RegisterShell(renderer, "/weather");
+            RegisterShell(renderer, "/chat");
         }
         catch (Exception ex)
         {
@@ -90,6 +95,7 @@ public static class Program
         sb.Append("<a href=\"/\"").Append(Active("/")).Append(">Home</a>");
         sb.Append("<a href=\"/counter\"").Append(Active("/counter")).Append(">Counter</a>");
         sb.Append("<a href=\"/weather\"").Append(Active("/weather")).Append(">Weather</a>");
+        sb.Append("<a href=\"/chat\"").Append(Active("/chat")).Append(">Chat</a>");
         sb.Append("</nav>");
         sb.Append("</aside>");
         sb.Append("<main>").Append(innerHtml).Append("</main>");
@@ -138,6 +144,14 @@ public static class Program
         .table th, .table td { padding: 0.5rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
         .table th { background: #f1f5f9; border-bottom-color: #cbd5f5; }
         p[role=""status""] { font-size: 1.1rem; }
+        .chat-messages { list-style: none; padding: 0; margin: 1rem 0; max-height: 400px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 4px; }
+        .chat-messages li { padding: 0.5rem 0.75rem; border-bottom: 1px solid #f1f5f9; }
+        .chat-messages li:last-child { border-bottom: 0; }
+        .chat-sender { color: #2563eb; font-weight: 600; font-family: ui-monospace, monospace; font-size: 0.85rem; margin-right: 0.5rem; }
+        .chat-text { color: #1e293b; }
+        .chat-form { display: flex; gap: 0.5rem; }
+        .chat-form input[type=text] { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid #cbd5f5; border-radius: 4px; font-size: 0.95rem; }
+        .chat-form button { white-space: nowrap; }
     </style>
 </head>
 <body>

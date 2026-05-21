@@ -61,4 +61,11 @@ public sealed class WaspEventRequest
     public string HandlerId { get; init; } = "";
     public string EventName { get; init; } = "click";
     public string? LastBatchId { get; init; }
+    /// <summary>
+    /// Optional form-data captured by the bridge when the event source
+    /// is inside a <c>&lt;form&gt;</c>. Handlers that take an
+    /// <c>IDictionary&lt;string,string&gt;</c> receive these.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> Args { get; init; } =
+        new Dictionary<string, string>(0);
 }

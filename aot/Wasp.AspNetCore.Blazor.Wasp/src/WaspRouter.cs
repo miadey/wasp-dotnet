@@ -59,8 +59,12 @@ public sealed class WaspRouter : IWaspRenderer
 
     public WaspRenderBatch Render(WaspRenderRequest req)
     {
-        var (html, _) = RenderPath(req.Path);
-        var batchInput = System.Text.Encoding.UTF8.GetBytes(req.Path + "|" + html);
+        var normalized = NormalizePath(req.Path);
+        var (html, _) = RenderPath(normalized);
+        // Hash the normalised path so equivalent URLs ("/counter",
+        // "/counter/", "/counter?x=1") share a batchId and the client
+        // can dedupe via If-None-Match.
+        var batchInput = System.Text.Encoding.UTF8.GetBytes(normalized + "|" + html);
         var hash = global::Wasp.WebSockets.Sha256.Hash(batchInput);
         var batchId = BytesToHex(hash, 16);
         return new WaspRenderBatch
@@ -84,26 +88,17 @@ public sealed class WaspRouter : IWaspRenderer
         _ = renderer.RenderToHtml(componentType, ParameterView.Empty);
         if (renderer.TryGetHandler(req.HandlerId, out var ec, out var raw))
         {
-            try
+            using (WaspContext.WithEvent(req.Args))
             {
-                if (raw is Action a)
+                try
                 {
-                    a();
+                    InvokeHandler(raw, ec, req.Args);
                 }
-                else if (raw is Func<System.Threading.Tasks.Task> f)
+                catch (Exception ex)
                 {
-                    f().GetAwaiter().GetResult();
+                    try { global::Wasp.IcCdk.Reply.Print("[wasp-router-dispatch] " + ex); }
+                    catch { }
                 }
-                else
-                {
-                    var t = ec.InvokeAsync(EventArgs.Empty);
-                    t.GetAwaiter().GetResult();
-                }
-            }
-            catch (Exception ex)
-            {
-                try { global::Wasp.IcCdk.Reply.Print("[wasp-router-dispatch] " + ex); }
-                catch { }
             }
         }
         return Render(new WaspRenderRequest { Path = req.Path });
@@ -137,6 +132,55 @@ public sealed class WaspRouter : IWaspRenderer
         if (q >= 0) path = path.Substring(0, q);
         if (path.Length > 1 && path.EndsWith("/")) path = path.Substring(0, path.Length - 1);
         return path;
+    }
+
+    /// <summary>
+    /// Invoke an event handler. Inspects the delegate's signature so the
+    /// developer can write:
+    ///   Action — no args (e.g. CounterService.Increment)
+    ///   Action&lt;IDictionary&lt;string,string&gt;&gt; — receives form data
+    ///   Action&lt;string&gt; — receives args["text"] if present
+    ///   Func&lt;Task&gt; — awaited
+    /// EventCallback is treated as Action — we lose strongly-typed args
+    /// for now, the developer routes form data through the
+    /// IDictionary overload instead.
+    /// </summary>
+    private static void InvokeHandler(MulticastDelegate? raw, EventCallback ec, IReadOnlyDictionary<string, string> args)
+    {
+        if (raw is Action a)
+        {
+            a();
+            return;
+        }
+        if (raw is Func<System.Threading.Tasks.Task> ft)
+        {
+            ft().GetAwaiter().GetResult();
+            return;
+        }
+        if (raw is Action<IReadOnlyDictionary<string, string>> aidict)
+        {
+            aidict(args);
+            return;
+        }
+        if (raw is Action<IDictionary<string, string>> adict)
+        {
+            adict(new Dictionary<string, string>(args));
+            return;
+        }
+        if (raw is Action<string> astr)
+        {
+            args.TryGetValue("text", out var t);
+            astr(t ?? string.Empty);
+            return;
+        }
+        if (raw is Action<Dictionary<string, string>> adictC)
+        {
+            adictC(new Dictionary<string, string>(args));
+            return;
+        }
+        // Fallback to EventCallback dispatch with synthetic empty args.
+        var t2 = ec.InvokeAsync(EventArgs.Empty);
+        t2.GetAwaiter().GetResult();
     }
 
     private static string BytesToHex(byte[] bytes, int n)
