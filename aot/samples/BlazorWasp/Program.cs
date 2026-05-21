@@ -52,11 +52,14 @@ public static class Program
             var renderer = app.Services.GetRequiredService<IWaspRenderer>();
             var initial = renderer.Render(new WaspRenderRequest { Path = "/" });
             var shellHtml = BuildShell(initial.Html);
-            IcServer.RegisterStaticAsset(
-                "/",
-                Encoding.UTF8.GetBytes(shellHtml),
-                "text/html; charset=utf-8");
-            IcCertifiedAssets.Insert("/", Encoding.UTF8.GetBytes(shellHtml));
+            var shellBytes = Encoding.UTF8.GetBytes(shellHtml);
+            IcServer.RegisterStaticAsset("/", shellBytes, "text/html; charset=utf-8");
+            IcCertifiedAssets.Insert("/", shellBytes);
+            // Alias /counter to the same shell (back-compat for users
+            // who bookmarked the BlazorVanilla /counter path during the
+            // SignalR-based iteration).
+            IcServer.RegisterStaticAsset("/counter", shellBytes, "text/html; charset=utf-8");
+            IcCertifiedAssets.Insert("/counter", shellBytes);
         }
         catch (Exception ex)
         {
