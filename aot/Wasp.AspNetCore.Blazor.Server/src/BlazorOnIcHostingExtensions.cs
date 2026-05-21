@@ -280,6 +280,12 @@ public static class BlazorOnIcHostingExtensions
         // Saves the ~2 s update-call upgrade on every page load that
         // attaches a new circuit. Multi-tab is safe because each tab's
         // request carries a distinct traceparent.
+        // Register negotiate for v2 response certification so the same
+        // query handler runs on the canonical .icp0.io subdomain too
+        // (boundary won't accept a v1-uncerted dynamic response there).
+        // gh #61 / #117.
+        IcResponseCertV2.RegisterPassThroughPath("/_blazor/negotiate", "POST");
+
         IcServer.RegisterQueryHandler("/_blazor/negotiate", (req) =>
         {
             if (req.Method != "POST") return null;

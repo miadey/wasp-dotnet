@@ -335,25 +335,42 @@ public sealed class IcServer : IServer
                     // the boundary accepts the response.
                     // Rich handlers run first: they get the full request
                     // (headers + body) and are how negotiate sources its
-                    // per-request entropy.
-                    if (isRawSubdomain
+                    // per-request entropy. Eligibility rules:
+                    //   - .raw subdomain: always (boundary skips cert)
+                    //   - canonical subdomain: only when the path is
+                    //     registered for v2 response certification — we
+                    //     attach IC-CertificateExpression + v2 IC-Certificate
+                    //     headers so the boundary accepts the dynamic
+                    //     response without body certification (gh #61).
+                    bool v2Registered = IcResponseCertV2.IsRegistered(lookupPath);
+                    if ((isRawSubdomain || v2Registered)
                         && (probeReq.Method == "GET" || probeReq.Method == "POST")
                         && _richQueryHandlers.TryGetValue(lookupPath, out var richHandler))
                     {
                         var richResult = richHandler(probeReq);
                         if (richResult is { } rr)
                         {
+                            var headers = new List<KeyValuePair<string, string>>(6)
+                            {
+                                new("content-type", rr.ContentType),
+                                new("content-length", rr.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                new("access-control-allow-origin", "*"),
+                                new("cache-control", "no-store"),
+                            };
+                            if (v2Registered)
+                            {
+                                var v2Header = IcResponseCertV2.BuildHeaderValue(lookupPath);
+                                if (v2Header is not null)
+                                {
+                                    headers.Add(new("ic-certificateexpression", IcResponseCertV2.ExpressionHeader));
+                                    headers.Add(new("ic-certificate", v2Header));
+                                }
+                            }
                             Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
                             {
                                 StatusCode = 200,
                                 Body = rr.Body,
-                                Headers = new[]
-                                {
-                                    new KeyValuePair<string, string>("content-type", rr.ContentType),
-                                    new KeyValuePair<string, string>("content-length", rr.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                                    new KeyValuePair<string, string>("access-control-allow-origin", "*"),
-                                    new KeyValuePair<string, string>("cache-control", "no-store"),
-                                },
+                                Headers = headers,
                             }));
                             return;
                         }

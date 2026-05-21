@@ -82,6 +82,29 @@ public static class IcCertifiedAssets
     // certification once the canister handles its first update.
     private static bool _pendingFlush;
 
+    /// <summary>
+    /// Optional contributor for a second labeled subtree (e.g. the
+    /// `"http_expr"` v2 cert tree) that gets forked with this assembly's
+    /// `"http_assets"` subtree under a single root hash.
+    /// Returns null when v2 has nothing registered. Set by
+    /// <see cref="IcResponseCertV2"/> at startup.
+    /// </summary>
+    public static Func<HashTree.Labeled?>? AdditionalSubtreeProvider { get; set; }
+
+    /// <summary>
+    /// Build the v1 `"http_assets"` labeled subtree. Public so the v2
+    /// module can recompute the combined root after its own state changes.
+    /// </summary>
+    public static HashTree.Labeled BuildV1Subtree() => new(Label, BuildAssetTree());
+
+    /// <summary>
+    /// Notify the certified-data store that a registered subtree changed
+    /// (used by <see cref="IcResponseCertV2"/> after a path is registered).
+    /// Combines this assembly's v1 tree with the v2 contributor (if any)
+    /// and re-pushes the root hash.
+    /// </summary>
+    public static void NotifyChanged() => UpdateCertifiedData();
+
     private static unsafe void UpdateCertifiedData()
     {
         // certified_data_set TRAPS in query mode (no recoverable exception).
@@ -96,13 +119,35 @@ public static class IcCertifiedAssets
             return;
         }
 
-        var labeled = new HashTree.Labeled(Label, BuildAssetTree());
-        var rootHash = labeled.Hash;
+        var rootHash = BuildCombinedRootHash();
         fixed (byte* p = rootHash)
         {
             Ic0.certified_data_set((nint)p, (uint)rootHash.Length);
         }
         _pendingFlush = false;
+    }
+
+    /// <summary>
+    /// Root hash that includes this module's v1 subtree plus any
+    /// AdditionalSubtreeProvider-supplied subtree (typically v2 expr).
+    /// Public so v2 can publish the same combined root in its
+    /// IC-Certificate header (the boundary verifies that the system
+    /// certificate's data-cert hash matches what we present in the witness).
+    /// </summary>
+    public static byte[] BuildCombinedRootHash() => BuildCombinedRoot().Hash;
+
+    /// <summary>Combined HashTree (v1 + optional v2) used as the witness root.</summary>
+    public static HashTree BuildCombinedRoot()
+    {
+        var v1 = BuildV1Subtree();
+        var v2 = AdditionalSubtreeProvider?.Invoke();
+        if (v2 is null) return v1;
+        // The IC HashTree spec requires labeled subtrees at the same level
+        // to be ordered by label bytes. "http_assets" < "http_expr" in
+        // byte-lex, so v1 goes left.
+        return string.CompareOrdinal("http_assets", "http_expr") <= 0
+            ? (HashTree)new HashTree.Fork(v1, v2)
+            : new HashTree.Fork(v2, v1);
     }
 
     /// <summary>
@@ -151,8 +196,20 @@ public static class IcCertifiedAssets
         var cert = new byte[(int)certSize];
         fixed (byte* p = cert) Ic0.data_certificate_copy((nint)p, 0, certSize);
 
-        var labeled = new HashTree.Labeled(Label, BuildAssetTree());
-        var treeBytes = labeled.EncodeWithSelfDescribe();
+        // When v2 is also registered, certified_data covers the COMBINED
+        // root (fork of "http_assets" + "http_expr"). To make the v1
+        // witness verifiable against that root we wrap our subtree with a
+        // Pruned sibling carrying v2's subtree hash. When v2 isn't
+        // registered, the v1 subtree IS the root and no wrapping is needed.
+        HashTree tree = BuildV1Subtree();
+        var v2 = AdditionalSubtreeProvider?.Invoke();
+        if (v2 is not null)
+        {
+            tree = string.CompareOrdinal("http_assets", "http_expr") <= 0
+                ? new HashTree.Fork(tree, new HashTree.Pruned(v2.Hash))
+                : new HashTree.Fork(new HashTree.Pruned(v2.Hash), tree);
+        }
+        var treeBytes = tree.EncodeWithSelfDescribe();
 
         // Structured-field syntax: each member is a binary value enclosed
         // in colons (`:base64...:`), parameter-style. We don't include the
