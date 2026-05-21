@@ -214,29 +214,28 @@ public static class BlazorOnIcHostingExtensions
                     return (Array.Empty<byte>(), "application/octet-stream");
                 }
 
-                // If the connection has a bound circuit facade, the GET
-                // must go through the update path so MapGet can pump
-                // this circuit's RendererSynchronizationContext.
-                // Otherwise a peer circuit's cross-circuit event would
-                // leave StateHasChanged stuck queued — outbox shows
-                // empty, fast-path returns 0 bytes, the pending diff
-                // never ships. The pump only runs in the update-path
-                // GET handler.
-                if (registry.TryGetBoundFacade(id, out _))
-                {
-                    return null;
-                }
-
                 if (conn.Outbound.IsEmpty)
                 {
-                    // No facade yet (pre-circuit-init handshake polls)
-                    // AND queue is empty → cheap empty response.
+                    // Queue empty (post-StartCircuit idle polls included)
+                    // → cheap empty response. Cross-circuit reactivity no
+                    // longer needs an RSC pump on the GET poll: the
+                    // Counter.razor subscription installs the RSC and
+                    // calls StateHasChanged synchronously from the event
+                    // handler itself, so render-diffs hit the outbox
+                    // before this query ever fires. When a diff IS
+                    // queued, .IsEmpty is false and we bail to update
+                    // below.
                     return (Array.Empty<byte>(), "application/octet-stream");
                 }
 
                 // Queue has data → drain needs to mutate → upgrade.
                 return null;
             });
+
+            // Register the /_blazor GET path for v2 response certification
+            // so empty long-poll responses ride canonical-subdomain query
+            // path too (boundary requires cert on .icp0.io).
+            IcResponseCertV2.RegisterPassThroughPath("/_blazor", "GET");
         }
 
         // Embedded static-asset endpoint (blazor.web.js) AND the in-

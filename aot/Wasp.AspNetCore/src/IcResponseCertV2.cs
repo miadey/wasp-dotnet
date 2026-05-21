@@ -210,10 +210,11 @@ public static class IcResponseCertV2
 
         var segments = SplitPath(path);
         // Build the witness: at the root level, fork(Pruned(v1), labeled("http_expr", path-witness))
-        // — and at the http_expr subtree, only the requested path is
-        // revealed; everything else (other paths' siblings) is pruned.
+        // — and at the http_expr subtree, the requested path is revealed
+        // while all sibling branches are pruned (their hashes only).
         var v1Subtree = IcCertifiedAssets.BuildV1Subtree();
-        HashTree pathWitness = BuildPathWitness(segments);
+        var fullV2Inner = BuildSubtree(CollectPathArrays(), depth: 0);
+        HashTree pathWitness = PruneToPath(fullV2Inner, segments, depth: 0);
         HashTree witness = string.CompareOrdinal("http_assets", "http_expr") <= 0
             ? new HashTree.Fork(new HashTree.Pruned(v1Subtree.Hash), new HashTree.Labeled(ExprLabel, pathWitness))
             : new HashTree.Fork(new HashTree.Labeled(ExprLabel, pathWitness), new HashTree.Pruned(v1Subtree.Hash));
@@ -235,21 +236,69 @@ public static class IcResponseCertV2
         return sb.ToString();
     }
 
-    private static HashTree BuildPathWitness(string[] segments)
+    private static List<string[]> CollectPathArrays()
     {
-        // No-cert shape per ic-response-verification tests:
-        //   label(expr_hash, leaf(""))      ← terminal
-        // wrapped by
-        //   label("<$>", ↑)
-        // wrapped by each path segment (innermost first).
-        HashTree node = new HashTree.Labeled(PassThroughExprHash, new HashTree.Leaf(Array.Empty<byte>()));
-        node = new HashTree.Labeled(TerminalMarker, node);
-        for (int i = segments.Length - 1; i >= 0; i--)
+        var paths = new List<string[]>(_entries.Count);
+        foreach (var kvp in _entries) paths.Add(SplitPath(kvp.Key));
+        return paths;
+    }
+
+    /// <summary>
+    /// Walk the full v2 inner subtree, keeping nodes on the witness path
+    /// and replacing every other branch with Pruned(node.Hash). Siblings
+    /// at each level are preserved (pruned) so the boundary can
+    /// recompute the subtree's hash and match the certified root.
+    /// </summary>
+    private static HashTree PruneToPath(HashTree node, string[] segments, int depth)
+    {
+        switch (node)
         {
-            var segBytes = Encoding.UTF8.GetBytes(segments[i]);
-            node = new HashTree.Labeled(segBytes, node);
+            case HashTree.Fork fork:
+                // Forks aren't on the path themselves — recurse into both
+                // children with the same depth; each subtree decides
+                // whether to keep or prune itself.
+                return new HashTree.Fork(
+                    PruneToPath(fork.Left, segments, depth),
+                    PruneToPath(fork.Right, segments, depth));
+            case HashTree.Labeled labeled:
+                // Is this label the next step on our witness path?
+                bool onPath = false;
+                if (depth < segments.Length)
+                {
+                    var want = Encoding.UTF8.GetBytes(segments[depth]);
+                    onPath = ByteEquals(labeled.Label, want);
+                }
+                else if (depth == segments.Length)
+                {
+                    // After the last segment, the next labels on the path
+                    // are "<$>" then PassThroughExprHash, then the leaf.
+                    onPath = ByteEquals(labeled.Label, TerminalMarker);
+                }
+                else if (depth == segments.Length + 1)
+                {
+                    onPath = ByteEquals(labeled.Label, PassThroughExprHash);
+                }
+                if (onPath)
+                {
+                    return new HashTree.Labeled(
+                        labeled.Label,
+                        PruneToPath(labeled.Subtree, segments, depth + 1));
+                }
+                // Not on path → prune entirely.
+                return new HashTree.Pruned(labeled.Hash);
+            default:
+                // Leaf / Empty / Pruned terminals on the witness path are
+                // kept verbatim; siblings have already been pruned by the
+                // Labeled case above.
+                return node;
         }
-        return node;
+    }
+
+    private static bool ByteEquals(byte[] a, byte[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+        return true;
     }
 
     private static byte[] BuildExprPathCbor(string[] segments)

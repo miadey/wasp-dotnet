@@ -377,7 +377,11 @@ public sealed class IcServer : IServer
                         // null → fall through to the simple handler / update path.
                     }
 
-                    if (isRawSubdomain
+                    // Same v2 lift for the simple (url, method) handler
+                    // dict — used by /_blazor long-poll empty-queue
+                    // fast-path. When the path is v2-registered, we
+                    // attach v2 cert headers and serve on canonical too.
+                    if ((isRawSubdomain || v2Registered)
                         && (probeReq.Method == "GET" || probeReq.Method == "POST")
                         && _queryHandlers.TryGetValue(lookupPath, out var handler))
                     {
@@ -398,17 +402,27 @@ public sealed class IcServer : IServer
                             // no-store makes the boundary re-ask the canister
                             // on every poll, which is what the long-polling
                             // protocol requires.
+                            var headers = new List<KeyValuePair<string, string>>(6)
+                            {
+                                new("content-type", r.ContentType),
+                                new("content-length", r.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                new("access-control-allow-origin", "*"),
+                                new("cache-control", "no-store"),
+                            };
+                            if (v2Registered)
+                            {
+                                var v2Header = IcResponseCertV2.BuildHeaderValue(lookupPath);
+                                if (v2Header is not null)
+                                {
+                                    headers.Add(new("ic-certificateexpression", IcResponseCertV2.ExpressionHeader));
+                                    headers.Add(new("ic-certificate", v2Header));
+                                }
+                            }
                             Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
                             {
                                 StatusCode = 200,
                                 Body = r.Body,
-                                Headers = new[]
-                                {
-                                    new KeyValuePair<string, string>("content-type", r.ContentType),
-                                    new KeyValuePair<string, string>("content-length", r.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                                    new KeyValuePair<string, string>("access-control-allow-origin", "*"),
-                                    new KeyValuePair<string, string>("cache-control", "no-store"),
-                                },
+                                Headers = headers,
                             }));
                             return;
                         }
