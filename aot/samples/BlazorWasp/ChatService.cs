@@ -26,7 +26,7 @@ public sealed unsafe class ChatService
     private const uint Magic = 0x43484154; // "CHAT"
     private const int MaxMessages = 50;
 
-    public sealed record Message(long AtMs, string Sender, string Text);
+    public sealed record Message(long AtMs, string Username, string Text);
 
     public IReadOnlyList<Message> Messages
     {
@@ -43,9 +43,27 @@ public sealed unsafe class ChatService
         if (!args.TryGetValue("text", out var text) || string.IsNullOrWhiteSpace(text))
             return;
         text = text.Length > 280 ? text.Substring(0, 280) : text;
-        var sender = ShortPrincipal();
+        args.TryGetValue("username", out var username);
+        username = SanitiseName(username);
         var atMs = (long)(Ic0.time() / 1_000_000UL);
-        Append(new Message(atMs, sender, text));
+        Append(new Message(atMs, username, text));
+    }
+
+    private static string SanitiseName(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "Anonymous";
+        raw = raw.Trim();
+        if (raw.Length > 24) raw = raw.Substring(0, 24);
+        // Strip pipe (our storage delimiter) and any control chars.
+        var sb = new StringBuilder(raw.Length);
+        foreach (var c in raw)
+        {
+            if (c == '|') continue;
+            if (c < 0x20) continue;
+            sb.Append(c);
+        }
+        var cleaned = sb.ToString();
+        return string.IsNullOrEmpty(cleaned) ? "Anonymous" : cleaned;
     }
 
     // ─── Storage ─────────────────────────────────────────────────────
@@ -99,7 +117,7 @@ public sealed unsafe class ChatService
         {
             WriteBytes(cursor, BitConverter.GetBytes(m.AtMs));
             cursor += 8;
-            var data = Encoding.UTF8.GetBytes(m.Sender + "|" + m.Text);
+            var data = Encoding.UTF8.GetBytes(m.Username + "|" + m.Text);
             WriteBytes(cursor, BitConverter.GetBytes(data.Length));
             cursor += 4;
             WriteBytes(cursor, data);

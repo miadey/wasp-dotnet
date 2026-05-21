@@ -64,6 +64,9 @@
     }
     if (form) {
       form.querySelectorAll('input[type=text], input:not([type]), textarea').forEach(function (el) {
+        // Don't wipe persistent fields (e.g. a username input the
+        // user wants to keep across messages).
+        if (el.hasAttribute('data-wasp-persist')) return;
         if (el.value) {
           clearedEls.push({ el: el, prev: el.value });
           el.value = '';
@@ -109,9 +112,30 @@
       console.warn('[wasp] anchor not found:', anchor);
       return;
     }
+    // Snapshot focus + cursor in any persistent input so the user
+    // doesn't lose their place when a poll re-renders the page under
+    // their cursor.
+    var focusInfo = null;
+    var active = document.activeElement;
+    if (active && active.matches && active.matches('[data-wasp-persist]')) {
+      focusInfo = {
+        name: active.getAttribute('name'),
+        start: active.selectionStart,
+        end: active.selectionEnd,
+      };
+    }
     target.innerHTML = batch.html;
     lastBatchId = batch.batchId || lastBatchId;
     _wireEvents(target);
+    _waspPersistRestore(target);
+    if (focusInfo && focusInfo.name) {
+      var refocus = target.querySelector('[data-wasp-persist][name="' + focusInfo.name + '"]');
+      if (refocus) {
+        refocus.focus();
+        try { refocus.setSelectionRange(focusInfo.start, focusInfo.end); }
+        catch (_) {}
+      }
+    }
     // After applying, autoscroll any "follow tail" scrollbox to its
     // bottom — chat list, log viewer, etc. Looks for a #chat-scroll
     // id for now; generalise to a data-wasp-stick attribute when the
@@ -134,6 +158,47 @@
     if (!sendBtn) return;
     e.preventDefault();
     sendBtn.click();
+  });
+
+  // ─── Persisted input values ───────────────────────────────────────
+  // The render-as-query model re-renders the entire chunk inside
+  // #wasp-root on every batch, so any user-typed input values would
+  // normally be wiped between renders.
+  //
+  // Components opt elements into client-side persistence by adding
+  // `data-wasp-persist` to any <input> / <textarea>. The bridge:
+  //   1. On hydrate / after every applyBatch, fills the element's
+  //      value from localStorage under the key `wasp-persist:<name>`.
+  //   2. On every keystroke, writes the new value back to
+  //      localStorage so it survives reload + reactivity-poll
+  //      re-renders + cross-tab.
+  //   3. On form-event POSTs, the element's current value is already
+  //      shipped to the server via FormData — handlers see it under
+  //      `args[<name>]` just like a normal form field.
+  //
+  // The Razor component never has to know any of this exists.
+  function _waspPersistKey(el) {
+    var n = el.getAttribute('name');
+    return n ? ('wasp-persist:' + n) : null;
+  }
+  function _waspPersistRestore(root) {
+    root = root || document;
+    root.querySelectorAll('[data-wasp-persist]').forEach(function (el) {
+      var key = _waspPersistKey(el);
+      if (!key) return;
+      try {
+        var stored = localStorage.getItem(key);
+        if (stored != null) el.value = stored;
+      } catch (_) { /* private mode */ }
+    });
+  }
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches('[data-wasp-persist]')) return;
+    var key = _waspPersistKey(t);
+    if (!key) return;
+    try { localStorage.setItem(key, t.value); }
+    catch (_) { /* private mode */ }
   });
 
   // ─── SPA-style nav ────────────────────────────────────────────────
@@ -184,12 +249,14 @@
   });
 
   // ─── Public surface ──────────────────────────────────────────────
-  window.wasp = {
-    rewire: _wireEvents,
-    applyBatch: _applyBatch,
-    get lastBatchId() { return lastBatchId; },
-    set lastBatchId(v) { lastBatchId = v; },
-  };
+  window.wasp = window.wasp || {};
+  window.wasp.rewire = _wireEvents;
+  window.wasp.applyBatch = _applyBatch;
+  Object.defineProperty(window.wasp, 'lastBatchId', {
+    configurable: true,
+    get: function () { return lastBatchId; },
+    set: function (v) { lastBatchId = v; },
+  });
 
   // ─── Cross-device reactivity poll ─────────────────────────────────
   // Render-as-query has no server push (canisters can't initiate
@@ -242,13 +309,16 @@
   // these are background requests, no event triggers.
   var origFetch = window.fetch;
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () {
-      _wireEvents();
-      _reactivityPoll();
-    });
-  } else {
+  function _waspHydrate() {
     _wireEvents();
+    _waspPersistRestore();
+    var sc = document.getElementById('chat-scroll');
+    if (sc) sc.scrollTop = sc.scrollHeight;
     _reactivityPoll();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _waspHydrate);
+  } else {
+    _waspHydrate();
   }
 })();
