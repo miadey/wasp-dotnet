@@ -3,6 +3,15 @@
 A REST API canister — stock `dotnet new webapi` shape running entirely
 inside an Internet Computer canister via Wasp's ASP.NET Core hosting.
 
+> **⚠ Pre-release — packages not yet on nuget.org**
+> This template references `Wasp.AspNetCore` as a NuGet package, but
+> the package is still pre-release and **not published**. `dotnet
+> restore` will fail on a fresh machine. To use this shape today,
+> clone the wasp-dotnet repo and use `aot/samples/WebApiVanilla` as a
+> reference; replace the `<PackageReference>` here with a
+> `<ProjectReference>` to `Wasp.AspNetCore.csproj`. We'll bump the
+> template version once the framework ships on nuget.org.
+
 ## Quick start
 
 ```bash

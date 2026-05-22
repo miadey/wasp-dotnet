@@ -3,6 +3,16 @@
 Single-file Program.cs with top-level `app.MapGet` / `app.MapPost`
 handlers — the lightest possible HTTP backend canister.
 
+> **⚠ Pre-release — packages not yet on nuget.org**
+> This template references `Wasp.AspNetCore` as a NuGet package, but
+> the package is still pre-release and **not published**. `dotnet
+> restore` will fail on a fresh machine. To use this shape today,
+> clone the wasp-dotnet repo and use `aot/samples/AspNetCoreHello` or
+> `aot/samples/AspNetCoreEndpoints` as a reference; replace the
+> `<PackageReference>` with a `<ProjectReference>` to
+> `Wasp.AspNetCore.csproj`. We'll bump the template version once the
+> framework ships on nuget.org.
+
 ## Quick start
 
 ```bash
