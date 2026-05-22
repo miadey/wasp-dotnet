@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] - MvcOnIcp</title>
+    <style>
+        body { font-family: system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1e293b; }
+        nav a { margin-right: 1rem; color: #2563eb; text-decoration: none; }
+        nav a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <nav>
+        <a asp-controller="Home" asp-action="Index">Home</a>
+        <a asp-controller="Home" asp-action="Privacy">Privacy</a>
+    </nav>
+    <hr />
+    <main>@RenderBody()</main>
+    <hr />
+    <footer style="color: #64748b; font-size: 0.85rem;">
+        &copy; @DateTime.UtcNow.Year — MvcOnIcp · running on the Internet Computer
+    </footer>
+</body>
+</html>

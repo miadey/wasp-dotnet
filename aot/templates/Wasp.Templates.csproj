@@ -19,6 +19,9 @@
 
   <ItemGroup>
     <Content Include="blazor-on-icp\**\*" Exclude="blazor-on-icp\bin\**;blazor-on-icp\obj\**" />
+    <Content Include="webapi-on-icp\**\*" Exclude="webapi-on-icp\bin\**;webapi-on-icp\obj\**" />
+    <Content Include="minimal-api-on-icp\**\*" Exclude="minimal-api-on-icp\bin\**;minimal-api-on-icp\obj\**" />
+    <Content Include="mvc-on-icp\**\*" Exclude="mvc-on-icp\bin\**;mvc-on-icp\obj\**" />
     <Compile Remove="**\*" />
   </ItemGroup>
 

@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Wasp",
+  "classifications": [ "Web", "Minimal API", "Internet Computer" ],
+  "identity": "Wasp.Templates.MinimalApiOnIcp",
+  "name": "ASP.NET Core Minimal API on the Internet Computer",
+  "shortName": "minimal-api-on-icp",
+  "description": "Single-file Program.cs with top-level app.MapGet/MapPost handlers. The simplest HTTP backend canister: smallest wasm, fewest abstractions.",
+  "tags": { "language": "C#", "type": "project" },
+  "sourceName": "MinimalApiOnIcp",
+  "preferNameDirectory": true,
+  "symbols": {
+    "WaspVersion": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "0.1.0-alpha",
+      "replaces": "WASP_VERSION"
+    }
+  }
+}

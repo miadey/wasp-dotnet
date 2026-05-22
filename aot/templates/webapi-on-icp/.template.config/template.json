@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Wasp",
+  "classifications": [ "Web", "WebAPI", "Internet Computer" ],
+  "identity": "Wasp.Templates.WebApiOnIcp",
+  "name": "ASP.NET Core Web API on the Internet Computer",
+  "shortName": "webapi-on-icp",
+  "description": "A controller-based REST API canister. Stock dotnet new webapi shape (controllers, JSON, source-gen serialisation) deploying to an IC canister via Wasp's ASP.NET Core hosting adapter.",
+  "tags": { "language": "C#", "type": "project" },
+  "sourceName": "WebApiOnIcp",
+  "preferNameDirectory": true,
+  "symbols": {
+    "WaspVersion": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "0.1.0-alpha",
+      "replaces": "WASP_VERSION"
+    }
+  }
+}
