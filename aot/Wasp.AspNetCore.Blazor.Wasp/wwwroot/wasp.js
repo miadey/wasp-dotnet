@@ -74,6 +74,18 @@
         for (var k in parsed) args[k] = String(parsed[k]);
       } catch (_) { /* ignore malformed json */ }
     }
+    // Optimistic paint: handler element advertises a colour via
+    // data-wasp-paint-with="<css-colour>". On click, we set
+    // e.target.style.background immediately. The IC update call still
+    // runs through consensus (~1–2s), but the user sees feedback
+    // instantly; the next render-batch overwrites our optimistic
+    // paint with the authoritative server colour (no flash if they
+    // agree; brief revert if the server rejected, e.g. cooldown).
+    var paintWith = e.currentTarget.getAttribute &&
+                    e.currentTarget.getAttribute('data-wasp-paint-with');
+    if (paintWith && e.target && e.target !== e.currentTarget) {
+      try { e.target.style.background = paintWith; } catch (_) {}
+    }
     // Optimistic UX: disable the source button + clear the form's
     // text inputs immediately, so the user can keep typing while
     // consensus runs. If the POST errors, we restore.

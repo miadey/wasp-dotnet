@@ -26,10 +26,20 @@ namespace WaspSample.BlazorWasp;
 ///     int32  utf8len(username|text)
 ///     bytes  "username|text"
 ///
-/// Reactions live in canister heap only (Dictionary&lt;long, Dictionary&lt;string,int&gt;&gt;).
-/// They survive update/query calls but reset across canister upgrades —
-/// acceptable for a demo, simpler than threading them through stable
-/// memory.
+/// After the messages section, a "REAC" sentinel + reactions table is
+/// appended; older blobs that pre-date this section are detected by
+/// the missing sentinel and produce an empty reactions dict, so the
+/// format change is backwards-compatible (no schema-version bump).
+///
+/// Reactions table:
+///   uint32 magic ("REAC")
+///   uint32 entryCount
+///   foreach entry:
+///     int64  messageId
+///     uint32 emojiCount
+///     foreach emoji:
+///       utf8len + bytes (emoji string)
+///       int32 (count)
 /// </summary>
 public sealed unsafe class ChatService
 {
@@ -107,7 +117,7 @@ public sealed unsafe class ChatService
     {
         if (string.IsNullOrEmpty(emoji)) return;
         if (Array.IndexOf(ReactionEmojis, emoji) < 0) return;
-        var (_, msgs) = Load();
+        var (rooms, msgs) = Load();
         if (!msgs.Any(m => m.Id == messageId)) return;
         if (!_reactions.TryGetValue(messageId, out var dict))
         {
@@ -116,6 +126,7 @@ public sealed unsafe class ChatService
         }
         dict.TryGetValue(emoji, out var n);
         dict[emoji] = n + 1;
+        Persist(rooms, msgs);   // include the updated reactions table
     }
 
     public IReadOnlyDictionary<string, int> ReactionsOf(long messageId)
@@ -145,6 +156,7 @@ public sealed unsafe class ChatService
         }
         _rooms = ReadRooms();
         _messages = ReadMessages();
+        ReadReactions();
         _nextRoomId = _rooms.Count == 0 ? 1 : _rooms.Max(r => r.Id) + 1;
         _nextMsgId  = _messages.Count == 0 ? 1 : _messages.Max(m => m.Id) + 1;
         return (_rooms, _messages);
@@ -169,10 +181,28 @@ public sealed unsafe class ChatService
             buf.WriteI64(m.AtMs);
             buf.WriteString(m.Username + "|" + m.Text);
         }
+        // Reactions section — REAC sentinel + table. Sentinel lets
+        // older blobs (written before reactions were persisted) be
+        // detected on load: if the bytes after messages don't start
+        // with REAC, treat as no reactions.
+        buf.WriteU32(ReactionsMagic);
+        buf.WriteU32((uint)_reactions.Count);
+        foreach (var kv in _reactions)
+        {
+            buf.WriteI64(kv.Key);
+            buf.WriteU32((uint)kv.Value.Count);
+            foreach (var ek in kv.Value)
+            {
+                buf.WriteString(ek.Key);
+                buf.WriteI32(ek.Value);
+            }
+        }
         var bytes = buf.ToArray();
         WriteBytes(Offset, bytes);
         WriteMagic();
     }
+
+    private const uint ReactionsMagic = 0x52454143;   // "REAC"
 
     private List<Room> ReadRooms()
     {
@@ -208,7 +238,34 @@ public sealed unsafe class ChatService
             var text = sep > 0 ? s.Substring(sep + 1) : s;
             msgs.Add(new Message(id, roomId, atMs, username, text));
         }
+        _afterMessagesOffset = r.Cursor;
         return msgs;
+    }
+
+    private ulong _afterMessagesOffset;
+
+    private void ReadReactions()
+    {
+        _reactions.Clear();
+        var r = new MemoryReader(_afterMessagesOffset);
+        uint magic;
+        try { magic = r.ReadU32(); }
+        catch { return; }
+        if (magic != ReactionsMagic) return;   // pre-reactions blob
+        var entries = (int)r.ReadU32();
+        for (int i = 0; i < entries; i++)
+        {
+            var msgId = r.ReadI64();
+            var kCount = (int)r.ReadU32();
+            var inner = new Dictionary<string, int>(kCount);
+            for (int j = 0; j < kCount; j++)
+            {
+                var emoji = r.ReadString();
+                var n = r.ReadI32();
+                inner[emoji] = n;
+            }
+            _reactions[msgId] = inner;
+        }
     }
 
     // ─── helpers ─────────────────────────────────────────────────────

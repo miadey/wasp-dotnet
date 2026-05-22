@@ -33,10 +33,14 @@ wasm-opt -Oz \
   --enable-sign-ext \
   "$TMP2" -o "$OUT"
 
-echo "[blazorwasp] Deploying..."
+# Default to upgrade so iterative builds keep canister state (chat
+# rooms + messages, pixel canvas, counter). Override with
+# WASP_DEPLOY_MODE=reinstall when a schema bump requires a clean slate.
+MODE="${WASP_DEPLOY_MODE:-upgrade}"
+echo "[blazorwasp] Deploying (--mode $MODE)..."
 cd aot
 dfx canister create blazorwasp 2>/dev/null || true
-dfx canister install blazorwasp --mode reinstall --yes \
+dfx canister install blazorwasp --mode "$MODE" --yes \
   --wasm samples/BlazorWasp/BlazorWasp.canister.wasm
 
 CID=$(dfx canister id blazorwasp)

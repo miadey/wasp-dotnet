@@ -437,13 +437,46 @@ public static class Program
         .dc-send:active { transform: scale(0.96); }
         .dc-send:disabled { background: #4e5058; cursor: not-allowed; opacity: 0.6; }
 
-        @@media (max-width: 720px) {
-            .dc-shell { grid-template-columns: 64px 1fr; }
-            .dc-room-name, .dc-rooms-header, .dc-server-sub, .dc-room-add, .dc-user-card { display: none; }
-            .dc-server { text-align: center; padding: 1rem 0; }
-            .dc-server-name { font-size: 0.85rem; }
-            .dc-rooms-list { padding: 0.25rem; }
-            .dc-room { justify-content: center; padding: 0.5rem 0; }
+        @media (max-width: 720px) {
+            /* Chat: rooms become a horizontal scroller above the channel */
+            .dc-shell {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto 1fr;
+                height: calc(100dvh - var(--top-nav-h, 56px));
+            }
+            .dc-rooms {
+                flex-direction: row; align-items: stretch;
+                padding: 0 0.5rem;
+                border-right: 0; border-bottom: 1px solid rgba(0,0,0,0.35);
+                overflow-x: auto; flex: 0 0 auto;
+            }
+            .dc-server, .dc-rooms-header, .dc-server-sub,
+            .dc-room-add, .dc-user-card { display: none; }
+            .dc-rooms-list {
+                display: flex; flex-direction: row; flex: 1 1 auto;
+                gap: 0.3rem; padding: 0.5rem 0; margin: 0;
+                overflow: visible;
+            }
+            .dc-rooms-list li { flex: 0 0 auto; list-style: none; }
+            .dc-room {
+                padding: 0.4rem 0.75rem; border-radius: 999px;
+                background: rgba(255,255,255,0.04);
+                white-space: nowrap;
+            }
+            .dc-room.active {
+                background: rgba(88,101,242,0.25);
+                color: #fff;
+            }
+            .dc-channel { min-height: 0; }
+            .dc-channel-header { padding: 0 0.85rem; height: 44px; }
+            .dc-messages { padding: 0.5rem 0; }
+            .dc-message { grid-template-columns: 48px 1fr; padding: 0.1rem 0.75rem 0.1rem 0; }
+            .dc-avatar { width: 36px; height: 36px; font-size: 1rem; }
+            .dc-composer { padding: 0 0.75rem 1rem; }
+            .dc-emoji-bar { padding-top: 0.4rem; flex-wrap: wrap; }
+            .dc-emoji-btn { padding: 0.25rem 0.4rem; font-size: 1.05rem; }
+            .dc-composer-input { padding: 0.65rem 0.85rem; min-height: 42px; }
+            .dc-send { padding: 0 0.9rem; }
         }
 
         /* ── Pixel canvas ─────────────────────────────────────────── */
@@ -552,10 +585,76 @@ public static class Program
         }
         .px-tip { color: var(--text-dim); font-size: 0.85rem; margin: 0; text-align: center; }
 
-        @@media (max-width: 720px) {
-            .px-shell { padding: 1.25rem; gap: 1rem; }
-            .px-toolbar { grid-template-columns: 1fr; }
-            .px-palette { grid-auto-flow: row; grid-template-columns: repeat(8, 1fr); }
+        @media (max-width: 720px) {
+            /* Pixel canvas: full viewport width, palette in 8-col grid */
+            .px-shell {
+                padding: 0.75rem 0.75rem 1rem; gap: 0.75rem;
+                min-height: calc(100dvh - var(--top-nav-h, 56px));
+            }
+            .px-header { gap: 0.75rem; }
+            .px-title h1 { font-size: 1.3rem; }
+            .px-title p { font-size: 0.85rem; }
+            .px-stats { gap: 0.5rem; }
+            .px-stat { padding: 0.45rem 0.7rem; min-width: 0; }
+            .px-stat-num { font-size: 1.05rem; }
+            .px-stat-label { font-size: 0.65rem; }
+            .px-board { padding: 0.5rem; border-radius: 10px; }
+            .px-grid { max-width: 96vw; }
+            .px-toolbar {
+                grid-template-columns: 1fr;
+                gap: 0.65rem; padding: 0.75rem;
+            }
+            .px-palette {
+                grid-auto-flow: row;
+                grid-template-columns: repeat(8, minmax(0,1fr));
+                gap: 0.35rem; justify-content: stretch;
+            }
+            .px-swatch { width: auto; height: 36px; }
+            .px-username { padding: 0.6rem 0.75rem; }
+            .px-selected { display: none; }
+            .px-tip { font-size: 0.78rem; }
+        }
+
+        /* ── Mobile: outer sidebar becomes a top nav bar ────────────── */
+        @media (max-width: 720px) {
+            :root { --top-nav-h: 56px; }
+            .page { flex-direction: column; }
+            .sidebar {
+                width: 100%; flex: 0 0 var(--top-nav-h);
+                padding: 0;
+                flex-direction: row; align-items: stretch;
+                border-right: 0; border-bottom: 1px solid var(--border);
+                position: sticky; top: 0; z-index: 50;
+            }
+            .brand {
+                padding: 0 0.85rem; margin: 0; border-bottom: 0;
+                font-size: 0.9rem; gap: 0.5rem;
+                display: flex; align-items: center;
+            }
+            .brand-mark { width: 24px; height: 24px; font-size: 0.85rem; }
+            .brand-text { display: none; }
+            .nav {
+                flex: 1 1 auto; flex-direction: row;
+                gap: 0; padding: 0;
+                overflow-x: auto; align-items: stretch;
+            }
+            .nav a {
+                flex: 1 1 0; min-width: 56px;
+                flex-direction: column; gap: 2px;
+                padding: 0.35rem 0.25rem;
+                font-size: 0.68rem; font-weight: 600;
+                border-radius: 0; text-align: center;
+                justify-content: center;
+            }
+            .nav a.active {
+                background: linear-gradient(180deg, rgba(91,141,239,0.18), rgba(177,108,242,0.1));
+                box-shadow: inset 0 -2px 0 var(--accent);
+            }
+            .nav-i { font-size: 1rem; width: auto; height: auto; }
+            .sidebar-foot { display: none; }
+
+            main { padding: 1.25rem; }
+            main h1 { font-size: 1.4rem; }
         }
     </style>
 </head>
