@@ -15,8 +15,8 @@
       WaspDbSet&lt;T&gt; mirror EF Core's DbContext/DbSet API
       (Add / Remove / Find / SaveChanges, plus IEnumerable for LINQ)
       but persist to stable memory instead of SQL. Fits inside the
-      IC's 11.5 MB wasm code-section limit; no migrations, no
-      connection strings.
+      IC's 12 MiB Wasm code-section limit (MAX_CODE_SECTION_SIZE_IN_BYTES
+      in dfinity/ic). No migrations, no connection strings.
     </Description>
   </PropertyGroup>
 
