@@ -29,13 +29,29 @@ public static class WaspContext
     private static IReadOnlyDictionary<string, string> _formArgs =
         new Dictionary<string, string>(0);
 
+    private static IReadOnlyDictionary<string, string> _routeQuery =
+        new Dictionary<string, string>(0);
+
     public static IReadOnlyDictionary<string, string> FormArgs => _formArgs;
+
+    /// <summary>
+    /// Parsed query-string args for the current render or event.
+    /// e.g. <c>/chat?r=general&amp;n=42</c> → <c>{ ["r"]="general", ["n"]="42" }</c>.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> RouteQuery => _routeQuery;
 
     public static IDisposable WithEvent(IReadOnlyDictionary<string, string> args)
     {
         var prev = _formArgs;
         _formArgs = args ?? new Dictionary<string, string>(0);
         return new Scope(() => _formArgs = prev);
+    }
+
+    public static IDisposable WithRouteQuery(IReadOnlyDictionary<string, string> query)
+    {
+        var prev = _routeQuery;
+        _routeQuery = query ?? new Dictionary<string, string>(0);
+        return new Scope(() => _routeQuery = prev);
     }
 
     private sealed class Scope : IDisposable

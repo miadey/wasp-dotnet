@@ -1,181 +1,286 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using Wasp.IcCdk;
 
 namespace WaspSample.BlazorWasp;
 
 /// <summary>
-/// Chat messages persisted in stable memory at offset 4096.
+/// Multi-room chat persisted in stable memory.
 ///
-/// Layout:
-///   uint32  count
-///   for each message:
-///     uint64  unix-time-ms
-///     uint32  utf8-length of sender || "|" || text
-///     bytes   "sender|text" (sender = short principal id prefix)
+/// Layout at offset 4096:
+///   uint32 magic ("CHAT")
+///   uint32 version (3)         // v3 adds message.Id
+///   uint32 roomCount
+///   foreach room:
+///     int32  id
+///     int32  utf8len(name)
+///     bytes  name
+///     int64  createdAtMs
+///   uint32 messageCount
+///   foreach message (capped at MaxMessages, FIFO drop):
+///     int64  id              // monotonic, used to key reactions
+///     int32  roomId
+///     int64  atMs
+///     int32  utf8len(username|text)
+///     bytes  "username|text"
 ///
-/// Capacity: last 50 messages. Older messages are dropped from the
-/// front when the buffer fills, so the canister doesn't grow without
-/// bound and the renderer doesn't return megabytes of HTML.
+/// Reactions live in canister heap only (Dictionary&lt;long, Dictionary&lt;string,int&gt;&gt;).
+/// They survive update/query calls but reset across canister upgrades —
+/// acceptable for a demo, simpler than threading them through stable
+/// memory.
 /// </summary>
 public sealed unsafe class ChatService
 {
     private const ulong Offset = 4096;
     private const ulong MagicOffset = 4092;
-    private const uint Magic = 0x43484154; // "CHAT"
-    private const int MaxMessages = 50;
+    private const uint Magic = 0x43484154;        // "CHAT"
+    private const uint Version = 3;
+    private const int MaxMessages = 500;          // 50 per room × 10 rooms ish
 
-    public sealed record Message(long AtMs, string Username, string Text);
-
-    public IReadOnlyList<Message> Messages
+    /// <summary>The five emojis users can react with. Locked down to a
+    /// small set so the heap dict has predictable shape + so we can
+    /// validate input.</summary>
+    public static readonly string[] ReactionEmojis = new[]
     {
-        get
-        {
-            EnsureGrown();
-            if (ReadMagic() != Magic) return Array.Empty<Message>();
-            return Read();
-        }
+        "\U0001F44D",   // 👍
+        "❤️", // ❤️
+        "\U0001F600",   // 😀
+        "\U0001F62E",   // 😮
+        "\U0001F389",   // 🎉
+    };
+
+    public sealed record Room(int Id, string Name, long CreatedAtMs);
+    public sealed record Message(long Id, int RoomId, long AtMs, string Username, string Text);
+
+    private List<Room>? _rooms;
+    private List<Message>? _messages;
+    private int _nextRoomId = 1;
+    private long _nextMsgId = 1;
+    private readonly Dictionary<long, Dictionary<string, int>> _reactions = new();
+
+    public IReadOnlyList<Room> Rooms => Load().rooms;
+
+    public IReadOnlyList<Message> MessagesIn(int roomId)
+    {
+        var (_, msgs) = Load();
+        return msgs.Where(m => m.RoomId == roomId).TakeLast(50).ToArray();
     }
 
-    public void Post(IReadOnlyDictionary<string, string> args)
+    public Room? FindRoom(int id) => Rooms.FirstOrDefault(r => r.Id == id);
+    public Room? FindRoomByName(string name) => Rooms.FirstOrDefault(r => r.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+    public Room CreateRoom(string name)
     {
-        if (!args.TryGetValue("text", out var text) || string.IsNullOrWhiteSpace(text))
-            return;
+        name = SanitiseName(name);
+        var (rooms, msgs) = Load();
+        // Idempotent — return existing if name matches.
+        var existing = rooms.FirstOrDefault(r => r.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null) return existing;
+        var room = new Room(_nextRoomId++, name, NowMs());
+        rooms.Add(room);
+        Persist(rooms, msgs);
+        return room;
+    }
+
+    public void Post(int roomId, IReadOnlyDictionary<string, string> args)
+    {
+        if (!args.TryGetValue("text", out var text) || string.IsNullOrWhiteSpace(text)) return;
         text = text.Length > 280 ? text.Substring(0, 280) : text;
         args.TryGetValue("username", out var username);
-        username = SanitiseName(username);
-        var atMs = (long)(Ic0.time() / 1_000_000UL);
-        Append(new Message(atMs, username, text));
+        username = SanitiseUsername(username);
+        var (rooms, msgs) = Load();
+        if (!rooms.Any(r => r.Id == roomId)) return;
+        msgs.Add(new Message(_nextMsgId++, roomId, NowMs(), username, text));
+        if (msgs.Count > MaxMessages)
+        {
+            msgs = msgs.GetRange(msgs.Count - MaxMessages, MaxMessages);
+        }
+        Persist(rooms, msgs);
     }
 
-    private static string SanitiseName(string? raw)
+    /// <summary>Increment the reaction counter for (messageId, emoji).
+    /// Silently no-ops if the emoji isn't in the allowed set or the
+    /// message doesn't exist.</summary>
+    public void React(long messageId, string emoji)
+    {
+        if (string.IsNullOrEmpty(emoji)) return;
+        if (Array.IndexOf(ReactionEmojis, emoji) < 0) return;
+        var (_, msgs) = Load();
+        if (!msgs.Any(m => m.Id == messageId)) return;
+        if (!_reactions.TryGetValue(messageId, out var dict))
+        {
+            dict = new Dictionary<string, int>();
+            _reactions[messageId] = dict;
+        }
+        dict.TryGetValue(emoji, out var n);
+        dict[emoji] = n + 1;
+    }
+
+    public IReadOnlyDictionary<string, int> ReactionsOf(long messageId)
+    {
+        return _reactions.TryGetValue(messageId, out var d)
+            ? d
+            : (IReadOnlyDictionary<string, int>)EmptyReactions;
+    }
+    private static readonly Dictionary<string, int> EmptyReactions = new();
+
+    // ─── storage ─────────────────────────────────────────────────────
+    private (List<Room> rooms, List<Message> msgs) Load()
+    {
+        if (_rooms is not null && _messages is not null) return (_rooms, _messages);
+        EnsureGrown();
+        if (ReadMagic() != Magic || ReadVersion() != Version)
+        {
+            _rooms = new List<Room>
+            {
+                new(1, "general", NowMs()),
+                new(2, "random",  NowMs()),
+            };
+            _messages = new List<Message>();
+            _nextRoomId = 3;
+            Persist(_rooms, _messages);
+            return (_rooms, _messages);
+        }
+        _rooms = ReadRooms();
+        _messages = ReadMessages();
+        _nextRoomId = _rooms.Count == 0 ? 1 : _rooms.Max(r => r.Id) + 1;
+        _nextMsgId  = _messages.Count == 0 ? 1 : _messages.Max(m => m.Id) + 1;
+        return (_rooms, _messages);
+    }
+
+    private void Persist(List<Room> rooms, List<Message> messages)
+    {
+        _rooms = rooms; _messages = messages;
+        var buf = new MemoryWriter();
+        buf.WriteU32((uint)rooms.Count);
+        foreach (var r in rooms)
+        {
+            buf.WriteI32(r.Id);
+            buf.WriteString(r.Name);
+            buf.WriteI64(r.CreatedAtMs);
+        }
+        buf.WriteU32((uint)messages.Count);
+        foreach (var m in messages)
+        {
+            buf.WriteI64(m.Id);
+            buf.WriteI32(m.RoomId);
+            buf.WriteI64(m.AtMs);
+            buf.WriteString(m.Username + "|" + m.Text);
+        }
+        var bytes = buf.ToArray();
+        WriteBytes(Offset, bytes);
+        WriteMagic();
+    }
+
+    private List<Room> ReadRooms()
+    {
+        var r = new MemoryReader(Offset);
+        var count = (int)r.ReadU32();
+        var rooms = new List<Room>(count);
+        for (int i = 0; i < count; i++)
+        {
+            var id = r.ReadI32();
+            var name = r.ReadString();
+            var atMs = r.ReadI64();
+            rooms.Add(new Room(id, name, atMs));
+        }
+        _afterRoomsOffset = r.Cursor;
+        return rooms;
+    }
+
+    private ulong _afterRoomsOffset;
+
+    private List<Message> ReadMessages()
+    {
+        var r = new MemoryReader(_afterRoomsOffset);
+        var count = (int)r.ReadU32();
+        var msgs = new List<Message>(count);
+        for (int i = 0; i < count; i++)
+        {
+            var id = r.ReadI64();
+            var roomId = r.ReadI32();
+            var atMs = r.ReadI64();
+            var s = r.ReadString();
+            var sep = s.IndexOf('|');
+            var username = sep > 0 ? s.Substring(0, sep) : "Anonymous";
+            var text = sep > 0 ? s.Substring(sep + 1) : s;
+            msgs.Add(new Message(id, roomId, atMs, username, text));
+        }
+        return msgs;
+    }
+
+    // ─── helpers ─────────────────────────────────────────────────────
+    private static long NowMs() => (long)(Ic0.time() / 1_000_000UL);
+
+    private static string SanitiseName(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "untitled";
+        raw = new string(raw.Trim().Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_').ToArray()).ToLowerInvariant();
+        if (raw.Length == 0) return "untitled";
+        if (raw.Length > 20) raw = raw.Substring(0, 20);
+        return raw;
+    }
+
+    private static string SanitiseUsername(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "Anonymous";
         raw = raw.Trim();
         if (raw.Length > 24) raw = raw.Substring(0, 24);
-        // Strip pipe (our storage delimiter) and any control chars.
         var sb = new StringBuilder(raw.Length);
-        foreach (var c in raw)
-        {
-            if (c == '|') continue;
-            if (c < 0x20) continue;
-            sb.Append(c);
-        }
+        foreach (var c in raw) if (c != '|' && c >= 0x20) sb.Append(c);
         var cleaned = sb.ToString();
         return string.IsNullOrEmpty(cleaned) ? "Anonymous" : cleaned;
     }
 
-    // ─── Storage ─────────────────────────────────────────────────────
-    private static List<Message> Read()
-    {
-        var sizeBuf = new byte[4];
-        ReadBytes(Offset, sizeBuf);
-        int count = BitConverter.ToInt32(sizeBuf);
-        ulong cursor = Offset + 4;
-        var list = new List<Message>(count);
-        for (int i = 0; i < count; i++)
-        {
-            var timeBuf = new byte[8];
-            ReadBytes(cursor, timeBuf);
-            long atMs = BitConverter.ToInt64(timeBuf);
-            cursor += 8;
-            ReadBytes(cursor, sizeBuf);
-            int len = BitConverter.ToInt32(sizeBuf);
-            cursor += 4;
-            var data = new byte[len];
-            ReadBytes(cursor, data);
-            cursor += (ulong)len;
-            var s = Encoding.UTF8.GetString(data);
-            int sep = s.IndexOf('|');
-            var sender = sep > 0 ? s.Substring(0, sep) : "anon";
-            var text = sep > 0 ? s.Substring(sep + 1) : s;
-            list.Add(new Message(atMs, sender, text));
-        }
-        return list;
-    }
+    // ─── stable-memory primitives ─────────────────────────────────────
+    private uint ReadMagic() { var b = new byte[4]; ReadBytes(MagicOffset, b); return BitConverter.ToUInt32(b); }
+    private void WriteMagic() { WriteBytes(MagicOffset, BitConverter.GetBytes(Magic)); WriteBytes(MagicOffset - 4, BitConverter.GetBytes(Version)); }
+    private uint ReadVersion() { var b = new byte[4]; ReadBytes(MagicOffset - 4, b); return BitConverter.ToUInt32(b); }
+    private static void EnsureGrown() { if (Ic0.stable64_size() < 1) Ic0.stable64_grow(1); }
 
-    private static void Append(Message m)
+    internal static void ReadBytes(ulong offset, byte[] buf)
+    { fixed (byte* p = buf) Ic0.stable64_read((ulong)(nint)p, offset, (ulong)buf.Length); }
+    internal static void WriteBytes(ulong offset, byte[] buf)
     {
-        EnsureGrownExplicit();
-        var existing = ReadMagic() == Magic ? Read() : new List<Message>();
-        existing.Add(m);
-        if (existing.Count > MaxMessages)
-        {
-            existing = existing.GetRange(existing.Count - MaxMessages, MaxMessages);
-        }
-        WriteAll(existing);
-        WriteMagic();
-    }
-
-    private static void WriteAll(IReadOnlyList<Message> messages)
-    {
-        var sizeBuf = BitConverter.GetBytes(messages.Count);
-        WriteBytes(Offset, sizeBuf);
-        ulong cursor = Offset + 4;
-        foreach (var m in messages)
-        {
-            WriteBytes(cursor, BitConverter.GetBytes(m.AtMs));
-            cursor += 8;
-            var data = Encoding.UTF8.GetBytes(m.Username + "|" + m.Text);
-            WriteBytes(cursor, BitConverter.GetBytes(data.Length));
-            cursor += 4;
-            WriteBytes(cursor, data);
-            cursor += (ulong)data.Length;
-        }
-    }
-
-    private static uint ReadMagic()
-    {
-        var b = new byte[4];
-        ReadBytes(MagicOffset, b);
-        return BitConverter.ToUInt32(b);
-    }
-
-    private static void WriteMagic()
-    {
-        WriteBytes(MagicOffset, BitConverter.GetBytes(Magic));
-    }
-
-    private static void EnsureGrown()
-    {
-        if (Ic0.stable64_size() == 0) return; // read paths can early-return
-    }
-
-    private static void EnsureGrownExplicit()
-    {
-        // Need at least 64KB (1 page). Magic is at 4092 → write touches
-        // through 4099+ at minimum. Plus message data. Grow generously.
-        if (Ic0.stable64_size() < 1) Ic0.stable64_grow(1);
-    }
-
-    private static void ReadBytes(ulong offset, byte[] buf)
-    {
-        fixed (byte* p = buf) Ic0.stable64_read((ulong)(nint)p, offset, (ulong)buf.Length);
-    }
-
-    private static void WriteBytes(ulong offset, byte[] buf)
-    {
+        ulong needed = offset + (ulong)buf.Length;
+        ulong haveBytes = Ic0.stable64_size() * 65536UL;
+        if (needed > haveBytes) Ic0.stable64_grow(((needed - haveBytes) + 65535UL) / 65536UL);
         fixed (byte* p = buf) Ic0.stable64_write(offset, (ulong)(nint)p, (ulong)buf.Length);
     }
 
-    private static string ShortPrincipal()
+    // ─── binary read/write helpers ───────────────────────────────────
+    private sealed class MemoryWriter
     {
-        // Caller principal — first 5 chars for readability.
-        try
+        private readonly List<byte> _buf = new();
+        public byte[] ToArray() => _buf.ToArray();
+        public void WriteU32(uint v) => _buf.AddRange(BitConverter.GetBytes(v));
+        public void WriteI32(int v) => _buf.AddRange(BitConverter.GetBytes(v));
+        public void WriteI64(long v) => _buf.AddRange(BitConverter.GetBytes(v));
+        public void WriteString(string s)
         {
-            var size = Ic0.msg_caller_size();
-            if (size == 0) return "anon";
-            var buf = new byte[size];
-            fixed (byte* p = buf) Ic0.msg_caller_copy((nint)p, 0, (uint)size);
-            // Hex-prefix is fine for a display tag.
-            var hex = new StringBuilder(5);
-            for (int i = 0; i < 3 && i < buf.Length; i++)
-            {
-                hex.Append(buf[i].ToString("x2"));
-            }
-            return hex.Length > 5 ? hex.ToString(0, 5) : hex.ToString();
+            var data = Encoding.UTF8.GetBytes(s);
+            _buf.AddRange(BitConverter.GetBytes(data.Length));
+            _buf.AddRange(data);
         }
-        catch { return "anon"; }
+    }
+
+    private sealed class MemoryReader
+    {
+        public ulong Cursor { get; private set; }
+        public MemoryReader(ulong offset) { Cursor = offset; }
+        public uint ReadU32() { var b = new byte[4]; ReadBytes(Cursor, b); Cursor += 4; return BitConverter.ToUInt32(b); }
+        public int  ReadI32() { var b = new byte[4]; ReadBytes(Cursor, b); Cursor += 4; return BitConverter.ToInt32(b); }
+        public long ReadI64() { var b = new byte[8]; ReadBytes(Cursor, b); Cursor += 8; return BitConverter.ToInt64(b); }
+        public string ReadString()
+        {
+            var len = ReadI32();
+            if (len <= 0) return string.Empty;
+            var b = new byte[len];
+            ReadBytes(Cursor, b);
+            Cursor += (ulong)len;
+            return Encoding.UTF8.GetString(b);
+        }
     }
 }

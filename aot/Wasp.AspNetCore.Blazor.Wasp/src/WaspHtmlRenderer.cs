@@ -226,6 +226,13 @@ public sealed class WaspHtmlRenderer : Renderer
             var hash = global::Wasp.WebSockets.Sha256.Hash(idInput);
             var id = BytesToHex(hash, 8);
             _handlers[id] = ec;
+            // Best-effort: extract the underlying delegate so DispatchEvent
+            // can run it directly. ec.InvokeAsync goes via
+            // IHandleEvent.HandleEventAsync → StateHasChanged → AssertAccess
+            // which throws when we're outside Blazor's dispatcher (which
+            // we always are — the IC thread is not associated with one).
+            var inner = TryExtractDelegate(ec);
+            if (inner is not null) _rawHandlers[id] = inner;
             sb.Append(' ').Append("data-wasp-evt-").Append(evtName).Append("=\"").Append(id).Append('"');
             return;
         }
@@ -265,6 +272,25 @@ public sealed class WaspHtmlRenderer : Renderer
     }
 
     private readonly Dictionary<string, MulticastDelegate> _rawHandlers = new();
+
+    // EventCallback's underlying delegate is reachable as the internal
+    // `Delegate` field. Cached once; the field name is stable across
+    // .NET 6+ Blazor releases. Annotated DynamicDependency so the
+    // trimmer doesn't remove the field in AOT publish.
+    [System.Diagnostics.CodeAnalysis.DynamicDependency(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.NonPublicFields,
+        typeof(EventCallback))]
+    private static readonly System.Reflection.FieldInfo? _ecDelegateField =
+        typeof(EventCallback).GetField("Delegate",
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic);
+
+    private static MulticastDelegate? TryExtractDelegate(EventCallback ec)
+    {
+        if (!ec.HasDelegate || _ecDelegateField is null) return null;
+        try { return _ecDelegateField.GetValue(ec) as MulticastDelegate; }
+        catch { return null; }
+    }
 
     /// <summary>Look up a handler by id (after a render call).</summary>
     public bool TryGetHandler(string id, out EventCallback ec, out MulticastDelegate? raw)

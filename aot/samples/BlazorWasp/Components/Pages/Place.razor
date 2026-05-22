@@ -1,0 +1,98 @@
+@* Pixel canvas — r/place clone. The grid uses event delegation: one
+   handler on the container, cells carry their (x,y) in
+   data-wasp-args. The selected colour rides in the URL query (?c=N)
+   so swatches are just <a> links the bridge handles. Pure Razor. *@
+
+@inject WaspSample.BlazorWasp.PixelService Pixels
+
+@{
+    var selectedColor = 12;   // default blue — anything but white
+    if (Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("c", out var cStr)
+        && int.TryParse(cStr, out var parsedC)
+        && parsedC >= 0 && parsedC < Pixels.PaletteSize)
+    {
+        selectedColor = parsedC;
+    }
+    var grid = Pixels.Snapshot();
+    var placed = Pixels.PlacedCount;
+}
+
+<PageTitle>Pixel canvas · @placed pixels</PageTitle>
+
+<div class="px-shell">
+    <header class="px-header">
+        <div class="px-title">
+            <h1>Pixel canvas</h1>
+            <p>Place one pixel every @(PixelService.CooldownMs / 1000) seconds. Forever, on-chain.</p>
+        </div>
+        <div class="px-stats">
+            <div class="px-stat">
+                <span class="px-stat-num">@placed</span>
+                <span class="px-stat-label">pixels placed</span>
+            </div>
+            <div class="px-stat">
+                <span class="px-stat-num">@(PixelService.Width)×@(PixelService.Height)</span>
+                <span class="px-stat-label">canvas</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="px-board">
+        <div class="px-grid"
+             style="grid-template-columns: repeat(@PixelService.Width, 1fr);"
+             @onclick="HandlePlace">
+            @for (int y = 0; y < PixelService.Height; y++)
+            {
+                @for (int x = 0; x < PixelService.Width; x++)
+                {
+                    var idx = y * PixelService.Width + x;
+                    var color = PixelService.Palette[grid[idx]];
+                    <div class="px-cell"
+                         style="background:@color"
+                         data-wasp-args='@($"{{\"x\":\"{x}\",\"y\":\"{y}\"}}")'
+                         title="(@x, @y)"></div>
+                }
+            }
+        </div>
+    </div>
+
+    <form class="px-toolbar" autocomplete="off">
+        <input name="username" type="text" class="px-username"
+               placeholder="your name" maxlength="24" data-wasp-persist />
+
+        <div class="px-palette" role="group" aria-label="colour palette">
+            @for (int i = 0; i < Pixels.PaletteSize; i++)
+            {
+                var cls = i == selectedColor ? "px-swatch active" : "px-swatch";
+                var hex = PixelService.Palette[i];
+                <a class="@cls" href="/place?c=@i"
+                   style="background:@hex"
+                   aria-label="colour @i"
+                   title="colour @i"></a>
+            }
+        </div>
+
+        <div class="px-selected">
+            <span class="px-selected-label">selected</span>
+            <span class="px-selected-swatch" style="background:@PixelService.Palette[selectedColor]"></span>
+        </div>
+    </form>
+
+    <p class="px-tip">Tip: pick a colour, then click any pixel. Open the URL <code>/place?c=4</code> to start with red.</p>
+</div>
+
+@code {
+    void HandlePlace()
+    {
+        var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
+        if (!args.TryGetValue("x", out var xs) || !args.TryGetValue("y", out var ys)) return;
+        if (!int.TryParse(xs, out var x) || !int.TryParse(ys, out var y)) return;
+
+        var query = Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery;
+        query.TryGetValue("c", out var cStr);
+        int.TryParse(cStr, out var color);
+
+        args.TryGetValue("username", out var username);
+        Pixels.TryPlace(x, y, color, username ?? "Anonymous", out _);
+    }
+}

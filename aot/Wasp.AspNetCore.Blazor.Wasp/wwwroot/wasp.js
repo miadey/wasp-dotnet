@@ -52,6 +52,28 @@
       var fd = new FormData(form);
       fd.forEach(function (v, k) { args[k] = String(v); });
     }
+    // Page-wide persistent inputs ([data-wasp-persist] with a name)
+    // bring their current value as a default — same form or not. Lets
+    // a username input in a Discord-style sidebar reach a Send handler
+    // in the channel composer without forcing developers to nest them
+    // in one form. Form-scoped values still win if both exist.
+    document.querySelectorAll('[data-wasp-persist][name]').forEach(function (el) {
+      var k = el.getAttribute('name');
+      if (!(k in args) && el.value !== '') args[k] = String(el.value);
+    });
+    // Per-element extra args via data-wasp-args='{"x":"5","y":"7"}'.
+    // Resolved from the actually-clicked element (e.target), then
+    // walked up — useful for event-delegation patterns where the
+    // handler sits on a container and cells carry their identity in
+    // data-wasp-args. Also collects data-* keys with the wasp- prefix
+    // for ergonomic per-cell metadata.
+    var argSrc = e.target && e.target.closest && e.target.closest('[data-wasp-args]');
+    if (argSrc) {
+      try {
+        var parsed = JSON.parse(argSrc.getAttribute('data-wasp-args'));
+        for (var k in parsed) args[k] = String(parsed[k]);
+      } catch (_) { /* ignore malformed json */ }
+    }
     // Optimistic UX: disable the source button + clear the form's
     // text inputs immediately, so the user can keep typing while
     // consensus runs. If the POST errors, we restore.
@@ -81,7 +103,7 @@
           'accept': 'application/json',
         },
         body: JSON.stringify({
-          path: location.pathname,
+          path: location.pathname + location.search,
           handlerId: handlerId,
           lastBatchId: lastBatchId,
           eventName: 'click',
@@ -188,7 +210,21 @@
       if (!key) return;
       try {
         var stored = localStorage.getItem(key);
-        if (stored != null) el.value = stored;
+        if (stored != null) { el.value = stored; return; }
+        // First-time visitor — seed a friendly default. data-wasp-default
+        // wins; otherwise generate a guest name for inputs called
+        // "username".
+        var def = el.getAttribute('data-wasp-default');
+        if (def && def.indexOf('{nn}') >= 0) {
+          def = def.replace('{nn}', Math.floor(Math.random() * 90 + 10));
+        }
+        if (!def && el.getAttribute('name') === 'username') {
+          def = 'User' + Math.floor(Math.random() * 90 + 10);
+        }
+        if (def) {
+          el.value = def;
+          localStorage.setItem(key, def);
+        }
       } catch (_) { /* private mode */ }
     });
   }
@@ -199,6 +235,29 @@
     if (!key) return;
     try { localStorage.setItem(key, t.value); }
     catch (_) { /* private mode */ }
+  });
+
+  // ─── Emoji-insert buttons ─────────────────────────────────────────
+  // <button data-wasp-emoji="👍"> inside a form inserts that string
+  // into the nearest <textarea> at the current cursor — purely client
+  // side, no server roundtrip. Lets a chat composer offer a one-tap
+  // emoji picker without round-tripping every keystroke through the
+  // canister.
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest && e.target.closest('[data-wasp-emoji]');
+    if (!btn) return;
+    var emoji = btn.getAttribute('data-wasp-emoji');
+    var form = btn.closest('form');
+    if (!form) return;
+    var ta = form.querySelector('textarea');
+    if (!ta) return;
+    e.preventDefault();
+    var s = ta.selectionStart, eEnd = ta.selectionEnd;
+    if (typeof s !== 'number') { ta.value += emoji; ta.focus(); return; }
+    ta.value = ta.value.slice(0, s) + emoji + ta.value.slice(eEnd);
+    var pos = s + emoji.length;
+    ta.focus();
+    try { ta.setSelectionRange(pos, pos); } catch (_) {}
   });
 
   // ─── SPA-style nav ────────────────────────────────────────────────
@@ -242,10 +301,10 @@
     var url = new URL(a.href, location.origin);
     if (url.origin !== location.origin) return;
     e.preventDefault();
-    _navigateTo(url.pathname, /*push*/ true);
+    _navigateTo(url.pathname + url.search, /*push*/ true);
   });
   window.addEventListener('popstate', function () {
-    _navigateTo(location.pathname, /*push*/ false);
+    _navigateTo(location.pathname + location.search, /*push*/ false);
   });
 
   // ─── Public surface ──────────────────────────────────────────────
@@ -291,7 +350,7 @@
         await new Promise(function (r) { setTimeout(r, _nextInterval()); });
         var headers = { 'accept': 'application/json' };
         if (lastBatchId) headers['if-none-match'] = lastBatchId;
-        var resp = await origFetch('/_wasp/render?path=' + encodeURIComponent(location.pathname), { headers: headers });
+        var resp = await origFetch('/_wasp/render?path=' + encodeURIComponent(location.pathname + location.search), { headers: headers });
         if (!resp.ok) continue;
         var ct = resp.headers.get('content-type') || '';
         if (ct.indexOf('json') < 0) continue;

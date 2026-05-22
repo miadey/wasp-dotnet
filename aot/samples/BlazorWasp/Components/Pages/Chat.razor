@@ -1,90 +1,186 @@
-@* Chat.razor — vanilla Razor. The bridge transparently persists any
-   <input data-wasp-persist> across re-renders (so the username
-   survives reactivity polls). No JS in this view. *@
+@* Multi-room chat — Discord-style layout. Active room comes from the
+   URL query ?r=<id>; clicking a room in the sidebar is a regular <a>
+   that the bridge intercepts (SPA nav). All inputs persist across
+   re-renders via data-wasp-persist. No JavaScript in this view. *@
 
 @inject WaspSample.BlazorWasp.ChatService ChatState
 
-<PageTitle>Chat</PageTitle>
+@{
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("r", out var roomKey);
+    var activeRoom = ResolveActiveRoom(roomKey);
+    var messages = ChatState.MessagesIn(activeRoom.Id);
+    var rooms = ChatState.Rooms;
+}
+
+<PageTitle>#@activeRoom.Name · chat</PageTitle>
 
 <div class="dc-shell">
-    <header class="dc-channel-header">
-        <div class="dc-channel-title">
-            <span class="dc-hash">#</span><span>chat</span>
+    <aside class="dc-rooms">
+        <div class="dc-server">
+            <div class="dc-server-name">Wasp Chat</div>
+            <div class="dc-server-sub">on the Internet Computer</div>
         </div>
-        <div class="dc-channel-tag">@ChatState.Messages.Count message@(ChatState.Messages.Count == 1 ? "" : "s")</div>
-    </header>
 
-    <div class="dc-messages" id="chat-scroll">
-        @if (ChatState.Messages.Count == 0)
-        {
-            <div class="dc-empty">
-                <h2>Welcome to <span class="dc-hash">#</span>chat!</h2>
-                <p>This is the start of the channel. Be the first to say hi.</p>
-            </div>
-        }
-        @{
-            string? prevUser = null;
-            string? prevDate = null;
-            long prevAt = 0;
-        }
-        @foreach (var msg in ChatState.Messages)
-        {
-            var date = DateOnly(msg.AtMs);
-            var grouped = prevUser == msg.Username && (msg.AtMs - prevAt) < 5 * 60 * 1000 && date == prevDate;
-            if (date != prevDate)
+        <div class="dc-rooms-header">Text channels</div>
+        <ul class="dc-rooms-list">
+            @foreach (var r in rooms)
             {
-                <div class="dc-divider"><span>@date</span></div>
+                var cls = r.Id == activeRoom.Id ? "dc-room active" : "dc-room";
+                <li>
+                    <a class="@cls" href="/chat?r=@r.Name">
+                        <span class="dc-hash">#</span><span class="dc-room-name">@r.Name</span>
+                    </a>
+                </li>
             }
-            <div class="dc-message @(grouped ? "dc-message-grouped" : null)">
-                @if (!grouped)
+        </ul>
+
+        <form class="dc-room-add" autocomplete="off">
+            <input name="newRoom" type="text" class="dc-input"
+                   placeholder="new-channel" maxlength="20" />
+            <button type="button" class="dc-btn-add" @onclick="HandleCreateRoom"
+                    aria-label="Create channel">+</button>
+        </form>
+
+        <div class="dc-user-card">
+            <input name="username" type="text" class="dc-input dc-username-card"
+                   placeholder="set your name" maxlength="24" data-wasp-persist />
+            <span class="dc-user-dot"></span>
+        </div>
+    </aside>
+
+    <section class="dc-channel">
+        <header class="dc-channel-header">
+            <div class="dc-channel-title">
+                <span class="dc-hash">#</span><span>@activeRoom.Name</span>
+            </div>
+            <div class="dc-channel-tag">@messages.Count message@(messages.Count == 1 ? "" : "s")</div>
+        </header>
+
+        <div class="dc-messages" id="chat-scroll" @onclick="HandleReact">
+            @if (messages.Count == 0)
+            {
+                <div class="dc-empty">
+                    <div class="dc-empty-mark">#</div>
+                    <h2>Welcome to <span class="dc-hash">#</span>@activeRoom.Name!</h2>
+                    <p>This is the start of the channel. Drop the first message.</p>
+                </div>
+            }
+            @{
+                string? prevUser = null;
+                string? prevDate = null;
+                long prevAt = 0;
+            }
+            @foreach (var msg in messages)
+            {
+                var date = DateOnly(msg.AtMs);
+                var grouped = prevUser == msg.Username && (msg.AtMs - prevAt) < 5 * 60 * 1000 && date == prevDate;
+                if (date != prevDate)
                 {
-                    <div class="dc-avatar" style="@AvatarStyle(msg.Username)">@AvatarLetter(msg.Username)</div>
+                    <div class="dc-divider"><span>@date</span></div>
                 }
-                else
-                {
-                    <div class="dc-avatar-spacer" aria-hidden="true">@TimeShort(msg.AtMs)</div>
-                }
-                <div class="dc-message-body">
+                var reactions = ChatState.ReactionsOf(msg.Id);
+                <div class="dc-message @(grouped ? "dc-message-grouped" : null)">
                     @if (!grouped)
                     {
-                        <div class="dc-message-head">
-                            <span class="dc-username" style="@UsernameStyle(msg.Username)">@msg.Username</span>
-                            <span class="dc-time">@FormatTime(msg.AtMs)</span>
-                        </div>
+                        <div class="dc-avatar" style="@AvatarStyle(msg.Username)">@AvatarLetter(msg.Username)</div>
                     }
-                    <div class="dc-text">@msg.Text</div>
+                    else
+                    {
+                        <div class="dc-avatar-spacer" aria-hidden="true">@TimeShort(msg.AtMs)</div>
+                    }
+                    <div class="dc-message-body">
+                        @if (!grouped)
+                        {
+                            <div class="dc-message-head">
+                                <span class="dc-username" style="@UsernameStyle(msg.Username)">@msg.Username</span>
+                                <span class="dc-time">@FormatTime(msg.AtMs)</span>
+                            </div>
+                        }
+                        <div class="dc-text">@msg.Text</div>
+                        <div class="dc-reactions">
+                            @foreach (var emoji in ChatService.ReactionEmojis)
+                            {
+                                var count = reactions.TryGetValue(emoji, out var n) ? n : 0;
+                                var btnCls = count > 0 ? "dc-react has-count" : "dc-react";
+                                <button type="button" class="@btnCls"
+                                        data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{emoji}\"}}")'
+                                        aria-label="react @emoji">
+                                    <span class="dc-react-e">@emoji</span>
+                                    @if (count > 0)
+                                    {
+                                        <span class="dc-react-n">@count</span>
+                                    }
+                                </button>
+                            }
+                        </div>
+                    </div>
                 </div>
-            </div>
-            prevUser = msg.Username;
-            prevDate = date;
-            prevAt = msg.AtMs;
-        }
-    </div>
+                prevUser = msg.Username;
+                prevDate = date;
+                prevAt = msg.AtMs;
+            }
+        </div>
 
-    <form class="dc-composer" autocomplete="off">
-        <input name="username" type="text" class="dc-username-input"
-               placeholder="Your name" maxlength="24" data-wasp-persist />
-        <textarea name="text" class="dc-composer-input" rows="1"
-                  placeholder="Message #chat" required></textarea>
-        <button type="button" class="dc-send" @onclick="HandleSend" aria-label="Send">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21l20.99-9L2.01 3 2 10l15 2-15 2z"/></svg>
-        </button>
-    </form>
+        <form class="dc-composer" autocomplete="off">
+            <input name="roomId" type="hidden" value="@activeRoom.Id" />
+            <div class="dc-emoji-bar">
+                @foreach (var emoji in ChatService.ReactionEmojis)
+                {
+                    <button type="button" class="dc-emoji-btn"
+                            data-wasp-emoji="@emoji"
+                            aria-label="insert @emoji">@emoji</button>
+                }
+            </div>
+            <textarea name="text" class="dc-composer-input" rows="1"
+                      placeholder="Message #@activeRoom.Name" required></textarea>
+            <button type="button" class="dc-send" @onclick="HandleSend" aria-label="Send">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21l20.99-9L2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+        </form>
+    </section>
 </div>
 
 @code {
+    ChatService.Room ResolveActiveRoom(string? key)
+    {
+        var rooms = ChatState.Rooms;
+        if (!string.IsNullOrEmpty(key))
+        {
+            // try by name first, then by numeric id
+            var byName = ChatState.FindRoomByName(key);
+            if (byName is not null) return byName;
+            if (int.TryParse(key, out var id))
+            {
+                var byId = ChatState.FindRoom(id);
+                if (byId is not null) return byId;
+            }
+        }
+        return rooms.Count > 0 ? rooms[0] : ChatState.CreateRoom("general");
+    }
+
     void HandleSend()
     {
         var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
-        if (args.TryGetValue("text", out var text))
-        {
-            var msgArgs = new Dictionary<string, string> { ["text"] = text };
-            if (args.TryGetValue("username", out var username))
-            {
-                msgArgs["username"] = username;
-            }
-            ChatState.Post(msgArgs);
-        }
+        if (!args.TryGetValue("text", out var text) || string.IsNullOrWhiteSpace(text)) return;
+        if (!args.TryGetValue("roomId", out var roomIdStr) || !int.TryParse(roomIdStr, out var roomId)) return;
+        var msgArgs = new Dictionary<string, string> { ["text"] = text };
+        if (args.TryGetValue("username", out var username)) msgArgs["username"] = username;
+        ChatState.Post(roomId, msgArgs);
+    }
+
+    void HandleReact()
+    {
+        var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
+        if (!args.TryGetValue("msgId", out var midStr) || !long.TryParse(midStr, out var msgId)) return;
+        if (!args.TryGetValue("emoji", out var emoji) || string.IsNullOrEmpty(emoji)) return;
+        ChatState.React(msgId, emoji);
+    }
+
+    void HandleCreateRoom()
+    {
+        var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
+        if (!args.TryGetValue("newRoom", out var name) || string.IsNullOrWhiteSpace(name)) return;
+        ChatState.CreateRoom(name);
     }
 
     string AvatarLetter(string username)
@@ -98,7 +194,7 @@
     }
 
     string AvatarStyle(string username) => $"background: hsl({HueFor(username)}, 50%, 50%);";
-    string UsernameStyle(string username) => $"color: hsl({HueFor(username)}, 60%, 60%);";
+    string UsernameStyle(string username) => $"color: hsl({HueFor(username)}, 60%, 65%);";
 
     string FormatTime(long unixMs)
     {

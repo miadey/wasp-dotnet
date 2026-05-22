@@ -60,11 +60,16 @@ public sealed class WaspRouter : IWaspRenderer
     public WaspRenderBatch Render(WaspRenderRequest req)
     {
         var normalized = NormalizePath(req.Path);
-        var (html, _) = RenderPath(normalized);
-        // Hash the normalised path so equivalent URLs ("/counter",
-        // "/counter/", "/counter?x=1") share a batchId and the client
-        // can dedupe via If-None-Match.
-        var batchInput = System.Text.Encoding.UTF8.GetBytes(normalized + "|" + html);
+        var query = ParseQuery(req.Path, req.QueryString);
+        string html;
+        using (WaspContext.WithRouteQuery(query))
+        {
+            (html, _) = RenderPath(normalized);
+        }
+        // Hash includes query so different rooms ("/chat?r=general" vs
+        // "/chat?r=random") get distinct batchIds and clients don't
+        // dedupe across them via If-None-Match.
+        var batchInput = System.Text.Encoding.UTF8.GetBytes(req.Path + "|" + html);
         var hash = global::Wasp.WebSockets.Sha256.Hash(batchInput);
         var batchId = BytesToHex(hash, 16);
         return new WaspRenderBatch
@@ -85,19 +90,23 @@ public sealed class WaspRouter : IWaspRenderer
         {
             return Render(new WaspRenderRequest { Path = req.Path });
         }
-        _ = renderer.RenderToHtml(componentType, ParameterView.Empty);
-        if (renderer.TryGetHandler(req.HandlerId, out var ec, out var raw))
+        var query = ParseQuery(req.Path, null);
+        using (WaspContext.WithRouteQuery(query))
         {
-            using (WaspContext.WithEvent(req.Args))
+            _ = renderer.RenderToHtml(componentType, ParameterView.Empty);
+            if (renderer.TryGetHandler(req.HandlerId, out var ec, out var raw))
             {
-                try
+                using (WaspContext.WithEvent(req.Args))
                 {
-                    InvokeHandler(raw, ec, req.Args);
-                }
-                catch (Exception ex)
-                {
-                    try { global::Wasp.IcCdk.Reply.Print("[wasp-router-dispatch] " + ex); }
-                    catch { }
+                    try
+                    {
+                        InvokeHandler(raw, ec, req.Args);
+                    }
+                    catch (Exception ex)
+                    {
+                        try { global::Wasp.IcCdk.Reply.Print("[wasp-router-dispatch] " + ex); }
+                        catch { }
+                    }
                 }
             }
         }
@@ -116,6 +125,34 @@ public sealed class WaspRouter : IWaspRenderer
         var (innerHtml, handlers) = renderer.RenderToHtml(componentType, ParameterView.Empty);
         var html = _shellWrap?.Invoke(path, innerHtml) ?? innerHtml;
         return (html, handlers);
+    }
+
+    private static IReadOnlyDictionary<string, string> ParseQuery(string? path, string? queryString)
+    {
+        // Prefer the embedded query in the path. The outer queryString
+        // is the wrapper query of the framework endpoint (e.g.
+        // /_wasp/render?path=/foo?c=4 hands us queryString="path=..."
+        // which is not what the app cares about).
+        string? raw = null;
+        if (!string.IsNullOrEmpty(path))
+        {
+            var q = path.IndexOf('?');
+            if (q >= 0) raw = path.Substring(q + 1);
+        }
+        if (string.IsNullOrEmpty(raw)) raw = queryString;
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(raw)) return dict;
+        foreach (var part in raw.Split('&'))
+        {
+            if (string.IsNullOrEmpty(part)) continue;
+            var eq = part.IndexOf('=');
+            string key, value;
+            if (eq < 0) { key = part; value = string.Empty; }
+            else        { key = part.Substring(0, eq); value = part.Substring(eq + 1); }
+            try { dict[Uri.UnescapeDataString(key)] = Uri.UnescapeDataString(value); }
+            catch { /* malformed query — skip */ }
+        }
+        return dict;
     }
 
     private Type? ResolveType(string path)

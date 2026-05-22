@@ -18,9 +18,11 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Counter))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Weather))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Chat))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Place))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CounterService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WeatherService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(ChatService))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(PixelService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspRouter))]
     [ModuleInitializer]
@@ -37,7 +39,7 @@ public static class Program
             builder.Services.AddSingleton<CounterService>();
             builder.Services.AddSingleton<WeatherService>();
             builder.Services.AddSingleton<ChatService>();
-            // Router is configured at registration time with the route map.
+            builder.Services.AddSingleton<PixelService>();
             builder.Services.AddSingleton<IWaspRenderer>(sp =>
             {
                 var r = new WaspRouter(sp);
@@ -45,6 +47,7 @@ public static class Program
                 r.AddRoute<Counter>("/counter");
                 r.AddRoute<Weather>("/weather");
                 r.AddRoute<Chat>("/chat");
+                r.AddRoute<Place>("/place");
                 r.WrapShell((path, inner) => WrapWithSidebar(path, inner));
                 return r;
             });
@@ -56,14 +59,15 @@ public static class Program
             app.StartAsync().GetAwaiter().GetResult();
 
             // Pre-render each route's SSR shell + register as a
-            // certified static asset. Subsequent GETs to "/" / "/counter"
-            // / "/weather" hit the query path (~300 ms on canonical
-            // mainnet).
+            // certified static asset. Subsequent direct GETs to "/" /
+            // "/counter" / "/weather" / "/chat" / "/place" hit the
+            // query path (~300 ms on canonical mainnet).
             var renderer = app.Services.GetRequiredService<IWaspRenderer>();
             RegisterShell(renderer, "/");
             RegisterShell(renderer, "/counter");
             RegisterShell(renderer, "/weather");
             RegisterShell(renderer, "/chat");
+            RegisterShell(renderer, "/place");
         }
         catch (Exception ex)
         {
@@ -85,18 +89,28 @@ public static class Program
 
     private static string WrapWithSidebar(string currentPath, string innerHtml)
     {
-        string Active(string p) => string.Equals(p, currentPath, StringComparison.OrdinalIgnoreCase)
+        var normalized = currentPath;
+        int q = normalized.IndexOf('?');
+        if (q >= 0) normalized = normalized.Substring(0, q);
+        if (normalized.Length > 1 && normalized.EndsWith("/")) normalized = normalized.Substring(0, normalized.Length - 1);
+
+        string Active(string p) => string.Equals(p, normalized, StringComparison.OrdinalIgnoreCase)
             ? " class=\"active\"" : "";
         var sb = new StringBuilder();
         sb.Append("<div class=\"page\">");
         sb.Append("<aside class=\"sidebar\">");
-        sb.Append("<a class=\"brand\" href=\"/\">Blazor on ICP</a>");
+        sb.Append("<a class=\"brand\" href=\"/\">");
+        sb.Append("<span class=\"brand-mark\">⚡</span>");
+        sb.Append("<span class=\"brand-text\">Blazor on ICP</span>");
+        sb.Append("</a>");
         sb.Append("<nav class=\"nav\">");
-        sb.Append("<a href=\"/\"").Append(Active("/")).Append(">Home</a>");
-        sb.Append("<a href=\"/counter\"").Append(Active("/counter")).Append(">Counter</a>");
-        sb.Append("<a href=\"/weather\"").Append(Active("/weather")).Append(">Weather</a>");
-        sb.Append("<a href=\"/chat\"").Append(Active("/chat")).Append(">Chat</a>");
+        sb.Append("<a href=\"/\"").Append(Active("/")).Append("><span class=\"nav-i\">⌂</span>Home</a>");
+        sb.Append("<a href=\"/counter\"").Append(Active("/counter")).Append("><span class=\"nav-i\">±</span>Counter</a>");
+        sb.Append("<a href=\"/weather\"").Append(Active("/weather")).Append("><span class=\"nav-i\">☂</span>Weather</a>");
+        sb.Append("<a href=\"/chat\"").Append(Active("/chat")).Append("><span class=\"nav-i\">#</span>Chat</a>");
+        sb.Append("<a href=\"/place\"").Append(Active("/place")).Append("><span class=\"nav-i\">▦</span>Place</a>");
         sb.Append("</nav>");
+        sb.Append("<div class=\"sidebar-foot\">on-chain · always</div>");
         sb.Append("</aside>");
         sb.Append("<main>").Append(innerHtml).Append("</main>");
         sb.Append("</div>");
@@ -112,83 +126,235 @@ public static class Program
     <meta charset=""utf-8"" />
     <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"" />
     <title>Blazor on ICP</title>
+    <link rel=""preconnect"" href=""https://fonts.googleapis.com"" />
+    <link rel=""preconnect"" href=""https://fonts.gstatic.com"" crossorigin />
+    <link href=""https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"" rel=""stylesheet"" />
     <style>
-        html, body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #1e293b; background: #f8fafc; }
+        :root {
+            --bg: #0f1115;
+            --bg-elev: #161922;
+            --bg-side: linear-gradient(180deg, #0b1d3a 0%, #1d0a3a 100%);
+            --text: #e6e8ee;
+            --text-dim: #8b93a7;
+            --accent: #5b8def;
+            --accent-2: #b16cf2;
+            --border: rgba(255,255,255,0.07);
+            --radius: 12px;
+        }
+        * { box-sizing: border-box; }
+        html, body {
+            margin: 0; padding: 0;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            color: var(--text); background: var(--bg);
+            -webkit-font-smoothing: antialiased;
+        }
         .page { display: flex; min-height: 100vh; }
+
+        /* ── Sidebar ──────────────────────────────────────────────── */
         .sidebar {
-            width: 250px;
-            background: linear-gradient(180deg, rgb(5, 39, 103) 0%, #3a0647 70%);
-            color: #f8fafc;
-            padding: 1.25rem 0;
+            width: 240px; flex: 0 0 240px;
+            background: var(--bg-side); color: #f8fafc;
+            padding: 1.5rem 0 1rem;
+            display: flex; flex-direction: column;
+            border-right: 1px solid var(--border);
         }
         .brand {
-            color: #f8fafc; text-decoration: none; font-size: 1.1rem; font-weight: 600;
-            padding: 0 1.25rem 1rem 1.25rem; display: block;
-            border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 1rem;
+            display: flex; align-items: center; gap: 0.65rem;
+            color: #fff; text-decoration: none;
+            font-size: 1.1rem; font-weight: 700; letter-spacing: -0.01em;
+            padding: 0 1.5rem 1.25rem;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            margin-bottom: 1rem;
         }
+        .brand-mark {
+            display: inline-grid; place-items: center;
+            width: 28px; height: 28px; border-radius: 8px;
+            background: linear-gradient(135deg, #5b8def 0%, #b16cf2 100%);
+            font-size: 0.95rem;
+        }
+        .nav { display: flex; flex-direction: column; gap: 2px; padding: 0 0.5rem; }
         .nav a {
-            display: block; color: #cbd5f5; text-decoration: none;
-            padding: 0.6rem 1.25rem; border-left: 4px solid transparent; font-size: 0.95rem;
+            display: flex; align-items: center; gap: 0.7rem;
+            color: #c8d0e0; text-decoration: none;
+            padding: 0.55rem 0.85rem;
+            border-radius: 8px; font-size: 0.95rem; font-weight: 500;
+            transition: background 0.12s ease, color 0.12s ease;
         }
-        .nav a:hover { background: rgba(255,255,255,0.1); color: #fff; }
-        .nav a.active { background: rgba(255,255,255,0.18); color: #fff; border-left-color: #fff; }
-        main { flex: 1; padding: 2rem; max-width: 960px; }
-        main h1 { color: #1e3a8a; margin-top: 0; }
-        main code { background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
-        button.btn-primary {
-            background: #2563eb; color: #fff; border: 0;
-            padding: 0.45rem 1rem; border-radius: 4px; cursor: pointer; font-size: 0.95rem;
+        .nav a:hover { background: rgba(255,255,255,0.06); color: #fff; }
+        .nav a.active {
+            background: linear-gradient(90deg, rgba(91,141,239,0.25), rgba(177,108,242,0.15));
+            color: #fff;
+            box-shadow: inset 0 0 0 1px rgba(91,141,239,0.35);
         }
-        button.btn-primary:hover { background: #1d4ed8; }
+        .nav-i {
+            display: inline-grid; place-items: center;
+            width: 22px; height: 22px;
+            color: var(--text-dim);
+            font-size: 1rem;
+        }
+        .nav a.active .nav-i { color: #fff; }
+        .sidebar-foot {
+            margin-top: auto; padding: 1rem 1.5rem 0;
+            color: rgba(255,255,255,0.35); font-size: 0.75rem;
+            letter-spacing: 0.04em; text-transform: uppercase;
+        }
+
+        /* ── Main / generic page chrome ───────────────────────────── */
+        main {
+            flex: 1 1 auto; min-width: 0;
+            padding: 2.5rem 3rem; max-width: 980px;
+        }
+        main h1 {
+            color: #fff; margin: 0 0 0.5rem;
+            font-size: 1.75rem; letter-spacing: -0.015em;
+        }
+        main p { color: var(--text-dim); line-height: 1.6; }
+        main code {
+            background: var(--bg-elev); color: #e6e8ee;
+            padding: 0.15rem 0.4rem; border-radius: 4px;
+            font-size: 0.88em; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+        }
+        button.btn-primary, .btn-primary {
+            background: linear-gradient(135deg, #5b8def 0%, #4a76d9 100%);
+            color: #fff; border: 0;
+            padding: 0.55rem 1.1rem; border-radius: 8px;
+            font-size: 0.95rem; font-weight: 500; cursor: pointer;
+            transition: filter 0.12s ease, transform 0.05s ease;
+        }
+        button.btn-primary:hover { filter: brightness(1.08); }
+        button.btn-primary:active { transform: translateY(1px); }
         .table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-        .table th, .table td { padding: 0.5rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
-        .table th { background: #f1f5f9; border-bottom-color: #cbd5f5; }
-        p[role=""status""] { font-size: 1.1rem; }
-        /* ── Discord-style chat ─────────────────────────────────────── */
+        .table th, .table td {
+            padding: 0.65rem 0.5rem;
+            border-bottom: 1px solid var(--border); text-align: left;
+        }
+        .table th { background: var(--bg-elev); color: var(--text-dim); font-weight: 600; font-size: 0.85rem; }
+        p[role=""status""] { font-size: 1.15rem; color: #fff; }
+
+        /* ── Discord-style chat (multi-room) ──────────────────────── */
         main:has(.dc-shell) { padding: 0; max-width: none; }
         .dc-shell {
-            display: flex; flex-direction: column;
-            height: 100vh; background: #313338; color: #dcddde;
-            font: 16px/1.4 'Segoe UI', system-ui, sans-serif;
+            display: grid;
+            grid-template-columns: 240px 1fr;
+            height: 100vh;
+            background: #313338; color: #dcddde;
+            font: 15px/1.45 'Inter', system-ui, sans-serif;
         }
+        .dc-rooms {
+            background: #2b2d31; color: #c9cbd4;
+            display: flex; flex-direction: column;
+            border-right: 1px solid rgba(0,0,0,0.25);
+            overflow: hidden;
+        }
+        .dc-server {
+            padding: 1rem 1rem 0.85rem;
+            border-bottom: 1px solid rgba(0,0,0,0.3);
+            box-shadow: 0 1px 0 rgba(255,255,255,0.04);
+        }
+        .dc-server-name { font-weight: 700; color: #fff; font-size: 1.0rem; }
+        .dc-server-sub  { color: #80848e; font-size: 0.72rem; margin-top: 2px; letter-spacing: 0.02em; }
+        .dc-rooms-header {
+            color: #949ba4; font-size: 0.72rem; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.04em;
+            padding: 1rem 1rem 0.4rem;
+        }
+        .dc-rooms-list { list-style: none; margin: 0; padding: 0 0.5rem; flex: 0 1 auto; overflow-y: auto; }
+        .dc-room {
+            display: flex; align-items: center; gap: 0.35rem;
+            padding: 0.4rem 0.6rem;
+            border-radius: 4px; color: #949ba4; text-decoration: none;
+            font-size: 0.95rem; font-weight: 500;
+            transition: background 0.1s ease, color 0.1s ease;
+        }
+        .dc-room:hover { background: rgba(255,255,255,0.04); color: #dbdee1; }
+        .dc-room.active { background: rgba(255,255,255,0.08); color: #fff; }
+        .dc-room .dc-hash { color: #80848e; font-weight: 400; font-size: 1.1rem; }
+        .dc-room.active .dc-hash { color: #b5bac1; }
+        .dc-room-name { font-weight: 500; }
+
+        .dc-room-add {
+            display: grid; grid-template-columns: 1fr auto; gap: 0.4rem;
+            padding: 0.75rem 1rem 0.5rem;
+            background: transparent; border-top: 1px solid rgba(0,0,0,0.2); margin-top: 0.5rem;
+        }
+        .dc-input {
+            background: #1e1f22; color: #fff; border: 1px solid rgba(255,255,255,0.04);
+            outline: none; padding: 0.55rem 0.65rem; border-radius: 6px;
+            font: inherit; font-size: 0.9rem;
+            transition: border-color 0.12s ease;
+        }
+        .dc-input::placeholder { color: #6b6f76; }
+        .dc-input:focus { border-color: rgba(88,101,242,0.6); }
+        .dc-btn-add {
+            background: #4e5058; color: #fff; border: 0; border-radius: 6px;
+            cursor: pointer; padding: 0 0.75rem; font-size: 1.1rem; line-height: 1;
+            transition: background 0.12s ease;
+        }
+        .dc-btn-add:hover { background: #5865f2; }
+
+        .dc-user-card {
+            margin-top: auto; padding: 0.75rem 1rem;
+            background: #232428;
+            display: grid; grid-template-columns: 1fr auto; gap: 0.5rem;
+            align-items: center;
+        }
+        .dc-username-card { font-size: 0.9rem; }
+        .dc-user-dot {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: #23a55a; box-shadow: 0 0 0 2px #232428;
+        }
+
+        .dc-channel { display: flex; flex-direction: column; min-width: 0; background: #313338; }
         .dc-channel-header {
             flex: 0 0 auto; height: 48px;
             display: flex; align-items: center; justify-content: space-between;
-            padding: 0 1rem; background: #313338; color: #f2f3f5;
+            padding: 0 1.25rem; background: #313338; color: #f2f3f5;
             border-bottom: 1px solid rgba(0,0,0,0.2);
             box-shadow: 0 1px 0 rgba(0,0,0,0.2);
         }
-        .dc-channel-title { display: flex; align-items: center; gap: 0.3rem; font-weight: 600; font-size: 1rem; }
+        .dc-channel-title { display: flex; align-items: center; gap: 0.3rem; font-weight: 700; font-size: 1rem; }
         .dc-hash { color: #80848e; font-weight: 500; font-size: 1.4rem; }
         .dc-channel-tag { color: #80848e; font-size: 0.8rem; }
         .dc-messages {
             flex: 1 1 auto; min-height: 0; overflow-y: auto;
             padding: 1rem 0; scroll-behavior: smooth;
         }
-        .dc-messages::-webkit-scrollbar { width: 16px; }
+        .dc-messages::-webkit-scrollbar { width: 14px; }
         .dc-messages::-webkit-scrollbar-track { background: #2b2d31; }
-        .dc-messages::-webkit-scrollbar-thumb { background: #1a1b1e; border: 4px solid #2b2d31; border-radius: 8px; min-height: 40px; }
-        .dc-empty { padding: 2rem 1rem; color: #b5bac1; }
-        .dc-empty h2 { color: #fff; margin: 0 0 0.5rem; font-size: 1.6rem; font-weight: 700; }
+        .dc-messages::-webkit-scrollbar-thumb {
+            background: #1a1b1e; border: 4px solid #2b2d31;
+            border-radius: 8px; min-height: 40px;
+        }
+        .dc-empty {
+            padding: 3rem 1.5rem 1rem; color: #b5bac1;
+            display: flex; flex-direction: column; gap: 0.5rem;
+        }
+        .dc-empty-mark {
+            width: 72px; height: 72px; border-radius: 50%;
+            background: #4e5058; color: #fff; font-size: 2.5rem; font-weight: 600;
+            display: grid; place-items: center;
+            margin-bottom: 0.5rem;
+        }
+        .dc-empty h2 { color: #fff; margin: 0; font-size: 1.65rem; font-weight: 700; }
         .dc-empty p { margin: 0; color: #b5bac1; }
         .dc-divider {
             text-align: center; margin: 1rem 1rem 0.5rem;
-            font-size: 0.75rem; color: #949ba4; font-weight: 600;
+            font-size: 0.72rem; color: #949ba4; font-weight: 700;
             border-top: 1px solid rgba(255,255,255,0.06);
             position: relative;
         }
         .dc-divider span { background: #313338; padding: 0 0.6rem; position: relative; top: -0.6rem; }
         .dc-message {
-            display: grid; grid-template-columns: 56px 1fr;
-            padding: 0.15rem 1rem 0.15rem 0; margin-top: 1.0rem;
+            display: grid; grid-template-columns: 60px 1fr;
+            padding: 0.15rem 1rem 0.15rem 0; margin-top: 1.1rem;
         }
         .dc-message:hover { background: rgba(4,4,5,0.07); }
         .dc-message-grouped { margin-top: 0; padding-top: 0.1rem; }
         .dc-avatar {
             grid-column: 1; justify-self: center; align-self: start;
-            width: 40px; height: 40px; border-radius: 50%;
+            width: 42px; height: 42px; border-radius: 50%;
             display: flex; align-items: center; justify-content: center;
-            color: #fff; font-weight: 600; font-size: 1.1rem;
+            color: #fff; font-weight: 700; font-size: 1.1rem;
             margin-top: 2px;
         }
         .dc-avatar-spacer {
@@ -200,39 +366,196 @@ public static class Program
         .dc-message:hover .dc-avatar-spacer { visibility: visible; }
         .dc-message-body { grid-column: 2; min-width: 0; }
         .dc-message-head { display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.1rem; }
-        .dc-username { font-weight: 600; font-size: 1rem; }
+        .dc-username { font-weight: 700; font-size: 1rem; }
         .dc-time { color: #949ba4; font-size: 0.75rem; }
         .dc-text {
-            color: #dbdee1; font-size: 1rem; line-height: 1.4;
+            color: #dbdee1; font-size: 1rem; line-height: 1.45;
             white-space: pre-wrap; word-wrap: break-word;
         }
         .dc-composer {
-            flex: 0 0 auto; padding: 0 1rem 1.5rem; background: #313338;
-            display: grid; grid-template-columns: 180px 1fr auto; gap: 0.5rem; align-items: stretch;
+            flex: 0 0 auto; padding: 0 1.25rem 1.5rem; background: #313338;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            grid-template-rows: auto auto;
+            gap: 0.5rem; align-items: stretch;
         }
-        .dc-username-input {
-            background: #383a40; color: #fff; border: 0; outline: none;
-            padding: 0.75rem 0.85rem; border-radius: 8px;
-            font: inherit; font-size: 0.95rem;
+        .dc-emoji-bar {
+            grid-column: 1 / -1;
+            display: flex; gap: 0.3rem; align-items: center;
+            padding-bottom: 0.1rem;
         }
-        .dc-username-input::placeholder { color: #80848e; }
+        .dc-emoji-btn {
+            background: transparent; border: 1px solid transparent;
+            cursor: pointer; padding: 0.2rem 0.45rem; font-size: 1.15rem;
+            line-height: 1; border-radius: 8px;
+            transition: background 0.1s ease, transform 0.05s ease, border-color 0.1s ease;
+        }
+        .dc-emoji-btn:hover { background: #383a40; border-color: rgba(255,255,255,0.06); }
+        .dc-emoji-btn:active { transform: scale(0.92); }
+        .dc-reactions {
+            display: flex; flex-wrap: wrap; gap: 0.3rem;
+            margin-top: 0.3rem;
+        }
+        .dc-react {
+            background: transparent; color: #b5bac1;
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 999px; cursor: pointer;
+            padding: 0.18rem 0.55rem; font-size: 0.85rem;
+            display: inline-flex; align-items: center; gap: 0.3rem;
+            opacity: 0.55;
+            transition: background 0.1s, opacity 0.1s, border-color 0.1s, transform 0.05s;
+        }
+        .dc-message:hover .dc-react { opacity: 1; }
+        .dc-react.has-count {
+            opacity: 1;
+            background: rgba(88,101,242,0.12);
+            border-color: rgba(88,101,242,0.5);
+            color: #c7d2fe;
+        }
+        .dc-react:hover {
+            background: rgba(88,101,242,0.2);
+            border-color: rgba(88,101,242,0.7);
+            color: #fff;
+            opacity: 1;
+        }
+        .dc-react:active { transform: scale(0.94); }
+        .dc-react-e { font-size: 0.95rem; line-height: 1; }
+        .dc-react-n { font-variant-numeric: tabular-nums; font-weight: 600; }
         .dc-composer-input {
             background: #383a40; color: #dcddde; border: 0; outline: none; resize: none;
-            padding: 0.75rem 1rem; border-radius: 8px; min-height: 44px; max-height: 50vh;
-            font: inherit; font-size: 1rem; line-height: 1.375;
+            padding: 0.8rem 1rem; border-radius: 10px; min-height: 46px; max-height: 50vh;
+            font: inherit; font-size: 1rem; line-height: 1.4;
         }
         .dc-composer-input::placeholder { color: #80848e; }
         .dc-send {
             background: #5865f2; color: #fff; border: 0;
-            padding: 0 1rem; border-radius: 8px; cursor: pointer;
+            padding: 0 1.15rem; border-radius: 10px; cursor: pointer;
             display: flex; align-items: center; justify-content: center;
-            transition: background 0.12s ease;
+            transition: background 0.12s ease, transform 0.05s ease;
         }
         .dc-send:hover { background: #4752c4; }
+        .dc-send:active { transform: scale(0.96); }
         .dc-send:disabled { background: #4e5058; cursor: not-allowed; opacity: 0.6; }
-        @@media (max-width: 600px) {
-            .dc-composer { grid-template-columns: 1fr auto; }
-            .dc-username-input { grid-column: 1 / -1; }
+
+        @@media (max-width: 720px) {
+            .dc-shell { grid-template-columns: 64px 1fr; }
+            .dc-room-name, .dc-rooms-header, .dc-server-sub, .dc-room-add, .dc-user-card { display: none; }
+            .dc-server { text-align: center; padding: 1rem 0; }
+            .dc-server-name { font-size: 0.85rem; }
+            .dc-rooms-list { padding: 0.25rem; }
+            .dc-room { justify-content: center; padding: 0.5rem 0; }
+        }
+
+        /* ── Pixel canvas ─────────────────────────────────────────── */
+        main:has(.px-shell) { padding: 0; max-width: none; }
+        .px-shell {
+            min-height: 100vh;
+            background: #0d0f14;
+            color: #e6e8ee;
+            display: flex; flex-direction: column;
+            padding: 2rem 2.5rem;
+            gap: 1.5rem;
+        }
+        .px-header {
+            display: flex; align-items: flex-end; justify-content: space-between;
+            gap: 1.5rem; flex-wrap: wrap;
+        }
+        .px-title h1 { color: #fff; margin: 0 0 0.3rem; font-size: 1.75rem; letter-spacing: -0.015em; }
+        .px-title p { color: var(--text-dim); margin: 0; font-size: 0.95rem; }
+        .px-stats { display: flex; gap: 1.25rem; }
+        .px-stat {
+            background: var(--bg-elev);
+            padding: 0.65rem 1rem; border-radius: 10px;
+            border: 1px solid var(--border);
+            display: flex; flex-direction: column; align-items: flex-start;
+            min-width: 88px;
+        }
+        .px-stat-num { font-size: 1.25rem; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+        .px-stat-label { color: var(--text-dim); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+
+        .px-board {
+            flex: 1 1 auto;
+            display: flex; align-items: center; justify-content: center;
+            background: linear-gradient(180deg, #0a0c11, #11141b);
+            border-radius: 14px; border: 1px solid var(--border);
+            padding: 1.25rem;
+            min-height: 0;
+        }
+        .px-grid {
+            display: grid;
+            gap: 0;
+            background: #fff;
+            border-radius: 6px; overflow: hidden;
+            box-shadow: 0 30px 80px -30px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04);
+            image-rendering: pixelated;
+            cursor: crosshair;
+            user-select: none;
+            /* clamp size so very wide canvases stay on-screen */
+            max-width: min(72vh, 880px);
+            width: 100%;
+            aspect-ratio: 1;
+        }
+        .px-cell {
+            transition: transform 0.06s ease, outline 0.06s ease;
+            outline: 0 solid rgba(0,0,0,0);
+        }
+        .px-cell:hover {
+            outline: 2px solid rgba(91,141,239,0.95);
+            outline-offset: -2px;
+            z-index: 2; position: relative;
+        }
+
+        .px-toolbar {
+            display: grid;
+            grid-template-columns: 200px 1fr auto;
+            gap: 1rem; align-items: center;
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 0.9rem 1rem;
+        }
+        .px-username {
+            background: #1e2129; color: #fff;
+            border: 1px solid var(--border); border-radius: 10px;
+            outline: none; padding: 0.7rem 0.85rem;
+            font: inherit; font-size: 0.95rem;
+            transition: border-color 0.12s ease;
+        }
+        .px-username:focus { border-color: var(--accent); }
+        .px-username::placeholder { color: var(--text-dim); }
+        .px-palette {
+            display: grid; grid-auto-flow: column; gap: 0.4rem;
+            justify-content: center;
+        }
+        .px-swatch {
+            display: inline-block; width: 30px; height: 30px;
+            border-radius: 8px;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.07);
+            transition: transform 0.08s ease, box-shadow 0.08s ease;
+        }
+        .px-swatch:hover { transform: translateY(-2px) scale(1.08); }
+        .px-swatch.active {
+            transform: translateY(-3px) scale(1.18);
+            box-shadow:
+              inset 0 0 0 1px rgba(255,255,255,0.15),
+              0 0 0 2px var(--bg-elev),
+              0 0 0 4px var(--accent);
+        }
+        .px-selected {
+            display: flex; align-items: center; gap: 0.5rem;
+            color: var(--text-dim); font-size: 0.85rem;
+        }
+        .px-selected-label { text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.7rem; }
+        .px-selected-swatch {
+            display: inline-block; width: 28px; height: 28px; border-radius: 8px;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08), 0 0 0 1px rgba(91,141,239,0.6);
+        }
+        .px-tip { color: var(--text-dim); font-size: 0.85rem; margin: 0; text-align: center; }
+
+        @@media (max-width: 720px) {
+            .px-shell { padding: 1.25rem; gap: 1rem; }
+            .px-toolbar { grid-template-columns: 1fr; }
+            .px-palette { grid-auto-flow: row; grid-template-columns: repeat(8, 1fr); }
         }
     </style>
 </head>
