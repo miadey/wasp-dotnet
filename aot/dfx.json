@@ -105,6 +105,12 @@
       "wasm": "samples/BlazorWasp/BlazorWasp.canister.wasm",
       "candid": "samples/BlazorWasp/blazorwasp.did",
       "build": []
+    },
+    "todoef": {
+      "type": "custom",
+      "wasm": "samples/TodoEf/TodoEf.canister.wasm",
+      "candid": "samples/TodoEf/todoef.did",
+      "build": []
     }
   },
   "networks": {
