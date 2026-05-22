@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Wasp",
+  "classifications": [ "Web", "Blazor", "Internet Computer" ],
+  "identity": "Wasp.Templates.BlazorOnIcp",
+  "name": "Blazor on the Internet Computer",
+  "shortName": "blazor-on-icp",
+  "description": "A Blazor app that runs entirely inside an Internet Computer canister using Wasp's render-as-query architecture. No SignalR, no polling, sub-second warmup. Counter / Weather / Chat samples included.",
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "sourceName": "BlazorOnIcp",
+  "preferNameDirectory": true,
+  "symbols": {
+    "WaspVersion": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "0.1.0-alpha",
+      "replaces": "WASP_VERSION"
+    }
+  }
+}

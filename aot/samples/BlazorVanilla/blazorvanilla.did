@@ -1,0 +1,26 @@
+// Candid interface for the BlazorVanilla backend canister.
+//
+// SignalR Long Polling traffic (M4.S7+) rides /_blazor on http_request /
+// http_request_update — no IC-WebSocket needed.
+
+type HeaderField = record { text; text };
+
+type HttpRequest = record {
+  method              : text;
+  url                 : text;
+  headers             : vec HeaderField;
+  body                : blob;
+  certificate_version : opt nat16;
+};
+
+type HttpResponse = record {
+  status_code        : nat16;
+  headers            : vec HeaderField;
+  body               : blob;
+  upgrade            : opt bool;
+};
+
+service : {
+  http_request        : (HttpRequest) -> (HttpResponse) query;
+  http_request_update : (HttpRequest) -> (HttpResponse);
+}

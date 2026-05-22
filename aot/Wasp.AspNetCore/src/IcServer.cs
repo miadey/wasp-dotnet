@@ -40,6 +40,172 @@ public sealed class IcServer : IServer
     /// </summary>
     public static string? InitFailureMessage { get; set; }
 
+    /// <summary>
+    /// path → (body, content-type). When the consumer registers paths
+    /// here at init, the query path serves them directly without
+    /// upgrading — turns a ~3 s update-call round trip into a ~50 ms
+    /// query. Responses are NOT certified, so the client must reach the
+    /// canister via the IC HTTP gateway's `.raw.` subdomain
+    /// (e.g. http://&lt;canister-id&gt;.raw.localhost:4944/) which skips
+    /// response verification.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Body, string ContentType)> _staticAssets =
+        new(StringComparer.Ordinal);
+
+    public static void RegisterStaticAsset(string path, byte[] body, string contentType = "application/octet-stream")
+    {
+        if (path is null) throw new ArgumentNullException(nameof(path));
+        if (body is null) throw new ArgumentNullException(nameof(body));
+        _staticAssets[path] = (body, contentType);
+        // Push sha256(body) into the asset cert tree so the boundary
+        // can verify subsequent query responses on the non-raw subdomain.
+        // Insert is a no-op outside an update context, so calling from
+        // canister_init / post_upgrade / any update handler is safe.
+        IcCertifiedAssets.Insert(path, body);
+    }
+
+    /// <summary>
+    /// path-prefix → query handler. When a GET request matches a
+    /// registered prefix, the handler receives the request URL (with
+    /// query string) and returns (body, content-type). The result is
+    /// served from the query call directly — no upgrade, no ASP.NET
+    /// pipeline, ~10-50 ms on local pocket-ic.
+    ///
+    /// Use for stateless RPC endpoints (e.g. compute-only handlers that
+    /// take input from query params and return the result). Mutations
+    /// are NOT persisted — queries roll back state changes at the end
+    /// of the call.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Func<string, string, (byte[] Body, string ContentType)?>> _queryHandlers =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Rich query handler: receives the full <see cref="IcHttpRequest"/>
+    /// (headers + body in addition to url/method) and may return null to
+    /// bail to the update path. Used by handlers that need per-request
+    /// entropy unavailable in query context — most notably the SignalR
+    /// negotiate (gh #113), where the connectionId is derived from
+    /// (traceparent ∥ Ic0.time ∥ body) hashing rather than a rolled-back
+    /// canister counter.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Func<IcHttpRequest, (byte[] Body, string ContentType)?>> _richQueryHandlers =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Simple registration: handler always returns a body, ignores HTTP
+    /// method. Used by metadata endpoints where the response is always
+    /// the same shape.
+    /// </summary>
+    public static void RegisterQueryHandler(string pathPrefix, Func<string, (byte[] Body, string ContentType)> handler)
+    {
+        if (pathPrefix is null) throw new ArgumentNullException(nameof(pathPrefix));
+        if (handler is null) throw new ArgumentNullException(nameof(handler));
+        _queryHandlers[pathPrefix] = (url, _) => handler(url);
+    }
+
+    /// <summary>
+    /// Method-aware registration with opt-out: handler receives (url, method)
+    /// and may return null to bail to the update path. Used by the /_blazor
+    /// long-poll endpoint to serve empty-queue polls from query (~50 ms) and
+    /// fall through to update only when there's queued data to drain (gh #115).
+    /// </summary>
+    public static void RegisterQueryHandler(string pathPrefix, Func<string, string, (byte[] Body, string ContentType)?> handler)
+    {
+        if (pathPrefix is null) throw new ArgumentNullException(nameof(pathPrefix));
+        if (handler is null) throw new ArgumentNullException(nameof(handler));
+        _queryHandlers[pathPrefix] = handler;
+    }
+
+    /// <summary>
+    /// Rich registration: handler receives the full <see cref="IcHttpRequest"/>
+    /// (so it can read headers and body) and may return null to bail to
+    /// the update path. Required for the SignalR negotiate fast-path,
+    /// whose connectionId is derived from per-request entropy
+    /// (traceparent, time, body) — canister-side counters get rolled
+    /// back at query end, so the handler must source entropy from the
+    /// request itself.
+    /// </summary>
+    public static void RegisterQueryHandler(string pathPrefix, Func<IcHttpRequest, (byte[] Body, string ContentType)?> handler)
+    {
+        if (pathPrefix is null) throw new ArgumentNullException(nameof(pathPrefix));
+        if (handler is null) throw new ArgumentNullException(nameof(handler));
+        _richQueryHandlers[pathPrefix] = handler;
+    }
+
+    /// <summary>
+    /// Synthesize a GET request through the ASP.NET pipeline now,
+    /// capture the response, and register it as a static asset. Use
+    /// for paths whose body doesn't change per request — most useful
+    /// for the SSR HTML shell so the initial page load lands in
+    /// ~100 ms instead of ~1500 ms (the update-call upgrade).
+    ///
+    /// Call AFTER <c>app.StartAsync</c> at canister init.
+    /// </summary>
+    public static void RegisterRenderedPath(string path)
+    {
+        if (path is null) throw new ArgumentNullException(nameof(path));
+        if (_instance?._app is not { } app)
+        {
+            Reply.Print($"[icserver] RegisterRenderedPath({path}) skipped — app not started yet");
+            return;
+        }
+
+        var icReq = new IcHttpRequest
+        {
+            Method = "GET",
+            Url = path,
+            Headers = new[]
+            {
+                new KeyValuePair<string, string>("host", "wasp-canister"),
+                new KeyValuePair<string, string>("user-agent", "wasp-prerender"),
+            },
+            Body = Array.Empty<byte>(),
+        };
+
+        var httpCtx = BuildHttpContext(icReq, isUpdate: true);
+        var aspCtx = app.CreateContext(httpCtx.Features);
+        Exception? pipelineException = null;
+        try
+        {
+            IcSyncContext.RunUntilComplete(() => app.ProcessRequestAsync(aspCtx));
+        }
+        catch (Exception ex)
+        {
+            pipelineException = ex;
+        }
+        app.DisposeContext(aspCtx, pipelineException);
+
+        if (pipelineException is not null)
+        {
+            Reply.Print($"[icserver] RegisterRenderedPath({path}) FAILED: {pipelineException.GetType().Name}: {pipelineException.Message}");
+            return;
+        }
+
+        var icResp = BuildIcResponse(httpCtx, httpCtx.Response);
+        if (icResp.StatusCode != 200)
+        {
+            Reply.Print($"[icserver] RegisterRenderedPath({path}) skipped — status {icResp.StatusCode}");
+            return;
+        }
+
+        // Try to keep the response's own content-type header if the
+        // pipeline set one; fall back to text/html for / and the
+        // default for everything else.
+        string contentType = "text/html; charset=utf-8";
+        foreach (var h in icResp.Headers)
+        {
+            if (string.Equals(h.Key, "content-type", StringComparison.OrdinalIgnoreCase))
+            {
+                contentType = h.Value;
+                break;
+            }
+        }
+
+        _staticAssets[path] = (icResp.Body, contentType);
+        IcCertifiedAssets.Insert(path, icResp.Body);
+        Reply.Print($"[icserver] RegisterRenderedPath({path}) OK — {icResp.Body.Length} bytes registered as static");
+    }
+
     /// <inheritdoc />
     public IFeatureCollection Features { get; } = new FeatureCollection();
 
@@ -69,21 +235,233 @@ public sealed class IcServer : IServer
     [UnmanagedCallersOnly(EntryPoint = "canister_update__http_request_update")]
     public static void HttpRequestUpdate() => Dispatch(isUpdate: true);
 
+    // Exporting canister_init forces the IC to invoke us during install in
+    // a replicated update context. This is the FIRST managed-code call,
+    // which triggers .NET's ModuleInitializer (the consumer's Program.cs
+    // Init) — and crucially, since we're in update mode at this point,
+    // certified_data_set inside IcCertifiedAssets.Insert succeeds rather
+    // than trapping. Without this export, the first request after install
+    // might be a query, in which case the cert would be set lazily and
+    // the boundary would reject the response on the non-raw subdomain.
+    //
+    // canister_post_upgrade is the same idea for upgrade-mode installs —
+    // post-upgrade runs in update context, asset registration replays,
+    // cert tree gets re-built and committed before any real traffic.
+    [UnmanagedCallersOnly(EntryPoint = "canister_init")]
+    public static void CanisterInit()
+    {
+        try { IcCertifiedAssets.FlushPendingIfUpdate(); }
+        catch (Exception ex) { Reply.Print("[icserver] canister_init: " + ex.Message); }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "canister_post_upgrade")]
+    public static void CanisterPostUpgrade()
+    {
+        try { IcCertifiedAssets.FlushPendingIfUpdate(); }
+        catch (Exception ex) { Reply.Print("[icserver] canister_post_upgrade: " + ex.Message); }
+    }
+
     // ─── Core dispatch ────────────────────────────────────────────────────────
 
     private static void Dispatch(bool isUpdate)
     {
         try
         {
-            // Always upgrade queries to update (must come before any other
-            // path so even error states upgrade — non-certified query
-            // responses get rejected by the IC gateway with "response
-            // verification error", which surfaces as a 503 to the client).
+            // Flush any deferred certified-data set the IcCertifiedAssets
+            // store accumulated during ModuleInitializer (which may have
+            // fired in a query context where certified_data_set traps).
+            // No-op when nothing is pending or we're still in query mode.
+            if (isUpdate) IcCertifiedAssets.FlushPendingIfUpdate();
+
+            // Query fast path: GET requests for registered static assets
+            // are served directly as a query response — no upgrade to an
+            // update call. ~50 ms vs ~3 s round trip on local dfx.
             //
-            // ASP.NET Core's pipeline easily blows past the 5B instruction
-            // limit for queries. Per-route certified queries are M5 (#61).
+            // The response is NOT certified, so the IC HTTP gateway will
+            // reject it on the standard `<canister>.localhost` /
+            // `<canister>.ic0.app` subdomain. The consumer canister must
+            // be accessed via the `.raw.` variant
+            // (e.g. http://<canister>.raw.localhost:4944/) where the
+            // gateway skips response verification.
+            //
+            // Anything else (POST, paths not in the static map, including
+            // /_blazor/* and SSR routes) falls through to the upgrade
+            // path. Per-route certified queries — for serving the same
+            // assets on the standard subdomain too — land in #61 (M5).
             if (!isUpdate)
             {
+                try
+                {
+                    var probeArg = MessageContext.ArgData();
+                    var probeReq = CandidHttp.DecodeRequest(probeArg);
+                    // Strip query string so `/?t=v35` matches `/` in the
+                    // static-asset map. Cache-busting query params are
+                    // ignored — the asset body is identical regardless.
+                    int qIdx = probeReq.Url.IndexOf('?');
+                    string lookupPath = qIdx >= 0 ? probeReq.Url.Substring(0, qIdx) : probeReq.Url;
+
+                    // Detect whether the request is coming through the
+                    // ".raw." subdomain. If yes, the boundary node will
+                    // serve our query response WITHOUT cert verification —
+                    // so dynamic query handlers (whose responses can't be
+                    // pre-certified) are safe to use. If no (canonical
+                    // <canister>.icp0.io), the boundary REQUIRES cert; an
+                    // uncerted dynamic body returns 503
+                    // backend_response_verification. In that case we
+                    // bail to the update path, whose response is signed
+                    // by consensus and doesn't need per-call cert.
+                    bool isRawSubdomain = false;
+                    foreach (var h in probeReq.Headers)
+                    {
+                        if (string.Equals(h.Key, "host", StringComparison.OrdinalIgnoreCase)
+                            && h.Value.Contains(".raw."))
+                        {
+                            isRawSubdomain = true;
+                            break;
+                        }
+                    }
+
+                    // Dynamic query handlers — match by exact path,
+                    // handler computes body from (url, method). Used
+                    // for stateless RPC (/api/click), metadata
+                    // (POST /_blazor/negotiate — gh #113), and the
+                    // empty-queue fast path for the long-poll GET
+                    // (gh #115). The method-aware handler may return
+                    // null to bail to the update path when query
+                    // semantics can't satisfy the request.
+                    //
+                    // Only run dynamic query handlers on .raw.; on the
+                    // canonical subdomain we fall through to update so
+                    // the boundary accepts the response.
+                    // Rich handlers run first: they get the full request
+                    // (headers + body) and are how negotiate sources its
+                    // per-request entropy. Eligibility rules:
+                    //   - .raw subdomain: always (boundary skips cert)
+                    //   - canonical subdomain: only when the path is
+                    //     registered for v2 response certification — we
+                    //     attach IC-CertificateExpression + v2 IC-Certificate
+                    //     headers so the boundary accepts the dynamic
+                    //     response without body certification (gh #61).
+                    bool v2Registered = IcResponseCertV2.IsRegistered(lookupPath);
+                    if ((isRawSubdomain || v2Registered)
+                        && (probeReq.Method == "GET" || probeReq.Method == "POST")
+                        && _richQueryHandlers.TryGetValue(lookupPath, out var richHandler))
+                    {
+                        var richResult = richHandler(probeReq);
+                        if (richResult is { } rr)
+                        {
+                            var headers = new List<KeyValuePair<string, string>>(6)
+                            {
+                                new("content-type", rr.ContentType),
+                                new("content-length", rr.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                new("access-control-allow-origin", "*"),
+                                new("cache-control", "no-store"),
+                            };
+                            if (v2Registered)
+                            {
+                                var v2Header = IcResponseCertV2.BuildHeaderValue(lookupPath);
+                                if (v2Header is not null)
+                                {
+                                    headers.Add(new("ic-certificateexpression", IcResponseCertV2.ExpressionHeader));
+                                    headers.Add(new("ic-certificate", v2Header));
+                                }
+                            }
+                            Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
+                            {
+                                StatusCode = 200,
+                                Body = rr.Body,
+                                Headers = headers,
+                            }));
+                            return;
+                        }
+                        // null → fall through to the simple handler / update path.
+                    }
+
+                    // Same v2 lift for the simple (url, method) handler
+                    // dict — used by /_blazor long-poll empty-queue
+                    // fast-path. When the path is v2-registered, we
+                    // attach v2 cert headers and serve on canonical too.
+                    if ((isRawSubdomain || v2Registered)
+                        && (probeReq.Method == "GET" || probeReq.Method == "POST")
+                        && _queryHandlers.TryGetValue(lookupPath, out var handler))
+                    {
+                        var result = handler(probeReq.Url, probeReq.Method);
+                        if (result is { } r)
+                        {
+                            // cache-control: no-store is CRITICAL for dynamic
+                            // query handlers. The IC boundary node caches
+                            // query responses for ~10 s by default (we've
+                            // observed x-cache-ttl: 10 on responses). For
+                            // stateless metadata that's fine, but for
+                            // anything stateful — most notably the SignalR
+                            // Long-Polling /_blazor poll — a cached handshake
+                            // ack returned twice causes blazor.web.js's
+                            // blazorpack parser to read the second `{}\x1e`
+                            // as a length-prefixed frame (0x7B = 123) and
+                            // throw "Message is incomplete." Forcing
+                            // no-store makes the boundary re-ask the canister
+                            // on every poll, which is what the long-polling
+                            // protocol requires.
+                            var headers = new List<KeyValuePair<string, string>>(6)
+                            {
+                                new("content-type", r.ContentType),
+                                new("content-length", r.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                new("access-control-allow-origin", "*"),
+                                new("cache-control", "no-store"),
+                            };
+                            if (v2Registered)
+                            {
+                                var v2Header = IcResponseCertV2.BuildHeaderValue(lookupPath);
+                                if (v2Header is not null)
+                                {
+                                    headers.Add(new("ic-certificateexpression", IcResponseCertV2.ExpressionHeader));
+                                    headers.Add(new("ic-certificate", v2Header));
+                                }
+                            }
+                            Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
+                            {
+                                StatusCode = 200,
+                                Body = r.Body,
+                                Headers = headers,
+                            }));
+                            return;
+                        }
+                        // Handler returned null → fall through to upgrade.
+                    }
+
+                    if (probeReq.Method == "GET"
+                        && _staticAssets.TryGetValue(lookupPath, out var asset))
+                    {
+                        // Asset certification v1: the boundary node on the
+                        // non-raw subdomain requires every query response
+                        // to carry an IC-Certificate header proving the
+                        // body matches a hash the canister certified from
+                        // an update context. On the .raw. subdomain the
+                        // boundary skips this check; in either case it's
+                        // safe to include the header (the .raw. path just
+                        // ignores it).
+                        var headers = new List<KeyValuePair<string, string>>(5)
+                        {
+                            new("content-type", asset.ContentType),
+                            new("content-length", asset.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                            new("access-control-allow-origin", "*"),
+                        };
+                        var certHeader = IcCertifiedAssets.BuildHeaderValue(lookupPath);
+                        if (certHeader is not null)
+                        {
+                            headers.Add(new KeyValuePair<string, string>("ic-certificate", certHeader));
+                        }
+                        Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
+                        {
+                            StatusCode = 200,
+                            Body = asset.Body,
+                            Headers = headers,
+                        }));
+                        return;
+                    }
+                }
+                catch { /* fall through to upgrade on any decode error */ }
+
                 Reply.Bytes(CandidHttp.EncodeResponse(IcHttpResponse.Upgrading()));
                 return;
             }
@@ -275,6 +653,20 @@ public sealed class IcServer : IServer
             headers.Add(new KeyValuePair<string, string>(
                 "content-length",
                 body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        }
+
+        // Default to cache-control: no-store on update responses. The IC
+        // boundary node otherwise stamps a 10 s x-cache-ttl header and
+        // serves the same body to subsequent identical requests, which
+        // breaks any endpoint whose body depends on canister state —
+        // most visibly /api/count returning a stale value after another
+        // user POST /api/click, and the SignalR Long-Polling poll
+        // returning a duplicate handshake ack that blazor.web.js can't
+        // parse. Apps that DO want the boundary to cache can set their
+        // own cache-control header (we only add no-store if absent).
+        if (!aspResp.Headers.ContainsKey("cache-control"))
+        {
+            headers.Add(new KeyValuePair<string, string>("cache-control", "no-store"));
         }
 
         return new IcHttpResponse

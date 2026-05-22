@@ -1,0 +1,13 @@
+{
+  "name": "wasp-blazor-server-jsdecode",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node validate.mjs"
+  },
+  "dependencies": {
+    "@microsoft/signalr": "^8.0.7",
+    "@microsoft/signalr-protocol-msgpack": "^8.0.7"
+  }
+}

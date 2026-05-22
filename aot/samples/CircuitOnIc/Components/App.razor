@@ -1,0 +1,32 @@
+@* App.razor — three @((MarkupString)…) calls of Wasp.AspNetCore.Blazor.Server's
+   surface API plus the stock @page-routed Counter. With the gh #80 JIT
+   patch shipped, the `@onclick` handler ticks the visible count via
+   Blazor's render-diff pipeline; no JS fast-click bypass needed. *@
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blazor Server on IC — Counter</title>
+    <HeadOutlet />
+</head>
+
+<body style="font-family: system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem;">
+    <h1 style="color: #2563eb;">Blazor Server on IC</h1>
+    <p>Counter rendered server-side. Click events ride <strong>SignalR Long Polling</strong> over the canister's HTTP gateway — no WebSocket, no external services.</p>
+
+    @* Wasp marker pair around the interactive Counter. *@
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(WaspSample.CircuitOnIc.Components.Pages.Counter)))
+    <Counter />
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(WaspSample.CircuitOnIc.Components.Pages.Counter)))
+
+    <hr />
+    <small>SignalR transport pinned to <code>HttpTransportType.LongPolling</code> (value 4). <code>/_blazor/negotiate</code>, POST <code>/_blazor</code> (send), and GET <code>/_blazor</code> (poll) all route to this canister's <code>http_request_update</code>.</small>
+
+    @* Wasp scripts (blazor.web.js + wasp-bridge.js). *@
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
+</body>
+
+</html>

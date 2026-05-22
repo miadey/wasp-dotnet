@@ -5,6 +5,44 @@ RUN apt-get update \
         ca-certificates curl xz-utils python3 make cmake clang \
  && rm -rf /var/lib/apt/lists/*
 
+# wasi-sdk-24 — required by the NativeAOT-LLVM wasm32-wasi target. Ships
+# clang + wasm-ld + wasm-component-ld (the latter supports the
+# `--component-type` linker arg used by Microsoft.DotNet.ILCompiler.LLVM
+# to embed WIT type info; stock wasm-ld doesn't recognize it).
+RUN curl -fsSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz \
+        -o /tmp/wasi-sdk.tar.gz \
+ && mkdir -p /root/.wasi-sdk \
+ && tar -xzf /tmp/wasi-sdk.tar.gz -C /root/.wasi-sdk \
+ && ln -s /root/.wasi-sdk/wasi-sdk-24.0-x86_64-linux /root/.wasi-sdk/wasi-sdk-24.0 \
+ && rm /tmp/wasi-sdk.tar.gz
+ENV WASI_SDK_PATH=/root/.wasi-sdk/wasi-sdk-24.0
+
+# wasm-ld shim: strip the `--component-type <wit>` args that
+# Microsoft.DotNet.ILCompiler.LLVM injects for the WASI component-model
+# adapter. IC canisters consume plain core wasm32-wasi modules, not WASI
+# components; the wit metadata is just dead weight that wasm-ld (LLD 18)
+# refuses to parse. Renaming the real binary to wasm-ld.real and dropping
+# a thin shell in front is the simplest interception point — touching the
+# SDK targets file globally is more fragile.
+RUN mv /root/.wasi-sdk/wasi-sdk-24.0-x86_64-linux/bin/wasm-ld \
+       /root/.wasi-sdk/wasi-sdk-24.0-x86_64-linux/bin/wasm-ld.real \
+ && printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'args=()' \
+        'skip=0' \
+        'for a in "$@"; do' \
+        '  if [ $skip -eq 1 ]; then skip=0; continue; fi' \
+        '  case "$a" in' \
+        '    --component-type) skip=1 ;;' \
+        '    --component-type=*) ;;' \
+        '    *.wit) ;;' \
+        '    *) args+=("$a") ;;' \
+        '  esac' \
+        'done' \
+        'exec "$(dirname "$0")/wasm-ld.real" "${args[@]}"' \
+    > /root/.wasi-sdk/wasi-sdk-24.0-x86_64-linux/bin/wasm-ld \
+ && chmod +x /root/.wasi-sdk/wasi-sdk-24.0-x86_64-linux/bin/wasm-ld
+
 ENV NUGET_PACKAGES=/nuget
 ENV DOTNET_NOLOGO=1
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1

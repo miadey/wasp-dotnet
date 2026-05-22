@@ -1,0 +1,123 @@
+@* Chat.razor — vanilla Razor. The bridge transparently persists any
+   <input data-wasp-persist> across re-renders (so the username
+   survives reactivity polls). No JS in this view. *@
+
+@inject WaspSample.BlazorWasp.ChatService ChatState
+
+<PageTitle>Chat</PageTitle>
+
+<div class="dc-shell">
+    <header class="dc-channel-header">
+        <div class="dc-channel-title">
+            <span class="dc-hash">#</span><span>chat</span>
+        </div>
+        <div class="dc-channel-tag">@ChatState.Messages.Count message@(ChatState.Messages.Count == 1 ? "" : "s")</div>
+    </header>
+
+    <div class="dc-messages" id="chat-scroll">
+        @if (ChatState.Messages.Count == 0)
+        {
+            <div class="dc-empty">
+                <h2>Welcome to <span class="dc-hash">#</span>chat!</h2>
+                <p>This is the start of the channel. Be the first to say hi.</p>
+            </div>
+        }
+        @{
+            string? prevUser = null;
+            string? prevDate = null;
+            long prevAt = 0;
+        }
+        @foreach (var msg in ChatState.Messages)
+        {
+            var date = DateOnly(msg.AtMs);
+            var grouped = prevUser == msg.Username && (msg.AtMs - prevAt) < 5 * 60 * 1000 && date == prevDate;
+            if (date != prevDate)
+            {
+                <div class="dc-divider"><span>@date</span></div>
+            }
+            <div class="dc-message @(grouped ? "dc-message-grouped" : null)">
+                @if (!grouped)
+                {
+                    <div class="dc-avatar" style="@AvatarStyle(msg.Username)">@AvatarLetter(msg.Username)</div>
+                }
+                else
+                {
+                    <div class="dc-avatar-spacer" aria-hidden="true">@TimeShort(msg.AtMs)</div>
+                }
+                <div class="dc-message-body">
+                    @if (!grouped)
+                    {
+                        <div class="dc-message-head">
+                            <span class="dc-username" style="@UsernameStyle(msg.Username)">@msg.Username</span>
+                            <span class="dc-time">@FormatTime(msg.AtMs)</span>
+                        </div>
+                    }
+                    <div class="dc-text">@msg.Text</div>
+                </div>
+            </div>
+            prevUser = msg.Username;
+            prevDate = date;
+            prevAt = msg.AtMs;
+        }
+    </div>
+
+    <form class="dc-composer" autocomplete="off">
+        <input name="username" type="text" class="dc-username-input"
+               placeholder="Your name" maxlength="24" data-wasp-persist />
+        <textarea name="text" class="dc-composer-input" rows="1"
+                  placeholder="Message #chat" required></textarea>
+        <button type="button" class="dc-send" @onclick="HandleSend" aria-label="Send">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21l20.99-9L2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+    </form>
+</div>
+
+@code {
+    void HandleSend()
+    {
+        var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
+        if (args.TryGetValue("text", out var text))
+        {
+            var msgArgs = new Dictionary<string, string> { ["text"] = text };
+            if (args.TryGetValue("username", out var username))
+            {
+                msgArgs["username"] = username;
+            }
+            ChatState.Post(msgArgs);
+        }
+    }
+
+    string AvatarLetter(string username)
+        => string.IsNullOrEmpty(username) ? "?" : username.Substring(0, 1).ToUpper();
+
+    int HueFor(string username)
+    {
+        var h = 0;
+        foreach (var c in username) { h = (h * 131 + c) & 0xFFFFFF; }
+        return h % 360;
+    }
+
+    string AvatarStyle(string username) => $"background: hsl({HueFor(username)}, 50%, 50%);";
+    string UsernameStyle(string username) => $"color: hsl({HueFor(username)}, 60%, 60%);";
+
+    string FormatTime(long unixMs)
+    {
+        var t = DateTimeOffset.FromUnixTimeMilliseconds(unixMs);
+        var now = DateTimeOffset.FromUnixTimeMilliseconds((long)(Wasp.IcCdk.Ic0.time() / 1_000_000UL));
+        if (t.Date == now.Date) return $"Today at {t.Hour:D2}:{t.Minute:D2}";
+        if (t.Date == now.Date.AddDays(-1)) return $"Yesterday at {t.Hour:D2}:{t.Minute:D2}";
+        return $"{t.Year}-{t.Month:D2}-{t.Day:D2} {t.Hour:D2}:{t.Minute:D2}";
+    }
+
+    string TimeShort(long unixMs)
+    {
+        var t = DateTimeOffset.FromUnixTimeMilliseconds(unixMs);
+        return $"{t.Hour:D2}:{t.Minute:D2}";
+    }
+
+    string DateOnly(long unixMs)
+    {
+        var t = DateTimeOffset.FromUnixTimeMilliseconds(unixMs);
+        return $"{t.Year}-{t.Month:D2}-{t.Day:D2}";
+    }
+}

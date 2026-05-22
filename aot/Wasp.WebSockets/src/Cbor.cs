@@ -19,7 +19,7 @@ namespace Wasp.WebSockets;
 // — it works under NativeAOT-LLVM but ships ~150 KB of extra code we
 // don't need.
 
-internal static class Cbor
+public static class Cbor
 {
     public sealed class Writer
     {

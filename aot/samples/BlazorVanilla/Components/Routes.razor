@@ -1,0 +1,8 @@
+@* Stock-template Router. AppAssembly scans the loaded assembly for any
+   component decorated with @page "...". NotFound branch omitted to
+   keep the trimmed wasm code section under the 11 MB IC limit. *@
+<Router AppAssembly="typeof(Program).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="routeData" DefaultLayout="typeof(Layout.MainLayout)" />
+    </Found>
+</Router>

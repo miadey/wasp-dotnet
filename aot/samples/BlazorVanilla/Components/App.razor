@@ -1,0 +1,279 @@
+@* App.razor — manual router with stock dotnet-new-blazor visual chrome:
+   purple gradient sidebar, three pages (Home / Counter / Weather), and
+   <WaspNavLink> for active-class detection.
+
+   Bypasses the stock <Router>/<RouteView> pipeline (gh #107). NavLink
+   replaced with WaspNavLink (gh #82). MainLayout inlined because the
+   framework's ChildContent inheritance is broken under our trim
+   (parameter-reflection root cause). *@
+
+@inject NavigationManager Nav
+@using Microsoft.AspNetCore.Components.Routing
+@using Wasp.AspNetCore.Blazor.Server
+@using WaspSample.BlazorVanilla.Components.Pages
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blazor on ICP</title>
+    <base href="/" />
+    <style>
+        html, body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #1e293b; background: #f8fafc; }
+        .page { display: flex; min-height: 100vh; }
+        .sidebar {
+            width: 250px;
+            background: linear-gradient(180deg, rgb(5, 39, 103) 0%, #3a0647 70%);
+            color: #f8fafc;
+            padding: 1.25rem 0;
+        }
+        .brand {
+            color: #f8fafc;
+            text-decoration: none;
+            font-size: 1.1rem;
+            font-weight: 600;
+            padding: 0 1.25rem 1rem 1.25rem;
+            display: block;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 1rem;
+        }
+        .nav a {
+            display: block;
+            color: #cbd5f5;
+            text-decoration: none;
+            padding: 0.6rem 1.25rem;
+            border-left: 4px solid transparent;
+            font-size: 0.95rem;
+        }
+        .nav a:hover { background: rgba(255,255,255,0.1); color: #fff; }
+        .nav a.active {
+            background: rgba(255,255,255,0.18);
+            color: #fff;
+            border-left-color: #fff;
+        }
+        main { flex: 1; padding: 2rem; max-width: 960px; }
+        main h1 { color: #1e3a8a; margin-top: 0; }
+        main code { background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+        button.btn { background: #2563eb; color: #fff; border: 0; padding: 0.45rem 1rem; border-radius: 4px; cursor: pointer; font-size: 0.95rem; }
+        button.btn:hover { background: #1d4ed8; }
+        .table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+        .table th, .table td { padding: 0.5rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
+        .table th { background: #f1f5f9; border-bottom-color: #cbd5f5; }
+    </style>
+</head>
+
+@{
+    var path = "/" + Nav.ToBaseRelativePath(Nav.Uri).TrimStart('/').Split('?')[0];
+    Type pageType = path switch
+    {
+        "/counter" => typeof(Counter),
+        "/weather" => typeof(Weather),
+        _ => typeof(Home),
+    };
+    string currentPage = pageType == typeof(Counter) ? "counter"
+                        : pageType == typeof(Weather) ? "weather"
+                        : "home";
+}
+<body data-current-page="@currentPage">
+
+    <div class="page">
+        <aside class="sidebar">
+            <a class="brand" href="/">Blazor on ICP</a>
+            <nav class="nav">
+                <WaspNavLink href="/" Match="NavLinkMatch.All" ActiveClass="active">Home</WaspNavLink>
+                <WaspNavLink href="counter" ActiveClass="active">Counter</WaspNavLink>
+                <WaspNavLink href="weather" ActiveClass="active">Weather</WaspNavLink>
+            </nav>
+        </aside>
+        <main>
+            @* Counter shell is ALWAYS rendered (with WaspMarker pair) so
+               blazor.web.js attaches the SignalR circuit ONCE on first
+               page load and never re-handshakes — visibility is toggled
+               via the data-current-page CSS attribute on <body> and the
+               enhanced-nav JS below. The h1 stays outside the marker
+               pair to survive the framework's #80 empty-strings-table
+               render-diff wipe.
+
+               Goal: warmup amortized to background of first page load.
+               After the ~3.3 s handshake completes (invisible to user
+               browsing Home/Weather), all subsequent /counter clicks
+               are instant — no re-warmup. *@
+            <div id="counter-shell" data-page="counter">
+                @* Stock Counter with real Blazor @@onclick reactivity.
+                   Works because the JIT now correctly serializes
+                   RenderTreeFrame struct-copies on wasm32-wasi (gh #80
+                   fix: cherry-picked dotnet/runtimelab PR #3259). The
+                   WaspMarker pair attaches the SignalR circuit on first
+                   page load; each click ships a render-diff that
+                   correctly carries the strings table. *@
+                <p id="blazor-status" style="color:#64748b; font-size:0.9rem;">
+                    Connecting to Blazor Server (SignalR Long Polling)…
+                </p>
+                @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerStart(typeof(Counter)))
+                <Counter />
+                @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.ServerEnd(typeof(Counter)))
+            </div>
+            <div id="weather-shell" data-page="weather">
+                <Weather />
+            </div>
+            <div id="home-shell" data-page="home">
+                <Home />
+            </div>
+        </main>
+    </div>
+
+    @* Page-shell visibility — only the current route's shell is shown.
+       Initial CSS state is set from server-side pageType; enhanced-nav
+       JS updates this on every transition. *@
+    <style>
+        #counter-shell, #weather-shell, #home-shell { display: none; }
+        body[data-current-page="counter"] #counter-shell,
+        body[data-current-page="weather"] #weather-shell,
+        body[data-current-page="home"] #home-shell { display: block; }
+    </style>
+    @* Server-side render sets body[data-current-page] from pageType.
+       JS below updates it on enhanced-nav transitions. No flash of
+       all-shells-hidden because CSS picks the right one from initial
+       HTML. *@
+
+    @* blazor.web.js + wasp-bridge.js so Counter's click handler is
+       wired through a live circuit when the Counter page is shown.
+       Loading on every page is harmless — blazor.web.js only initiates
+       a connection when it sees a server marker, and only Counter has
+       one. *@
+    @((MarkupString)Wasp.AspNetCore.Blazor.Server.WaspMarkers.Scripts())
+
+    @* Custom enhanced navigation. blazor.web.js's NATIVE enhanced nav
+       (which would handle marker rescan correctly via its internal APIs)
+       doesn't engage on our pages because the framework's auto-detection
+       relies on a stock <Router>-driven page tree we don't have (see
+       #107). Custom JS below intercepts <a href> clicks, fetches the
+       new page, splices <main>. /counter destinations are special-cased
+       to fall back to full reload because splicing alone leaves the
+       Counter click handler unwired (tracked in #116 — needs the
+       framework-internal attachRootComponentToLogicalElement call). *@
+    <script>
+        (function () {
+            function isInternalLink(a) {
+                if (!a) return false;
+                const href = a.getAttribute('href');
+                if (href === null) return false;
+                // empty-string href is HTML's "same URL" — still an
+                // internal link we want to intercept (otherwise the
+                // browser does a full page reload, killing the circuit).
+                if (href.startsWith('http://') || href.startsWith('https://')) return false;
+                if (href.startsWith('#')) return false;
+                if (href.startsWith('mailto:') || href.startsWith('tel:')) return false;
+                if (a.getAttribute('target') === '_blank') return false;
+                return true;
+            }
+
+            function navigateTo(url, addToHistory) {
+                // All three page shells (#home-shell, #counter-shell,
+                // #weather-shell) are already mounted in the DOM with the
+                // Counter circuit attached. Navigation is just a CSS
+                // visibility toggle via body[data-current-page].
+                // No fetch, no DOM splice, no circuit re-attach.
+                if (addToHistory) history.pushState({ wasp: true }, '', url);
+
+                const path = new URL(url, document.baseURI).pathname;
+                const which =
+                    path === '/counter' || path.startsWith('/counter/') ? 'counter' :
+                    path === '/weather' || path.startsWith('/weather/') ? 'weather' : 'home';
+                document.body.setAttribute('data-current-page', which);
+
+                document.title =
+                    which === 'counter' ? 'Counter' :
+                    which === 'weather' ? 'Weather' : 'Home';
+
+                // Sidebar nav active class
+                const normalized = path.replace(/\/$/, '') || '/';
+                document.querySelectorAll('aside.sidebar .nav a').forEach(link => {
+                    const lhref = link.getAttribute('href') || '';
+                    const lpath = lhref === '' ? '/' : ('/' + lhref).replace(/\/$/, '');
+                    link.classList.toggle('active', normalized === lpath);
+                });
+            }
+
+            document.addEventListener('click', (e) => {
+                if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+                const a = e.target.closest && e.target.closest('a');
+                if (!isInternalLink(a)) return;
+                e.preventDefault();
+                navigateTo(a.href, /*addToHistory*/ true);
+            });
+
+            window.addEventListener('popstate', () => {
+                navigateTo(window.location.href, /*addToHistory*/ false);
+            });
+        })();
+    </script>
+
+    @* Fast-click path + handshake-status hider. waspFastClick() hits the
+       /api/click query endpoint (~50 ms RTT). The MutationObserver
+       watches for blazor.web.js's "connected" log signal and hides the
+       "Connecting…" status when the slow path becomes responsive. *@
+    <script>
+        (function () {
+            window.waspFastClick = async function () {
+                const span = document.getElementById('wasp-count');
+                const status = document.getElementById('wasp-fast-status');
+                const t0 = performance.now();
+                if (status) status.textContent = 'Sending update call to canister…';
+                try {
+                    const r = await fetch('/api/click', { method: 'POST' });
+                    const j = await r.json();
+                    if (span) span.textContent = String(j.count);
+                    const dur = Math.round(performance.now() - t0);
+                    if (status) status.textContent =
+                        'Update round-trip: ' + dur + ' ms — count is now ' + j.count +
+                        ' (shared across all users, persisted in stable memory).';
+                } catch (e) {
+                    if (status) status.textContent = 'Click error: ' + e.message;
+                }
+            };
+
+            // Fetch the current global count on initial page load so the
+            // <span> shows the real value instead of the static "0" baked
+            // into the pre-rendered HTML. Query call — fast (~50 ms).
+            (async function () {
+                const span = document.getElementById('wasp-count');
+                if (!span) return;
+                try {
+                    const r = await fetch('/api/count');
+                    const j = await r.json();
+                    span.textContent = String(j.count);
+                } catch (_) { /* leave the "0" baseline */ }
+            })();
+
+            // Hide the "Connecting…" banner once the Blazor circuit is
+            // actually connected. blazor.web.js logs to console; we
+            // poll for the global `Blazor` object's `defaultReconnectionHandler`
+            // state, or just hide after ~16 s as a fallback.
+            const status = document.getElementById('blazor-status');
+            if (status) {
+                let hidden = false;
+                const hide = () => {
+                    if (hidden) return;
+                    hidden = true;
+                    status.textContent = 'Blazor Server circuit connected — slow click now responsive.';
+                    status.style.color = '#16a34a';
+                };
+                // Fallback: hide after handshake-typical 16 s
+                setTimeout(hide, 16000);
+                // Listen for connection-state changes if Blazor exposes them
+                const observer = new MutationObserver(() => {
+                    // blazor.web.js sometimes injects a reload UI when
+                    // the circuit drops; we hide our status as soon as
+                    // anything signals "connected" in the page.
+                    if (window.Blazor && typeof window.Blazor === 'object') hide();
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+            }
+        })();
+    </script>
+</body>
+
+</html>

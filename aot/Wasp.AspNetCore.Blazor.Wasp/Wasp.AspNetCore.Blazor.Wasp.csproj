@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Wasp.AspNetCore.Blazor.Wasp</RootNamespace>
+    <AssemblyName>Wasp.AspNetCore.Blazor.Wasp</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>Wasp.AspNetCore.Blazor.Wasp</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Description>
+      IC-native Blazor hosting (gh #118). Replaces SignalR Long Polling with a
+      two-endpoint HTTP request/response protocol that maps cleanly to
+      canister_query (render) + canister_update (event). Sub-second warmup,
+      no polling, stock vanilla Razor components.
+    </Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+    <ProjectReference Include="..\Wasp.AspNetCore\Wasp.AspNetCore.csproj" />
+    <ProjectReference Include="..\Wasp.Http\Wasp.Http.csproj" />
+    <ProjectReference Include="..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
+
+    <EmbeddedResource Include="wwwroot\wasp.js"
+                      LogicalName="Wasp.AspNetCore.Blazor.Wasp.wwwroot.wasp.js" />
+  </ItemGroup>
+
+</Project>

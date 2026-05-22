@@ -37,3 +37,8 @@ samples/*/Generated/
 # misc
 .env
 .env.local
+
+# Python bytecode + build backups
+__pycache__/
+*.pyc
+*.bak

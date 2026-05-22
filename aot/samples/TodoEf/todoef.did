@@ -1,0 +1,24 @@
+service : {
+    http_request : (record {
+        method : text;
+        url : text;
+        headers : vec record { text; text };
+        body : blob;
+    }) -> (record {
+        status_code : nat16;
+        headers : vec record { text; text };
+        body : blob;
+        upgrade : opt bool;
+    }) query;
+    http_request_update : (record {
+        method : text;
+        url : text;
+        headers : vec record { text; text };
+        body : blob;
+    }) -> (record {
+        status_code : nat16;
+        headers : vec record { text; text };
+        body : blob;
+        upgrade : opt bool;
+    });
+}

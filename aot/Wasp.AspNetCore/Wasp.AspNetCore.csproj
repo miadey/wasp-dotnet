@@ -20,6 +20,10 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
     <ProjectReference Include="..\Wasp.Http\Wasp.Http.csproj" />
+    <!-- For HashTree + Cbor + Sha256, reused by HTTP asset certification
+         (IcCertifiedAssets). The certification primitives ultimately belong
+         in Wasp.IcCdk, but the WebSockets project owns them today. -->
+    <ProjectReference Include="..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
   </ItemGroup>
 
 </Project>

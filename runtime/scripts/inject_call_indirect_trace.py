@@ -38,20 +38,31 @@ def main():
         subprocess.run(["wasm-tools", "print", str(in_wasm), "-o", str(wat)], check=True)
         text = wat.read_text()
 
-        # Find ic0.debug_print fn idx.
-        m = re.search(r'\(import "ic0" "debug_print" \(func \(;(\d+);\)', text)
+        # Find ic0.debug_print fn idx. Imports may carry a func $name before
+        # the (;N;) index when the source language emits one (Rust does, C
+        # often doesn't); regex tolerates both forms.
+        m = re.search(
+            r'\(import "ic0" "debug_print" \(func (?:\$\S+ )?\(;(\d+);\)',
+            text,
+        )
         if not m:
             print("no ic0.debug_print import found", file=sys.stderr)
             return 1
         debug_print_idx = int(m.group(1))
         print(f"  ic0.debug_print = fn {debug_print_idx}", file=sys.stderr)
 
-        # Locate target function body.
-        marker = f"  (func (;{fn_idx};)"
-        start = text.find(marker)
-        if start < 0:
+        # Locate target function body. wasm-tools may print an optional
+        # `$name ` between `(func ` and `(;<idx>;)` if the source language
+        # emitted a symbol name (Rust does, much of dotnet's C does not).
+        # Try both forms.
+        func_marker_re = re.compile(
+            r"\n  \(func\s+(?:\$\S+\s+)?\(;" + str(fn_idx) + r";\)",
+        )
+        fm = func_marker_re.search(text)
+        if fm is None:
             print(f"no func {fn_idx}", file=sys.stderr)
             return 1
+        start = fm.start() + 1  # drop the leading newline so the rest matches
         end = text.find("\n  )\n", start)
         if end < 0:
             print(f"no end for func {fn_idx}", file=sys.stderr)

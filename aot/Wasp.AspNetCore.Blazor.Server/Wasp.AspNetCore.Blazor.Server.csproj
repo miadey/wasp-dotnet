@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Wasp.AspNetCore.Blazor.Server</RootNamespace>
+    <AssemblyName>Wasp.AspNetCore.Blazor.Server</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>Wasp.AspNetCore.Blazor.Server</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Description>Hosts Blazor's CircuitHost (InteractiveServer render mode) on an IC canister, replacing SignalR transport with Wasp.WebSockets over the IC-WebSocket protocol. Skeleton only — see docs/m4-blazor-server-on-canister.md.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+    <ProjectReference Include="..\Wasp.AspNetCore\Wasp.AspNetCore.csproj" />
+    <ProjectReference Include="..\Wasp.WebSockets\Wasp.WebSockets.csproj" />
+    <InternalsVisibleTo Include="Wasp.AspNetCore.Blazor.Server.Tests" />
+
+    <!-- Wasp client-side bridge JS bundled as an embedded resource so
+         BlazorOnICRuntime can serve it without the consumer copying
+         anything into their wwwroot. -->
+    <EmbeddedResource Include="wwwroot\wasp-bridge.js"
+                      LogicalName="Wasp.AspNetCore.Blazor.Server.wwwroot.wasp-bridge.js" />
+  </ItemGroup>
+
+
+  <!-- Swap the framework Microsoft.AspNetCore.Components.Server reference
+       for our Cecil-rewritten Vendor copy (visibility opened to public).
+       The framework variant only exposes ComponentHub publicly; we need
+       CircuitFactory/CircuitHost/CircuitClientProxy too. The target runs
+       after FrameworkReference is resolved so the swap takes effect for
+       the C# compiler. Run shared/tools/Wasp.CircuitHostWeaver first to
+       generate the DLL. -->
+  <Target Name="_WaspSwapComponentsServerForVendor"
+          AfterTargets="ResolveTargetingPackAssets"
+          Condition="Exists('$(MSBuildThisFileDirectory)Vendor\Microsoft.AspNetCore.Components.Server.dll')">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.AspNetCore.Components.Server'" />
+      <Reference Include="$(MSBuildThisFileDirectory)Vendor\Microsoft.AspNetCore.Components.Server.dll">
+        <Private>false</Private>
+      </Reference>
+    </ItemGroup>
+  </Target>
+
+</Project>

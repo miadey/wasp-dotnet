@@ -1,0 +1,115 @@
+@page "/weather"
+
+@* Weather page — data comes from canister stable memory ("like a file").
+   WeatherStableStore.ReadCsvOrEmpty() reads a UTF-8 CSV blob persisted
+   at a fixed stable-memory offset. The first time the canister boots,
+   stable memory is empty so the table reads as no rows. POST to
+   /api/weather/seed (the update endpoint registered in Program.cs)
+   writes the default 5 forecasts to stable memory; subsequent /weather
+   loads serve from the persisted bytes.
+
+   Survives canister upgrades — that's the IC's stable memory contract. *@
+
+@code {
+    private WeatherForecast[]? forecasts;
+    private bool isEmpty;
+
+    protected override void OnInitialized()
+    {
+        var csv = WeatherStableStore.ReadCsvOrEmpty();
+        if (string.IsNullOrEmpty(csv))
+        {
+            isEmpty = true;
+            forecasts = Array.Empty<WeatherForecast>();
+            return;
+        }
+
+        var rows = new List<WeatherForecast>();
+        foreach (var line in csv.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = line.Split(',');
+            if (parts.Length < 3) continue;
+            if (!DateOnly.TryParse(parts[0], out var date)) continue;
+            if (!int.TryParse(parts[1], out var tempC)) continue;
+            rows.Add(new WeatherForecast
+            {
+                Date = date,
+                TemperatureC = tempC,
+                Summary = parts[2],
+            });
+        }
+        forecasts = rows.ToArray();
+    }
+
+    private sealed class WeatherForecast
+    {
+        public DateOnly Date { get; set; }
+        public int TemperatureC { get; set; }
+        public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+        public string? Summary { get; set; }
+    }
+}
+
+<PageTitle>Weather</PageTitle>
+
+<h1>Weather</h1>
+
+<p>Forecast data loaded from canister stable memory
+   (<code>WeatherStableStore</code> at offset 4096). Survives upgrades.</p>
+
+@if (forecasts == null)
+{
+    <p><em>Loading...</em></p>
+}
+else if (isEmpty || forecasts.Length == 0)
+{
+    <p style="background:#fef3c7; padding:0.75rem; border-radius:4px; color:#78350f;">
+        Stable memory is empty.
+    </p>
+    <button class="btn" type="button" onclick="waspSeedWeather()">
+        Seed weather data
+    </button>
+    <p id="wasp-seed-status" style="margin-top:0.75rem; color:#64748b; font-size:0.9rem;">
+        POSTs /api/weather/seed (update call, ~2–4 s) then reloads.
+    </p>
+    <script>
+        window.waspSeedWeather = async function () {
+            const status = document.getElementById('wasp-seed-status');
+            const t0 = performance.now();
+            try {
+                const r = await fetch('/api/weather/seed', { method: 'POST' });
+                const j = await r.json();
+                const dur = Math.round(performance.now() - t0);
+                if (status) status.textContent =
+                    'Seeded ' + j.bytes + ' bytes in ' + dur + ' ms — reloading…';
+                setTimeout(() => window.location.reload(), 400);
+            } catch (e) {
+                if (status) status.textContent = 'Seed error: ' + e.message;
+            }
+        };
+    </script>
+}
+else
+{
+    <table class="table" style="border-collapse: collapse; width: 100%; margin-top: 1rem;">
+        <thead>
+            <tr style="background: #f1f5f9; text-align: left;">
+                <th style="padding: 0.5rem; border-bottom: 1px solid #cbd5f5;">Date</th>
+                <th style="padding: 0.5rem; border-bottom: 1px solid #cbd5f5;">Temp. (C)</th>
+                <th style="padding: 0.5rem; border-bottom: 1px solid #cbd5f5;">Temp. (F)</th>
+                <th style="padding: 0.5rem; border-bottom: 1px solid #cbd5f5;">Summary</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var forecast in forecasts)
+            {
+                <tr>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e2e8f0;">@forecast.Date.ToString("yyyy-MM-dd")</td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e2e8f0;">@forecast.TemperatureC</td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e2e8f0;">@forecast.TemperatureF</td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e2e8f0;">@forecast.Summary</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}

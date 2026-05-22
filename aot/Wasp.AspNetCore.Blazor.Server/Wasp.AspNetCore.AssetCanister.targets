@@ -1,0 +1,64 @@
+<Project>
+
+  <!-- Wasp.AspNetCore.AssetCanister.targets — MSBuild glue for the
+       two-canister Blazor Server topology (M4.S6).
+
+       Topology:
+
+         /samples/CircuitOnIc/
+           backend.csproj           ← compiled to wasm, hosts CircuitHost
+           wwwroot/
+             index.html             ← static shell
+             _framework/
+               blazor.web.js        (copied from Microsoft.AspNetCore.Components.Web)
+
+       Build outputs to:
+         bin/$(Configuration)/$(TargetFramework)/asset-canister/
+
+       Then `dfx deploy` consumes:
+         dfx.json → "circuitonic_assets": { "type": "assets", "source": [...] }
+
+       Import from a consuming canister csproj alongside the Blazor.Server
+       targets:
+
+         <PropertyGroup>
+           <WaspAssetCanisterEnabled>true</WaspAssetCanisterEnabled>
+           <WaspAssetCanisterBackendId>rrkah-fqaaa-aaaaa-aaaaq-cai</WaspAssetCanisterBackendId>
+         </PropertyGroup>
+
+         <Import Project="..\..\Wasp.AspNetCore.Blazor.Server\Wasp.AspNetCore.AssetCanister.targets" />
+
+       Long Polling pivot (M4.S7): transport is SignalR Long Polling over
+       the canister's HTTP gateway. No external ic-websocket-gateway, no
+       JS shims — blazor.web.js's bundled SignalR client posts directly
+       to /_blazor/negotiate on the backend canister.
+  -->
+
+  <PropertyGroup>
+    <_WaspAssetSourceDir>$(MSBuildThisFileDirectory)</_WaspAssetSourceDir>
+    <_WaspAssetOutputDir>$(OutputPath)asset-canister</_WaspAssetOutputDir>
+    <WaspAssetCanisterEnabled Condition="'$(WaspAssetCanisterEnabled)' == ''">false</WaspAssetCanisterEnabled>
+  </PropertyGroup>
+
+  <!-- Long Polling pivot: no IC-WS shim, no per-canister bootstrap script.
+       Backend canister id is irrelevant from the browser's perspective —
+       /_blazor/* URLs are same-origin against the asset canister, and the
+       IC HTTP gateway routes them via dependencies to the backend. -->
+
+  <Target Name="CopyWaspAssetCanister"
+          Condition="'$(WaspAssetCanisterEnabled)' == 'true'"
+          AfterTargets="Build">
+    <MakeDir Directories="$(_WaspAssetOutputDir)" />
+    <!-- Project-local wwwroot/* (index.html, app.css, etc.) -->
+    <ItemGroup>
+      <_ProjectAssetFile Include="$(MSBuildProjectDirectory)\wwwroot\**\*.*"
+                        Exclude="$(MSBuildProjectDirectory)\wwwroot\bin\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ProjectAssetFile)"
+          DestinationFiles="@(_ProjectAssetFile -> '$(_WaspAssetOutputDir)\%(RecursiveDir)%(FileName)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Message Importance="high"
+             Text="[Wasp.AssetCanister] Asset canister source ready at $(_WaspAssetOutputDir). Add to dfx.json:&#xA;&quot;circuitonic_assets&quot;: { &quot;type&quot;: &quot;assets&quot;, &quot;source&quot;: [&quot;$(_WaspAssetOutputDir)&quot;] }" />
+  </Target>
+
+</Project>
