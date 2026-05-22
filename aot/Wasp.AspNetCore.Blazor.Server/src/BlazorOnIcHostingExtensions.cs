@@ -346,7 +346,7 @@ public static class BlazorOnIcHostingExtensions
                 "\",\"negotiateVersion\":1,\"availableTransports\":[" +
                 "{\"transport\":\"LongPolling\",\"transferFormats\":[\"Text\",\"Binary\"]}]}";
 
-            Reply.Print($"[negotiate-q] id={connectionId} now={now} bodyLen={(req.Body?.Length ?? 0)}");
+            Reply.Print($"[negotiate-q] id={connectionId} bodyLen={(req.Body?.Length ?? 0)}");
             return (System.Text.Encoding.UTF8.GetBytes(json), "application/json; charset=utf-8");
         });
 
