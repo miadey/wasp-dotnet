@@ -4,6 +4,7 @@
    re-renders via data-wasp-persist. No JavaScript in this view. *@
 
 @inject WaspSample.BlazorWasp.ChatService ChatState
+@inject WaspSample.BlazorWasp.ImageStore Images
 
 @{
     Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("r", out var roomKey);
@@ -85,6 +86,7 @@
                 {
                     <div class="dc-divider"><span>@date</span></div>
                 }
+                ChatService.Message? parent = msg.ReplyToId > 0 ? ChatState.FindMessage(msg.ReplyToId) : null;
                 <div class="dc-message @(grouped ? "dc-message-grouped" : null)">
                     @if (!grouped)
                     {
@@ -95,6 +97,14 @@
                         <div class="dc-avatar-spacer" aria-hidden="true">@TimeShort(msg.AtMs)</div>
                     }
                     <div class="dc-message-body">
+                        @if (parent is not null)
+                        {
+                            <div class="dc-reply-quote">
+                                <span class="dc-reply-quote-arrow">↪</span>
+                                <span class="dc-reply-quote-user" style="@UsernameStyle(parent.Username)">@parent.Username</span>
+                                <span class="dc-reply-quote-text">@Truncate(parent.Text, 80)</span>
+                            </div>
+                        }
                         @if (!grouped)
                         {
                             <div class="dc-message-head">
@@ -116,15 +126,32 @@
                                 }
                             </div>
                         }
-                        <div class="dc-text">@msg.Text</div>
-                    </div>
-                    <div class="dc-react-picker" aria-hidden="true">
-                        @foreach (var emoji in ChatService.ReactionEmojis)
+                        @if (!string.IsNullOrEmpty(msg.Text))
                         {
-                            <button type="button" class="dc-react-pick"
-                                    data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{emoji}\"}}")'
-                                    aria-label="react @emoji">@emoji</button>
+                            <div class="dc-text">@msg.Text</div>
                         }
+                        @if (msg.ImageId > 0)
+                        {
+                            <a class="dc-attach" href="/_chat/img?id=@msg.ImageId" target="_blank" rel="noopener">
+                                <img src="/_chat/img?id=@msg.ImageId" alt="attachment" loading="lazy" />
+                            </a>
+                        }
+                    </div>
+                    <div class="dc-actions" aria-hidden="true">
+                        <button type="button" class="dc-action"
+                                data-wasp-reply-to="@msg.Id"
+                                aria-label="reply">↩</button>
+                        <button type="button" class="dc-action"
+                                data-wasp-popover-trigger
+                                aria-label="add reaction">☺</button>
+                        <div class="dc-popover dc-emoji-popover" data-wasp-popover>
+                            @foreach (var emoji in ChatService.ReactionEmojis)
+                            {
+                                <button type="button" class="dc-react-pick"
+                                        data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{emoji}\"}}")'
+                                        aria-label="react @emoji">@emoji</button>
+                            }
+                        </div>
                     </div>
                 </div>
                 prevUser = msg.Username;
@@ -135,7 +162,35 @@
 
         <form class="dc-composer" autocomplete="off">
             <input name="roomId" type="hidden" value="@activeRoom.Id" />
+            @* All four below: data-wasp-keep so reactivity-poll DOM
+               swaps don't clobber the user's in-progress composition. *@
+            <input name="replyTo" type="hidden" value="" data-wasp-keep />
+            <input name="replyToUser" type="hidden" value="" data-wasp-keep />
+            <input name="replyToText" type="hidden" value="" data-wasp-keep />
+            <input name="imageData" type="hidden" value="" data-wasp-keep />
+
+            <div class="dc-reply-badge" aria-live="polite">
+                <span class="dc-reply-icon">↪</span>
+                <span class="dc-reply-summary">
+                    Replying to <span class="dc-reply-user"></span>
+                    <span class="dc-reply-text"></span>
+                </span>
+                <button type="button" class="dc-reply-cancel"
+                        data-wasp-cancel-reply aria-label="cancel reply">×</button>
+            </div>
+
+            <div class="dc-attach-preview" data-wasp-image-preview>
+                <img alt="attachment preview" />
+                <button type="button" class="dc-attach-clear"
+                        data-wasp-image-clear="imageData" aria-label="remove image">×</button>
+            </div>
+
             <div class="dc-emoji-bar">
+                <label class="dc-emoji-btn dc-attach-btn" aria-label="attach image">
+                    <input type="file" accept="image/*" hidden
+                           data-wasp-image-into="imageData" />
+                    📎
+                </label>
                 @foreach (var emoji in ChatService.ReactionEmojis)
                 {
                     <button type="button" class="dc-emoji-btn"
@@ -144,7 +199,8 @@
                 }
             </div>
             <textarea name="text" class="dc-composer-input" rows="1"
-                      placeholder="Message #@activeRoom.Name" required></textarea>
+                      placeholder="Message #@activeRoom.Name"
+                      data-wasp-keep></textarea>
             <button type="button" class="dc-send" @onclick="HandleSend" aria-label="Send">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21l20.99-9L2.01 3 2 10l15 2-15 2z"/></svg>
             </button>
@@ -173,12 +229,51 @@
     void HandleSend()
     {
         var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
-        if (!args.TryGetValue("text", out var text) || string.IsNullOrWhiteSpace(text)) return;
         if (!args.TryGetValue("roomId", out var roomIdStr) || !int.TryParse(roomIdStr, out var roomId)) return;
+        args.TryGetValue("text", out var text);
+        text ??= "";
+
+        long imageId = 0;
+        if (args.TryGetValue("imageData", out var dataUrl) && !string.IsNullOrEmpty(dataUrl))
+        {
+            // Expect a "data:image/png;base64,XXXXX..." URL from the bridge.
+            var comma = dataUrl.IndexOf(',');
+            var contentType = "application/octet-stream";
+            string b64;
+            if (comma > 0)
+            {
+                var prefix = dataUrl.Substring(0, comma);
+                b64 = dataUrl.Substring(comma + 1);
+                var colon = prefix.IndexOf(':');
+                var semi  = prefix.IndexOf(';');
+                if (colon >= 0 && semi > colon)
+                    contentType = prefix.Substring(colon + 1, semi - colon - 1);
+            }
+            else
+            {
+                b64 = dataUrl;
+            }
+            try
+            {
+                var bytes = Convert.FromBase64String(b64);
+                imageId = Images.Add(contentType, bytes);
+            }
+            catch { /* invalid image data — silently drop the attachment */ }
+        }
+
+        // Either text or image is required.
+        if (string.IsNullOrWhiteSpace(text) && imageId == 0) return;
+
         var msgArgs = new Dictionary<string, string> { ["text"] = text };
         if (args.TryGetValue("username", out var username)) msgArgs["username"] = username;
+        if (args.TryGetValue("replyTo", out var replyTo) && long.TryParse(replyTo, out var rt) && rt > 0)
+            msgArgs["replyTo"] = replyTo;
+        if (imageId > 0) msgArgs["imageId"] = imageId.ToString();
         ChatState.Post(roomId, msgArgs);
     }
+
+    string Truncate(string s, int max)
+        => string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s.Substring(0, max) + "…");
 
     void HandleReact()
     {

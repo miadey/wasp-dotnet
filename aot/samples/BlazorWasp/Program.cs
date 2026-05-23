@@ -23,6 +23,7 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WeatherService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(ChatService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(PixelService))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(ImageStore))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspRouter))]
     [ModuleInitializer]
@@ -40,6 +41,7 @@ public static class Program
             builder.Services.AddSingleton<WeatherService>();
             builder.Services.AddSingleton<ChatService>();
             builder.Services.AddSingleton<PixelService>();
+            builder.Services.AddSingleton<ImageStore>();
             builder.Services.AddSingleton<IWaspRenderer>(sp =>
             {
                 var r = new WaspRouter(sp);
@@ -68,6 +70,20 @@ public static class Program
             RegisterShell(renderer, "/weather");
             RegisterShell(renderer, "/chat");
             RegisterShell(renderer, "/place");
+
+            // /_chat/img?id=N — serves an uploaded image from ImageStore.
+            // Canister_query path so an <img src> roundtrips at ~300 ms
+            // (same as /_wasp/render).
+            var images = app.Services.GetRequiredService<ImageStore>();
+            IcResponseCertV2.RegisterPassThroughPath("/_chat/img", "GET");
+            IcServer.RegisterQueryHandler("/_chat/img", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var idStr = ExtractQueryParam(req.Url, "id");
+                if (idStr is null || !long.TryParse(idStr, out var id)) return null;
+                if (!images.TryGet(id, out var ct, out var data)) return null;
+                return (data, ct);
+            });
         }
         catch (Exception ex)
         {
@@ -76,6 +92,20 @@ public static class Program
             IcServer.InitFailureMessage = msg;
             Reply.Print("[init-fail] " + msg);
         }
+    }
+
+    private static string? ExtractQueryParam(string url, string name)
+    {
+        int q = url.IndexOf('?');
+        if (q < 0) return null;
+        foreach (var part in url.Substring(q + 1).Split('&'))
+        {
+            int eq = part.IndexOf('=');
+            if (eq < 0) continue;
+            if (part.Substring(0, eq) == name)
+                return Uri.UnescapeDataString(part.Substring(eq + 1));
+        }
+        return null;
     }
 
     private static void RegisterShell(IWaspRenderer renderer, string path)
@@ -427,39 +457,151 @@ public static class Program
         .dc-react-badge .dc-react-e { font-size: 0.9rem; line-height: 1; }
         .dc-react-badge .dc-react-n { font-variant-numeric: tabular-nums; }
 
-        /* Hover popup picker — top-right of the message, shown only on
-           message hover. Lets users pick an emoji without crowding
-           every message with a permanent row. */
-        .dc-react-picker {
+        /* Per-message actions bar — top-right of message on hover.
+           Replaces the old always-on-hover emoji picker with a small
+           toolbar (reply + emoji-trigger). Emoji popover opens on
+           click rather than hover so picking is two intentional taps,
+           not a hover-fight. */
+        .dc-actions {
             position: absolute;
             top: -14px; right: 1rem;
             display: flex; gap: 1px;
             background: #2b2d31;
             border: 1px solid rgba(255,255,255,0.08);
             border-radius: 8px;
-            padding: 3px 4px;
+            padding: 2px;
             box-shadow: 0 4px 14px rgba(0,0,0,0.35);
             opacity: 0; pointer-events: none;
             transform: translateY(4px);
             transition: opacity 0.12s ease, transform 0.12s ease;
             z-index: 5;
         }
-        .dc-message:hover .dc-react-picker {
-            opacity: 1; pointer-events: auto;
-            transform: translateY(0);
+        .dc-message:hover .dc-actions,
+        .dc-message:focus-within .dc-actions {
+            opacity: 1; pointer-events: auto; transform: translateY(0);
         }
+        .dc-action {
+            background: transparent; border: 0; cursor: pointer;
+            padding: 0.3rem 0.5rem;
+            border-radius: 5px;
+            font-size: 1rem; line-height: 1;
+            color: #b5bac1;
+            text-decoration: none;
+            transition: background 0.1s, color 0.1s;
+        }
+        .dc-action:hover { background: rgba(255,255,255,0.08); color: #fff; }
+        .dc-action:active { transform: scale(0.94); }
+
+        /* Generic popover container — toggled to display:flex when JS
+           adds [data-open]. Inner emoji-popover floats below the
+           trigger button. */
+        .dc-popover {
+            position: absolute;
+            top: calc(100% + 4px); right: 0;
+            display: none;
+            background: #2b2d31;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 8px;
+            padding: 3px 4px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+            z-index: 10;
+        }
+        .dc-popover[data-open] { display: flex; gap: 1px; }
         .dc-react-pick {
             background: transparent; border: 0; cursor: pointer;
-            padding: 0.25rem 0.4rem;
+            padding: 0.3rem 0.42rem;
             border-radius: 5px;
             font-size: 1.05rem; line-height: 1;
             transition: background 0.1s, transform 0.05s;
         }
         .dc-react-pick:hover {
-            background: rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.1);
             transform: scale(1.15);
         }
         .dc-react-pick:active { transform: scale(0.95); }
+
+        /* Discord-style reply quote shown above a reply's text. */
+        .dc-reply-quote {
+            display: flex; align-items: center; gap: 0.35rem;
+            font-size: 0.8rem; color: #b5bac1;
+            margin-bottom: 0.25rem;
+            padding-left: 0.4rem;
+            border-left: 2px solid rgba(255,255,255,0.15);
+            line-height: 1.3;
+            overflow: hidden;
+        }
+        .dc-reply-quote-arrow { color: #80848e; flex: 0 0 auto; }
+        .dc-reply-quote-user { font-weight: 600; flex: 0 0 auto; }
+        .dc-reply-quote-text {
+            color: #b5bac1;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            min-width: 0;
+        }
+
+        /* Image attachments inside messages. */
+        .dc-attach {
+            display: inline-block; margin-top: 0.5rem;
+            border-radius: 8px; overflow: hidden;
+            max-width: min(420px, 100%);
+        }
+        .dc-attach img {
+            display: block; width: 100%; height: auto; max-height: 360px;
+            object-fit: contain; background: #1e1f22;
+        }
+
+        /* Reply badge above the composer textarea. Hidden by default;
+           the bridge toggles .is-active when the user clicks a reply
+           button on a message. */
+        .dc-reply-badge {
+            display: none;
+            align-items: center; gap: 0.5rem;
+            background: #383a40; color: #dbdee1;
+            border-radius: 8px 8px 0 0;
+            padding: 0.4rem 0.7rem;
+            font-size: 0.85rem;
+            margin: 0 0 0.2rem;
+            grid-column: 1 / -1;
+        }
+        .dc-reply-badge.is-active { display: flex; }
+        .dc-reply-icon { color: #80848e; }
+        .dc-reply-summary { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+        .dc-reply-user { font-weight: 600; color: #fff; }
+        .dc-reply-text { color: #b5bac1; margin-left: 0.4rem; }
+        .dc-reply-cancel {
+            background: transparent; border: 0; color: #b5bac1;
+            font-size: 1.15rem; cursor: pointer; line-height: 1;
+            padding: 0 0.25rem;
+        }
+        .dc-reply-cancel:hover { color: #fff; }
+
+        /* Image attachment preview shown above the textarea before send. */
+        .dc-attach-preview {
+            display: none;
+            position: relative;
+            padding: 0.5rem 0;
+            grid-column: 1 / -1;
+        }
+        .dc-attach-preview.is-active { display: block; }
+        .dc-attach-preview img {
+            max-height: 140px; max-width: 100%;
+            display: block; border-radius: 8px;
+            background: #1e1f22;
+        }
+        .dc-attach-clear {
+            position: absolute; top: 0.85rem; left: 0.35rem;
+            background: rgba(0,0,0,0.7); color: #fff;
+            border: 0; cursor: pointer;
+            width: 22px; height: 22px; border-radius: 50%;
+            font-size: 0.95rem; line-height: 1;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .dc-attach-clear:hover { background: rgba(0,0,0,0.9); }
+
+        /* The composer file-input label (paperclip). */
+        .dc-attach-btn {
+            display: inline-flex; align-items: center; justify-content: center;
+            cursor: pointer;
+        }
         .dc-composer-input {
             background: #383a40; color: #dcddde; border: 0; outline: none; resize: none;
             padding: 0.8rem 1rem; border-radius: 10px; min-height: 46px; max-height: 50vh;

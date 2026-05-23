@@ -62,7 +62,11 @@ public sealed unsafe class ChatService
     };
 
     public sealed record Room(int Id, string Name, long CreatedAtMs);
-    public sealed record Message(long Id, int RoomId, long AtMs, string Username, string Text);
+    public sealed record Message(
+        long Id, int RoomId, long AtMs,
+        string Username, string Text,
+        long ReplyToId,   // 0 = not a reply
+        long ImageId);    // 0 = no image attached
 
     private List<Room>? _rooms;
     private List<Message>? _messages;
@@ -80,6 +84,11 @@ public sealed unsafe class ChatService
 
     public Room? FindRoom(int id) => Rooms.FirstOrDefault(r => r.Id == id);
     public Room? FindRoomByName(string name) => Rooms.FirstOrDefault(r => r.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+    public Message? FindMessage(long id)
+    {
+        var (_, msgs) = Load();
+        return msgs.FirstOrDefault(m => m.Id == id);
+    }
 
     public Room CreateRoom(string name)
     {
@@ -96,13 +105,22 @@ public sealed unsafe class ChatService
 
     public void Post(int roomId, IReadOnlyDictionary<string, string> args)
     {
-        if (!args.TryGetValue("text", out var text) || string.IsNullOrWhiteSpace(text)) return;
-        text = text.Length > 280 ? text.Substring(0, 280) : text;
+        long imageId = 0;
+        if (args.TryGetValue("imageId", out var iidStr)) long.TryParse(iidStr, out imageId);
+        // Message must have either text or an image (or both).
+        args.TryGetValue("text", out var text);
+        text ??= "";
+        if (text.Length > 280) text = text.Substring(0, 280);
+        if (string.IsNullOrWhiteSpace(text) && imageId == 0) return;
         args.TryGetValue("username", out var username);
         username = SanitiseUsername(username);
+        long replyToId = 0;
+        if (args.TryGetValue("replyTo", out var rtsStr)) long.TryParse(rtsStr, out replyToId);
         var (rooms, msgs) = Load();
         if (!rooms.Any(r => r.Id == roomId)) return;
-        msgs.Add(new Message(_nextMsgId++, roomId, NowMs(), username, text));
+        // Validate replyToId points to a real message (in any room).
+        if (replyToId > 0 && !msgs.Any(m => m.Id == replyToId)) replyToId = 0;
+        msgs.Add(new Message(_nextMsgId++, roomId, NowMs(), username, text, replyToId, imageId));
         if (msgs.Count > MaxMessages)
         {
             msgs = msgs.GetRange(msgs.Count - MaxMessages, MaxMessages);
@@ -179,7 +197,14 @@ public sealed unsafe class ChatService
             buf.WriteI64(m.Id);
             buf.WriteI32(m.RoomId);
             buf.WriteI64(m.AtMs);
-            buf.WriteString(m.Username + "|" + m.Text);
+            // New 4-field format separated by U+001E (RECORD SEPARATOR);
+            // can't appear in user input, so unlike `|` it's safe to
+            // wedge into the username|text bag without escape handling.
+            // ReadMessages still parses the legacy `|` split so existing
+            // blobs round-trip.
+            buf.WriteString(
+                m.Username + "" + m.Text + "" +
+                m.ReplyToId + "" + m.ImageId);
         }
         // Reactions section — REAC sentinel + table. Sentinel lets
         // older blobs (written before reactions were persisted) be
@@ -233,10 +258,24 @@ public sealed unsafe class ChatService
             var roomId = r.ReadI32();
             var atMs = r.ReadI64();
             var s = r.ReadString();
-            var sep = s.IndexOf('|');
-            var username = sep > 0 ? s.Substring(0, sep) : "Anonymous";
-            var text = sep > 0 ? s.Substring(sep + 1) : s;
-            msgs.Add(new Message(id, roomId, atMs, username, text));
+            string username; string text; long replyToId = 0; long imageId = 0;
+            // New format: U+001E-separated 4 fields.
+            if (s.IndexOf('\u001E') >= 0)
+            {
+                var parts = s.Split('\u001E', 4);
+                username = parts[0];
+                text     = parts.Length > 1 ? parts[1] : "";
+                if (parts.Length > 2) long.TryParse(parts[2], out replyToId);
+                if (parts.Length > 3) long.TryParse(parts[3], out imageId);
+            }
+            else
+            {
+                // Legacy format: "username|text" (text may contain |).
+                var sep = s.IndexOf('|');
+                username = sep > 0 ? s.Substring(0, sep) : "Anonymous";
+                text = sep > 0 ? s.Substring(sep + 1) : s;
+            }
+            msgs.Add(new Message(id, roomId, atMs, username, text, replyToId, imageId));
         }
         _afterMessagesOffset = r.Cursor;
         return msgs;

@@ -40,6 +40,17 @@
   async function _onClick(e) {
     var handlerId = e.currentTarget.getAttribute('data-wasp-evt-click');
     if (!handlerId) return;
+    // Delegation guard: if the listener is on a CONTAINER (e.target is
+    // a descendant, not the listener itself), only fire when the
+    // clicked subtree actually carries data-wasp-args. Without this,
+    // unrelated clicks inside e.g. a chat messages container — a
+    // reply link, an emoji-picker open button, an attachment preview
+    // close — would trigger the container's @onclick with empty args,
+    // wasting an IC update call per click.
+    if (e.target !== e.currentTarget) {
+      var argSource = e.target.closest && e.target.closest('[data-wasp-args]');
+      if (!argSource) return;
+    }
     e.preventDefault();
     _markLocalEvent();
     // Collect form-field values: if the button is inside a <form>, we
@@ -138,7 +149,7 @@
     }
   }
 
-  function _applyBatch(batch) {
+  function _applyBatch(batch, opts) {
     if (!batch || !batch.html) return;
     var anchor = batch.anchor || '#wasp-root';
     var target = document.querySelector(anchor);
@@ -151,19 +162,31 @@
     // their cursor.
     var focusInfo = null;
     var active = document.activeElement;
-    if (active && active.matches && active.matches('[data-wasp-persist]')) {
+    if (active && active.matches &&
+        (active.matches('[data-wasp-persist]') || active.matches('[data-wasp-keep]'))) {
       focusInfo = {
         name: active.getAttribute('name'),
+        tag: active.tagName,
         start: active.selectionStart,
         end: active.selectionEnd,
       };
     }
+    // Snapshot composer state (text being typed, attached image,
+    // active reply target) that would otherwise be wiped by the
+    // innerHTML swap. Done only when the swap is triggered by the
+    // background reactivity poll — sends and SPA nav want the fresh
+    // server state untouched.
+    var kept = (opts && opts.keepState) ? _snapshotKeepState(target) : null;
+    var scrollKept = (opts && opts.keepState) ? _snapshotScroll() : null;
+
     target.innerHTML = batch.html;
     lastBatchId = batch.batchId || lastBatchId;
     _wireEvents(target);
     _waspPersistRestore(target);
+    if (kept) _restoreKeepState(target, kept);
+    if (scrollKept) _restoreScroll(scrollKept);
     if (focusInfo && focusInfo.name) {
-      var refocus = target.querySelector('[data-wasp-persist][name="' + focusInfo.name + '"]');
+      var refocus = target.querySelector('[name="' + focusInfo.name + '"]');
       if (refocus) {
         refocus.focus();
         try { refocus.setSelectionRange(focusInfo.start, focusInfo.end); }
@@ -175,7 +198,69 @@
     // id for now; generalise to a data-wasp-stick attribute when the
     // need arises.
     var scroller = document.getElementById('chat-scroll');
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    if (scroller && !(kept || scrollKept)) scroller.scrollTop = scroller.scrollHeight;
+  }
+
+  // ─── data-wasp-keep — survive reactivity-poll DOM swaps ───────────
+  // The bridge's reactivity poll replaces innerHTML every few seconds
+  // when another user sends a message. Without this, the textarea
+  // value the local user is typing, plus hidden inputs holding an
+  // attached image / active reply target, all get wiped under their
+  // cursor. Any element marked [data-wasp-keep] has its .value (for
+  // inputs/textareas) preserved across poll swaps; derived UI state
+  // (image preview, reply badge) is re-applied from those values.
+  function _snapshotKeepState(root) {
+    var snap = { values: {} };
+    root.querySelectorAll('[data-wasp-keep][name]').forEach(function (el) {
+      snap.values[el.getAttribute('name')] = el.value;
+    });
+    return snap;
+  }
+  function _restoreKeepState(root, snap) {
+    Object.keys(snap.values).forEach(function (name) {
+      var el = root.querySelector('[data-wasp-keep][name="' + name + '"]');
+      if (el) el.value = snap.values[name];
+    });
+    // Re-derive the image attach preview from imageData.
+    var img = root.querySelector('input[name="imageData"]');
+    if (img && img.value) {
+      var preview = root.querySelector('[data-wasp-image-preview]');
+      if (preview) {
+        var pimg = preview.querySelector('img') || preview.appendChild(document.createElement('img'));
+        pimg.src = img.value;
+        preview.classList.add('is-active');
+      }
+    }
+    // Re-derive the reply badge from replyTo + replyToUser + replyToText.
+    var rTo = root.querySelector('input[name="replyTo"]');
+    if (rTo && rTo.value) {
+      var rUser = root.querySelector('input[name="replyToUser"]');
+      var rText = root.querySelector('input[name="replyToText"]');
+      var badge = root.querySelector('.dc-reply-badge');
+      if (badge) {
+        var u = badge.querySelector('.dc-reply-user');
+        var t = badge.querySelector('.dc-reply-text');
+        if (u && rUser) u.textContent = rUser.value;
+        if (t && rText) t.textContent = rText.value;
+        badge.classList.add('is-active');
+      }
+    }
+  }
+  function _snapshotScroll() {
+    var s = document.getElementById('chat-scroll');
+    if (!s) return null;
+    // "Sticky to bottom" — if we're within 64px of the bottom, snap
+    // back to bottom after the swap (so new messages slide in). If
+    // the user has scrolled up to read history, preserve their exact
+    // scroll position so they don't jump.
+    var atBottom = (s.scrollHeight - s.scrollTop - s.clientHeight) < 64;
+    return { atBottom: atBottom, scrollTop: s.scrollTop };
+  }
+  function _restoreScroll(snap) {
+    var s = document.getElementById('chat-scroll');
+    if (!s) return;
+    if (snap.atBottom) s.scrollTop = s.scrollHeight;
+    else s.scrollTop = snap.scrollTop;
   }
 
   // Enter-to-send on chat-style textareas. Shift+Enter inserts a
@@ -247,6 +332,132 @@
     if (!key) return;
     try { localStorage.setItem(key, t.value); }
     catch (_) { /* private mode */ }
+  });
+
+  // ─── Click popovers ───────────────────────────────────────────────
+  // Trigger element has data-wasp-popover-trigger; the *next sibling*
+  // is the popover and carries data-wasp-popover. Clicking the trigger
+  // toggles a [data-open] attribute on the popover. Clicking outside
+  // any popover (or its trigger) closes them all.
+  document.addEventListener('click', function (e) {
+    var trig = e.target.closest && e.target.closest('[data-wasp-popover-trigger]');
+    if (trig) {
+      var pop = trig.nextElementSibling;
+      if (pop && pop.hasAttribute && pop.hasAttribute('data-wasp-popover')) {
+        var wasOpen = pop.hasAttribute('data-open');
+        document.querySelectorAll('[data-wasp-popover][data-open]').forEach(function (el) {
+          el.removeAttribute('data-open');
+        });
+        if (!wasOpen) pop.setAttribute('data-open', '');
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (!(e.target.closest && e.target.closest('[data-wasp-popover]'))) {
+      document.querySelectorAll('[data-wasp-popover][data-open]').forEach(function (el) {
+        el.removeAttribute('data-open');
+      });
+    }
+  });
+
+  // ─── Reply state (client-side only) ───────────────────────────────
+  // Clicking <button data-wasp-reply-to="msgId"> on a message:
+  //   1. sets the composer's hidden <input name="replyTo"> value,
+  //   2. surfaces a "Replying to @user: text…" badge above the textarea,
+  //   3. focuses the textarea so the user can keep typing.
+  // The cancel × ([data-wasp-cancel-reply]) clears both. After a send,
+  // the server response swaps the DOM and we naturally lose the reply
+  // state — exactly what we want.
+  document.addEventListener('click', function (e) {
+    var reply = e.target.closest && e.target.closest('[data-wasp-reply-to]');
+    if (reply) {
+      var msgEl = reply.closest('.dc-message');
+      var username = '', text = '';
+      if (msgEl) {
+        var u = msgEl.querySelector('.dc-username');
+        var t = msgEl.querySelector('.dc-text');
+        if (u) username = u.textContent || '';
+        if (t) text = (t.textContent || '').slice(0, 80);
+      }
+      _setReplyTarget(reply.getAttribute('data-wasp-reply-to'), username, text);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    var cancel = e.target.closest && e.target.closest('[data-wasp-cancel-reply]');
+    if (cancel) {
+      _setReplyTarget('', '', '');
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+  function _setReplyTarget(id, username, text) {
+    function setVal(name, v) {
+      var el = document.querySelector('input[name="' + name + '"]');
+      if (el) el.value = v || '';
+    }
+    setVal('replyTo', id);
+    setVal('replyToUser', username);
+    setVal('replyToText', text);
+    var badge = document.querySelector('.dc-reply-badge');
+    if (badge) {
+      var u = badge.querySelector('.dc-reply-user'); if (u) u.textContent = username;
+      var t = badge.querySelector('.dc-reply-text'); if (t) t.textContent = text;
+      if (id) badge.classList.add('is-active');
+      else    badge.classList.remove('is-active');
+    }
+    if (id) {
+      var ta = document.querySelector('textarea[name="text"]');
+      if (ta) ta.focus();
+    }
+  }
+
+  // ─── File input → base64 in hidden field ──────────────────────────
+  // <input type="file" data-wasp-image-into="imageData"> reads the
+  // chosen file as a data: URL into the named hidden input. Size is
+  // capped client-side at 1.5 MB so we stay safely under the IC
+  // ingress limit once the data URL is wrapped in the event POST.
+  document.addEventListener('change', function (e) {
+    var f = e.target;
+    if (!f || !f.matches || !f.matches('input[type="file"][data-wasp-image-into]')) return;
+    var file = f.files && f.files[0];
+    if (!file) return;
+    if (!/^image\//.test(file.type)) {
+      alert('Images only.'); f.value = ''; return;
+    }
+    // 1 MB raw cap — once base64-inflated (×4/3) and wrapped in the
+    // JSON event body, this lands at ~1.4 MB, comfortably inside the
+    // IC's 2 MB ingress message envelope. 1.5 MB raw would overflow.
+    if (file.size > 1000000) {
+      alert('Image is too big (max 1 MB). Got ' + Math.round(file.size / 1024) + ' KB.');
+      f.value = ''; return;
+    }
+    var target = document.querySelector('input[name="' + f.getAttribute('data-wasp-image-into') + '"]');
+    var preview = document.querySelector('[data-wasp-image-preview]');
+    var fr = new FileReader();
+    fr.onload = function () {
+      if (target) target.value = fr.result;
+      if (preview) {
+        var img = preview.querySelector('img') || preview.appendChild(document.createElement('img'));
+        img.src = fr.result;
+        preview.classList.add('is-active');
+      }
+    };
+    fr.readAsDataURL(file);
+  });
+  // Clear the attachment preview when × is clicked.
+  document.addEventListener('click', function (e) {
+    var clear = e.target.closest && e.target.closest('[data-wasp-image-clear]');
+    if (!clear) return;
+    var target = document.querySelector('input[name="' + clear.getAttribute('data-wasp-image-clear') + '"]');
+    if (target) target.value = '';
+    var fi = document.querySelector('input[type="file"][data-wasp-image-into]');
+    if (fi) fi.value = '';
+    var preview = document.querySelector('[data-wasp-image-preview]');
+    if (preview) preview.classList.remove('is-active');
+    e.preventDefault();
+    e.stopPropagation();
   });
 
   // ─── Emoji-insert buttons ─────────────────────────────────────────
@@ -369,7 +580,7 @@
         var batch = await resp.json();
         if (batch.unchanged) continue;
         if (batch.batchId && batch.batchId === lastBatchId) continue;
-        _applyBatch(batch);
+        _applyBatch(batch, { keepState: true });
       } catch (e) {
         // network blip — try again next interval
       }
