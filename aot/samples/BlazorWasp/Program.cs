@@ -241,10 +241,13 @@ public static class Program
         .dc-shell {
             display: grid;
             grid-template-columns: 240px 1fr;
+            grid-template-rows: 100%;   /* pin the single row to grid height so children
+                                           don't stretch past the viewport */
             height: 100%;
             background: #313338; color: #dcddde;
             font: 15px/1.45 'Inter', system-ui, sans-serif;
         }
+        .dc-rooms, .dc-channel { min-height: 0; }   /* allow shrink-below-content */
         .dc-rooms {
             background: #2b2d31; color: #c9cbd4;
             display: flex; flex-direction: column;
