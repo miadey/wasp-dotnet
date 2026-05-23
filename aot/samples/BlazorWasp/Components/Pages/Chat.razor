@@ -73,12 +73,18 @@
             @foreach (var msg in messages)
             {
                 var date = DateOnly(msg.AtMs);
-                var grouped = prevUser == msg.Username && (msg.AtMs - prevAt) < 5 * 60 * 1000 && date == prevDate;
+                var rawReactions = ChatState.ReactionsOf(msg.Id);
+                var liveReactions = rawReactions.Where(kv => kv.Value > 0).ToList();
+                // A message with reactions always gets its own head row
+                // so the badges have somewhere to live — break grouping.
+                var grouped = prevUser == msg.Username
+                              && (msg.AtMs - prevAt) < 5 * 60 * 1000
+                              && date == prevDate
+                              && liveReactions.Count == 0;
                 if (date != prevDate)
                 {
                     <div class="dc-divider"><span>@date</span></div>
                 }
-                var reactions = ChatState.ReactionsOf(msg.Id);
                 <div class="dc-message @(grouped ? "dc-message-grouped" : null)">
                     @if (!grouped)
                     {
@@ -94,25 +100,31 @@
                             <div class="dc-message-head">
                                 <span class="dc-username" style="@UsernameStyle(msg.Username)">@msg.Username</span>
                                 <span class="dc-time">@FormatTime(msg.AtMs)</span>
+                                @if (liveReactions.Count > 0)
+                                {
+                                    <span class="dc-reactions">
+                                        @foreach (var kv in liveReactions)
+                                        {
+                                            <button type="button" class="dc-react-badge"
+                                                    data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{kv.Key}\"}}")'
+                                                    aria-label="@kv.Key">
+                                                <span class="dc-react-e">@kv.Key</span>
+                                                <span class="dc-react-n">@kv.Value</span>
+                                            </button>
+                                        }
+                                    </span>
+                                }
                             </div>
                         }
                         <div class="dc-text">@msg.Text</div>
-                        <div class="dc-reactions">
-                            @foreach (var emoji in ChatService.ReactionEmojis)
-                            {
-                                var count = reactions.TryGetValue(emoji, out var n) ? n : 0;
-                                var btnCls = count > 0 ? "dc-react has-count" : "dc-react";
-                                <button type="button" class="@btnCls"
-                                        data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{emoji}\"}}")'
-                                        aria-label="react @emoji">
-                                    <span class="dc-react-e">@emoji</span>
-                                    @if (count > 0)
-                                    {
-                                        <span class="dc-react-n">@count</span>
-                                    }
-                                </button>
-                            }
-                        </div>
+                    </div>
+                    <div class="dc-react-picker" aria-hidden="true">
+                        @foreach (var emoji in ChatService.ReactionEmojis)
+                        {
+                            <button type="button" class="dc-react-pick"
+                                    data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{emoji}\"}}")'
+                                    aria-label="react @emoji">@emoji</button>
+                        }
                     </div>
                 </div>
                 prevUser = msg.Username;

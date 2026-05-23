@@ -112,7 +112,12 @@ public static class Program
         sb.Append("</nav>");
         sb.Append("<div class=\"sidebar-foot\">on-chain · always</div>");
         sb.Append("</aside>");
-        sb.Append("<main>").Append(innerHtml).Append("</main>");
+        // Chat + Place want the full viewport (no padding, no max-width,
+        // internal scroll only). Older browsers don't support :has() so
+        // a class on <main> is more portable than a :has(.dc-shell) rule.
+        var fullbleed = normalized == "/chat" || normalized == "/place"
+            ? " class=\"fullbleed\"" : "";
+        sb.Append("<main").Append(fullbleed).Append(">").Append(innerHtml).Append("</main>");
         sb.Append("</div>");
         return sb.ToString();
     }
@@ -232,11 +237,11 @@ public static class Program
         p[role=""status""] { font-size: 1.15rem; color: #fff; }
 
         /* ── Discord-style chat (multi-room) ──────────────────────── */
-        main:has(.dc-shell) { padding: 0; max-width: none; }
+        main.fullbleed { padding: 0; max-width: none; height: 100vh; overflow: hidden; }
         .dc-shell {
             display: grid;
             grid-template-columns: 240px 1fr;
-            height: 100vh;
+            height: 100%;
             background: #313338; color: #dcddde;
             font: 15px/1.45 'Inter', system-ui, sans-serif;
         }
@@ -392,35 +397,66 @@ public static class Program
         }
         .dc-emoji-btn:hover { background: #383a40; border-color: rgba(255,255,255,0.06); }
         .dc-emoji-btn:active { transform: scale(0.92); }
-        .dc-reactions {
-            display: flex; flex-wrap: wrap; gap: 0.3rem;
-            margin-top: 0.3rem;
+        /* Inline reaction badges — sit in the message head row beside
+           the timestamp, only rendered for emojis with count > 0. */
+        .dc-message { position: relative; }
+        .dc-message-head .dc-reactions {
+            margin-left: 0.4rem;
+            display: inline-flex; align-items: center;
+            gap: 0.25rem; flex-wrap: wrap;
         }
-        .dc-react {
-            background: transparent; color: #b5bac1;
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 999px; cursor: pointer;
-            padding: 0.18rem 0.55rem; font-size: 0.85rem;
-            display: inline-flex; align-items: center; gap: 0.3rem;
-            opacity: 0.55;
-            transition: background 0.1s, opacity 0.1s, border-color 0.1s, transform 0.05s;
-        }
-        .dc-message:hover .dc-react { opacity: 1; }
-        .dc-react.has-count {
-            opacity: 1;
-            background: rgba(88,101,242,0.12);
-            border-color: rgba(88,101,242,0.5);
+        .dc-react-badge {
+            display: inline-flex; align-items: center; gap: 0.25rem;
+            background: rgba(88,101,242,0.18);
+            border: 1px solid rgba(88,101,242,0.45);
             color: #c7d2fe;
+            padding: 0.05rem 0.45rem;
+            border-radius: 999px;
+            font-size: 0.78rem; font-weight: 600;
+            cursor: pointer; line-height: 1.4;
+            transition: background 0.1s, border-color 0.1s, transform 0.05s;
         }
-        .dc-react:hover {
-            background: rgba(88,101,242,0.2);
+        .dc-react-badge:hover {
+            background: rgba(88,101,242,0.32);
             border-color: rgba(88,101,242,0.7);
-            color: #fff;
-            opacity: 1;
         }
-        .dc-react:active { transform: scale(0.94); }
-        .dc-react-e { font-size: 0.95rem; line-height: 1; }
-        .dc-react-n { font-variant-numeric: tabular-nums; font-weight: 600; }
+        .dc-react-badge:active { transform: scale(0.94); }
+        .dc-react-badge .dc-react-e { font-size: 0.9rem; line-height: 1; }
+        .dc-react-badge .dc-react-n { font-variant-numeric: tabular-nums; }
+
+        /* Hover popup picker — top-right of the message, shown only on
+           message hover. Lets users pick an emoji without crowding
+           every message with a permanent row. */
+        .dc-react-picker {
+            position: absolute;
+            top: -14px; right: 1rem;
+            display: flex; gap: 1px;
+            background: #2b2d31;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 8px;
+            padding: 3px 4px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+            opacity: 0; pointer-events: none;
+            transform: translateY(4px);
+            transition: opacity 0.12s ease, transform 0.12s ease;
+            z-index: 5;
+        }
+        .dc-message:hover .dc-react-picker {
+            opacity: 1; pointer-events: auto;
+            transform: translateY(0);
+        }
+        .dc-react-pick {
+            background: transparent; border: 0; cursor: pointer;
+            padding: 0.25rem 0.4rem;
+            border-radius: 5px;
+            font-size: 1.05rem; line-height: 1;
+            transition: background 0.1s, transform 0.05s;
+        }
+        .dc-react-pick:hover {
+            background: rgba(255,255,255,0.08);
+            transform: scale(1.15);
+        }
+        .dc-react-pick:active { transform: scale(0.95); }
         .dc-composer-input {
             background: #383a40; color: #dcddde; border: 0; outline: none; resize: none;
             padding: 0.8rem 1rem; border-radius: 10px; min-height: 46px; max-height: 50vh;
@@ -480,9 +516,8 @@ public static class Program
         }
 
         /* ── Pixel canvas ─────────────────────────────────────────── */
-        main:has(.px-shell) { padding: 0; max-width: none; }
         .px-shell {
-            min-height: 100vh;
+            height: 100%; overflow-y: auto;
             background: #0d0f14;
             color: #e6e8ee;
             display: flex; flex-direction: column;
@@ -655,6 +690,7 @@ public static class Program
 
             main { padding: 1.25rem; }
             main h1 { font-size: 1.4rem; }
+            main.fullbleed { height: calc(100dvh - var(--top-nav-h)); }
         }
     </style>
 </head>
