@@ -37,10 +37,18 @@
         </div>
     </header>
 
+    @{
+        // Manually-built JSON — NativeAOT trims reflection-based JSON.
+        var palette = "[\"" + string.Join("\",\"", PixelService.Palette) + "\"]";
+    }
     <div class="px-board">
         <div class="px-grid"
              style="grid-template-columns: repeat(@PixelService.Width, 1fr);"
              data-wasp-paint-with="@PixelService.Palette[selectedColor]"
+             data-wasp-cooldown-ms="@(PixelService.CooldownMs)"
+             data-wasp-bind-grid="place"
+             data-wasp-grid-cols="@PixelService.Width"
+             data-wasp-grid-palette="@palette"
              @onclick="HandlePlace">
             @for (int y = 0; y < PixelService.Height; y++)
             {
@@ -58,6 +66,8 @@
     </div>
 
     <form class="px-toolbar" autocomplete="off">
+        <span class="wasp-status wasp-status-ready" data-wasp-paint-status
+              title="click readiness">+</span>
         <input name="username" type="text" class="px-username"
                placeholder="your name" maxlength="24" data-wasp-persist />
 

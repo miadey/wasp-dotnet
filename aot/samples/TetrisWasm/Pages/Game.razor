@@ -1,0 +1,419 @@
+@* Tetris on Blazor WebAssembly.
+   Everything below is C#/Razor — the game runs in-browser at 60 fps
+   off a PeriodicTimer. Keystrokes are @onkeydown handlers, no JS.
+   The leaderboard talks to the razoronic canister via HttpClient. *@
+
+@inject HttpClient Http
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+@if (_screen == Screen.Start)
+{
+    <div class="start-screen">
+        <div class="start-card">
+            <div class="start-mark">▦</div>
+            <h1 class="start-title">TETRIS<span class="dot">·</span>on<span class="dot">·</span>ICP</h1>
+            <p class="start-sub">100% Blazor WebAssembly · scores on canister · made by @@miadey</p>
+
+            <form class="start-form" @onsubmit="StartGame" @onsubmit:preventDefault="true">
+                <label class="start-name">
+                    <span>player name</span>
+                    <input @bind="_username" @bind:event="oninput"
+                           maxlength="16" autocomplete="off"
+                           placeholder="who are you?" />
+                </label>
+                <button type="submit" class="start-cta">▶  start game</button>
+            </form>
+
+            <div class="start-help">
+                <span><kbd>← →</kbd> move</span>
+                <span><kbd>↑</kbd> rotate</span>
+                <span><kbd>↓</kbd> soft drop</span>
+                <span><kbd>space</kbd> hard drop</span>
+                <span><kbd>c</kbd> hold</span>
+                <span><kbd>p</kbd> pause</span>
+                <span><kbd>m</kbd> mute</span>
+            </div>
+
+            <div class="start-leaderboard">
+                <h2>leaderboard <span class="lb-hint">top 10 · on-chain</span></h2>
+                @if (_scores is null)
+                {
+                    <div class="lb-loading">loading…</div>
+                }
+                else if (_scores.Length == 0)
+                {
+                    <div class="lb-empty">No scores yet. Be the first.</div>
+                }
+                else
+                {
+                    <ol class="lb-list">
+                        @for (int i = 0; i < Math.Min(_scores.Length, 10); i++)
+                        {
+                            var s = _scores[i];
+                            <li class="lb-row @(s.Username == _username ? "is-me" : "")">
+                                <span class="lb-rank">@(i + 1)</span>
+                                <span class="lb-user">@s.Username</span>
+                                <span class="lb-score">@s.Score.ToString("N0")</span>
+                                <span class="lb-lines">@s.Lines L</span>
+                                <span class="lb-level">L@(s.Level)</span>
+                            </li>
+                        }
+                    </ol>
+                }
+            </div>
+
+            <a class="start-back" href="/" data-wasp-no-spa>← back to the rest of the app</a>
+        </div>
+    </div>
+    return;
+}
+
+<div class="tetris-shell @(_engine.GameOver ? "is-gameover" : "")"
+     tabindex="0"
+     @ref="_root"
+     @onkeydown="OnKey"
+     @onkeydown:preventDefault="true">
+
+    <header class="tetris-bar">
+        <a class="tetris-back" href="/">← back to the rest of the app</a>
+        <div class="tetris-title">TETRIS<span class="dot">·</span>on<span class="dot">·</span>ICP</div>
+        <div class="tetris-user">
+            <label>name</label>
+            <input @bind="_username" @bind:event="oninput" maxlength="16" />
+        </div>
+    </header>
+
+    <main class="tetris-stage">
+        <aside class="tetris-side tetris-side-left">
+            <div class="panel">
+                <div class="panel-label">hold</div>
+                <div class="mini-board">@RenderMini(_engine.Held)</div>
+            </div>
+            <div class="panel stats">
+                <div class="stat"><div class="stat-label">score</div><div class="stat-num">@_engine.Score.ToString("N0")</div></div>
+                <div class="stat"><div class="stat-label">lines</div><div class="stat-num">@_engine.Lines</div></div>
+                <div class="stat"><div class="stat-label">level</div><div class="stat-num">@_engine.Level</div></div>
+            </div>
+        </aside>
+
+        <div class="board-wrap">
+            <div class="board">
+                @{
+                    var ghostY = _engine.GhostY();
+                    var pieceCells = PieceShapes.Cells(_engine.Current.Type, _engine.Current.Rotation);
+                    var pieceColor = PieceShapes.Colors[_engine.Current.Type];
+                    // Build a flat list of overlay cells (active + ghost)
+                    var pieceSet = new HashSet<(int x, int y)>();
+                    var ghostSet = new HashSet<(int x, int y)>();
+                    foreach (var (cx, cy) in pieceCells)
+                    {
+                        pieceSet.Add((_engine.Current.X + cx, _engine.Current.Y + cy));
+                        ghostSet.Add((_engine.Current.X + cx, ghostY + cy));
+                    }
+                    var clearing = _engine.LineClearRows;
+                }
+
+                @for (int r = 0; r < TetrisEngine.Rows; r++)
+                {
+                    @for (int c = 0; c < TetrisEngine.Cols; c++)
+                    {
+                        var settled = _engine.Board[r, c];
+                        var isPiece = pieceSet.Contains((c, r));
+                        var isGhost = !isPiece && settled == 0 && ghostSet.Contains((c, r));
+                        var rowClearing = clearing is not null && Array.IndexOf(clearing, r) >= 0;
+                        string color = settled != 0
+                            ? PieceShapes.Colors[settled - 1]
+                            : (isPiece ? pieceColor : "");
+                        string cls = "cell";
+                        if (settled != 0) cls += " filled";
+                        else if (isPiece) cls += " filled is-active";
+                        else if (isGhost) cls += " is-ghost";
+                        if (rowClearing) cls += " is-clearing";
+                        <div class="@cls" style="@(color.Length > 0 ? $"--c:{color}" : "")"></div>
+                    }
+                }
+            </div>
+
+            <div class="touch-pad" aria-hidden="@(_engine.GameOver)">
+                <button @onclick="() => Press(GameKey.Left)" aria-label="left">◀</button>
+                <button @onclick="() => Press(GameKey.RotateCcw)" aria-label="rotate ccw">↺</button>
+                <button @onclick="() => Press(GameKey.SoftDrop)" aria-label="down">▼</button>
+                <button @onclick="() => Press(GameKey.RotateCw)" aria-label="rotate cw">↻</button>
+                <button @onclick="() => Press(GameKey.Right)" aria-label="right">▶</button>
+                <button @onclick="() => Press(GameKey.Hold)" aria-label="hold">H</button>
+                <button @onclick="() => Press(GameKey.HardDrop)" aria-label="drop">⤓</button>
+            </div>
+        </div>
+
+        <aside class="tetris-side tetris-side-right">
+            <div class="panel">
+                <div class="panel-label">next</div>
+                @foreach (var t in _engine.NextQueue.Take(3))
+                {
+                    <div class="mini-board">@RenderMini(t)</div>
+                }
+            </div>
+            <div class="panel keys">
+                <div class="panel-label">keys</div>
+                <div class="key-row"><kbd>← →</kbd>move</div>
+                <div class="key-row"><kbd>↓</kbd>soft drop</div>
+                <div class="key-row"><kbd>↑</kbd>rotate</div>
+                <div class="key-row"><kbd>space</kbd>hard drop</div>
+                <div class="key-row"><kbd>c</kbd>hold</div>
+                <div class="key-row"><kbd>p</kbd>pause</div>
+                <div class="key-row"><kbd>m</kbd>mute</div>
+            </div>
+            <div class="panel music">
+                <button class="music-toggle" @onclick="ToggleMusic">
+                    @(_musicOn ? "♪ on" : "♪ off")
+                </button>
+            </div>
+        </aside>
+    </main>
+
+    @if (_engine.Paused && !_engine.GameOver)
+    {
+        <div class="overlay">
+            <div class="overlay-card">
+                <h2>paused</h2>
+                <p>press <kbd>p</kbd> to resume</p>
+            </div>
+        </div>
+    }
+    @if (_engine.GameOver)
+    {
+        <div class="overlay">
+            <div class="overlay-card">
+                <h2>game over</h2>
+                <div class="final-stats">
+                    <div><span>score</span><strong>@_engine.Score.ToString("N0")</strong></div>
+                    <div><span>lines</span><strong>@_engine.Lines</strong></div>
+                    <div><span>level</span><strong>@_engine.Level</strong></div>
+                </div>
+                @if (_submittedRank is not null)
+                {
+                    <p class="rank">leaderboard rank: <strong>#@_submittedRank</strong></p>
+                }
+                <button class="cta" @onclick="Restart">back to menu</button>
+            </div>
+        </div>
+    }
+
+    <section class="leaderboard">
+        <h3>leaderboard <span class="lb-hint">(on-chain · canister 4dcfc-…icp0.io)</span></h3>
+        @if (_scores is null)
+        {
+            <div class="lb-loading">loading…</div>
+        }
+        else if (_scores.Length == 0)
+        {
+            <div class="lb-empty">No scores yet. Be the first.</div>
+        }
+        else
+        {
+            <ol class="lb-list">
+                @for (int i = 0; i < _scores.Length; i++)
+                {
+                    var s = _scores[i];
+                    <li class="lb-row @(s.Username == _username ? "is-me" : "")">
+                        <span class="lb-rank">@(i + 1)</span>
+                        <span class="lb-user">@s.Username</span>
+                        <span class="lb-score">@s.Score.ToString("N0")</span>
+                        <span class="lb-lines">@s.Lines L</span>
+                        <span class="lb-level">L@(s.Level)</span>
+                    </li>
+                }
+            </ol>
+        }
+    </section>
+</div>
+
+@code {
+    private enum Screen { Start, Playing, GameOver }
+    private Screen _screen = Screen.Start;
+
+    private ElementReference _root;
+    private TetrisEngine _engine = new();
+    private CancellationTokenSource? _loop;
+    private string _username = "Player";
+    private ScoreEntry[]? _scores;
+    private int? _submittedRank;
+    private bool _musicOn = false;
+    private bool _scoreSubmitted = false;
+    private LeaderboardClient _lb = null!;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _lb = new LeaderboardClient(Http);
+        // Seed username from localStorage (set by the rest of the app's
+        // bridge under wasp-persist:username); use UserNN otherwise.
+        try
+        {
+            var stored = await JS.InvokeAsync<string?>("localStorage.getItem", "wasp-persist:username");
+            if (!string.IsNullOrEmpty(stored)) _username = stored!;
+            else _username = "User" + Random.Shared.Next(10, 99);
+        }
+        catch { _username = "User" + Random.Shared.Next(10, 99); }
+
+        _scores = await _lb.TopAsync(20);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Focus the playfield whenever we (re-)enter the Playing screen
+        // so arrow keys work without a pre-click. The .dc-attach-style
+        // ElementReference is only valid while the shell is rendered,
+        // so we can only call FocusAsync after the Playing branch has
+        // mounted.
+        if (_screen == Screen.Playing)
+        {
+            try { await _root.FocusAsync(); } catch { /* element gone */ }
+        }
+        if (firstRender)
+        {
+            // Defer the game loop to StartGame — the start screen is
+            // shown by default and the loop is wasted there.
+        }
+    }
+
+    private void StartGame()
+    {
+        if (string.IsNullOrWhiteSpace(_username)) _username = "Player";
+        _engine = new TetrisEngine();
+        _scoreSubmitted = false;
+        _submittedRank = null;
+        _screen = Screen.Playing;
+        StartLoop();
+    }
+
+    private void StartLoop()
+    {
+        _loop?.Cancel();
+        _loop = new CancellationTokenSource();
+        _ = RunLoopAsync(_loop.Token);
+    }
+
+    private async Task RunLoopAsync(CancellationToken ct)
+    {
+        var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(33));   // 30 fps is plenty for Tetris
+        while (await timer.WaitForNextTickAsync(ct))
+        {
+            var prevGameOver = _engine.GameOver;
+            _engine.Tick(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            // First frame we notice game-over: submit score.
+            if (_engine.GameOver && !_scoreSubmitted)
+            {
+                _scoreSubmitted = true;
+                await SubmitScoreAsync();
+            }
+            StateHasChanged();
+        }
+    }
+
+    private async Task SubmitScoreAsync()
+    {
+        await _lb.SubmitAsync(_username, _engine.Score, _engine.Lines, _engine.Level);
+        _scores = await _lb.TopAsync(20);
+        _submittedRank = Array.FindIndex(_scores, s => s.Username == _username && s.Score == _engine.Score) switch
+        {
+            -1 => null,
+            int i => i + 1,
+        };
+        if (_musicOn) await JS.InvokeVoidAsync("tetrisAudio.stop");
+        StateHasChanged();
+    }
+
+    private async Task OnKey(KeyboardEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case "ArrowLeft":  _engine.Move(-1); break;
+            case "ArrowRight": _engine.Move(+1); break;
+            case "ArrowDown":  _engine.SoftDrop(); break;
+            case "ArrowUp":
+            case "x":          _engine.Rotate(+1); break;
+            case "z":
+            case "Control":    _engine.Rotate(-1); break;
+            case " ":          _engine.HardDrop(); break;
+            case "c": case "Shift": _engine.Hold(); break;
+            case "p": case "Escape":
+                _engine.Paused = !_engine.Paused;
+                if (_engine.Paused && _musicOn) await JS.InvokeVoidAsync("tetrisAudio.stop");
+                else if (!_engine.Paused && _musicOn) await JS.InvokeVoidAsync("tetrisAudio.start");
+                break;
+            case "m": await ToggleMusic(); break;
+            case "r":
+                if (_engine.GameOver) Restart();
+                break;
+        }
+        StateHasChanged();
+    }
+
+    private void Press(GameKey k)
+    {
+        switch (k)
+        {
+            case GameKey.Left:      _engine.Move(-1); break;
+            case GameKey.Right:     _engine.Move(+1); break;
+            case GameKey.SoftDrop:  _engine.SoftDrop(); break;
+            case GameKey.HardDrop:  _engine.HardDrop(); break;
+            case GameKey.RotateCw:  _engine.Rotate(+1); break;
+            case GameKey.RotateCcw: _engine.Rotate(-1); break;
+            case GameKey.Hold:      _engine.Hold(); break;
+        }
+    }
+
+    private async Task ToggleMusic()
+    {
+        _musicOn = !_musicOn;
+        try
+        {
+            if (_musicOn) await JS.InvokeVoidAsync("tetrisAudio.start");
+            else          await JS.InvokeVoidAsync("tetrisAudio.stop");
+        }
+        catch { /* audio is best-effort */ }
+    }
+
+    private void Restart()
+    {
+        // "Back to menu" — bring user back to the start screen so they
+        // see the updated leaderboard (including their submission).
+        _loop?.Cancel();
+        _loop = null;
+        _scoreSubmitted = false;
+        _submittedRank = null;
+        _screen = Screen.Start;
+    }
+
+    private RenderFragment RenderMini(int? type) => __builder =>
+    {
+        if (type is null) return;
+        var cells = PieceShapes.Cells(type.Value, 0);
+        var color = PieceShapes.Colors[type.Value];
+        __builder.OpenElement(0, "div");
+        __builder.AddAttribute(1, "class", "mini-grid");
+        for (int r = 0; r < 4; r++)
+        {
+            for (int c = 0; c < 4; c++)
+            {
+                bool filled = false;
+                foreach (var (cx, cy) in cells)
+                    if (cx == c && cy == r) { filled = true; break; }
+                __builder.OpenElement(2, "div");
+                __builder.AddAttribute(3, "class", filled ? "mini-cell filled" : "mini-cell");
+                if (filled) __builder.AddAttribute(4, "style", $"--c:{color}");
+                __builder.CloseElement();
+            }
+        }
+        __builder.CloseElement();
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        _loop?.Cancel();
+        try { if (_musicOn) await JS.InvokeVoidAsync("tetrisAudio.stop"); } catch { }
+    }
+
+    private enum GameKey { Left, Right, SoftDrop, HardDrop, RotateCw, RotateCcw, Hold }
+}

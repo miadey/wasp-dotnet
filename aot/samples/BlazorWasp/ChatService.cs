@@ -59,6 +59,7 @@ public sealed unsafe class ChatService
         "\U0001F600",   // 😀
         "\U0001F62E",   // 😮
         "\U0001F389",   // 🎉
+        "\U0001F32F",   // 🌯  fajitas / burrito
     };
 
     public sealed record Room(int Id, string Name, long CreatedAtMs);

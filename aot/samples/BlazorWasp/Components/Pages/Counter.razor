@@ -8,6 +8,11 @@
 
 <h1>Counter</h1>
 
-<p role="status">Current count: @CounterState.Count</p>
+<p role="status">Current count: <span data-wasp-bind="counter:value">@CounterState.Count</span></p>
 
 <button class="btn btn-primary" @onclick="CounterState.Increment">Click me</button>
+
+<p style="margin-top:1.5rem; color:#8b93a7; font-size:0.85rem;">
+    Live count — open this page in two browsers. Other users' clicks show up here in ~400 ms via the
+    <code>/api/counter</code> Candid-style delta endpoint, not a full page re-render.
+</p>

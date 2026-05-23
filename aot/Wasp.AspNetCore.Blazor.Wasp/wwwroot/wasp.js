@@ -37,6 +37,11 @@
     }
   }
 
+  // Track in-flight click POSTs so the background reactivity poll
+  // doesn't DOM-swap the user's optimistic state away while their
+  // update call is mid-consensus.
+  var inFlightClicks = 0;
+
   async function _onClick(e) {
     var handlerId = e.currentTarget.getAttribute('data-wasp-evt-click');
     if (!handlerId) return;
@@ -87,15 +92,41 @@
     }
     // Optimistic paint: handler element advertises a colour via
     // data-wasp-paint-with="<css-colour>". On click, we set
-    // e.target.style.background immediately. The IC update call still
-    // runs through consensus (~1–2s), but the user sees feedback
-    // instantly; the next render-batch overwrites our optimistic
-    // paint with the authoritative server colour (no flash if they
-    // agree; brief revert if the server rejected, e.g. cooldown).
-    var paintWith = e.currentTarget.getAttribute &&
-                    e.currentTarget.getAttribute('data-wasp-paint-with');
-    if (paintWith && e.target && e.target !== e.currentTarget) {
-      try { e.target.style.background = paintWith; } catch (_) {}
+    // e.target.style.background immediately. Optional companion
+    // data-wasp-cooldown-ms enforces a client-side throttle that
+    // matches the server's per-user cooldown — clicks within the
+    // window are ignored entirely (no POST, no optimistic paint), so
+    // we don't enqueue rejected updates whose stale full-render
+    // response would wipe other in-flight optimistic paints.
+    var paintEl = e.currentTarget;
+    var paintWith = paintEl.getAttribute && paintEl.getAttribute('data-wasp-paint-with');
+    if (paintWith) {
+      var coolMs = parseInt(paintEl.getAttribute('data-wasp-cooldown-ms') || '0', 10);
+      if (coolMs > 0) {
+        // Persist the cooldown across SPA navs + page reloads, keyed
+        // by the current username (server's cooldown is per-user).
+        // Without this, changing colour (SPA nav) replaces paintEl
+        // and the element-local timestamp is lost — user clicks fast,
+        // server quietly rejects, optimistic paint lingers locally,
+        // and a later full re-render reveals only the placements
+        // that actually committed.
+        var u = (document.querySelector('input[name="username"]') || {}).value || 'anon';
+        var key = 'wasp:cooldown:' + u;
+        var last = 0;
+        try { last = parseInt(localStorage.getItem(key) || '0', 10); } catch (_) {}
+        if (Date.now() - last < coolMs) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        try { localStorage.setItem(key, Date.now().toString()); } catch (_) {}
+        // Mirror onto the element for the cooldown-status indicator's
+        // 100ms tick (it reads paintEl._waspLastClickAt).
+        paintEl._waspLastClickAt = Date.now();
+      }
+      if (e.target && e.target !== paintEl) {
+        try { e.target.style.background = paintWith; } catch (_) {}
+      }
     }
     // Optimistic UX: disable the source button + clear the form's
     // text inputs immediately, so the user can keep typing while
@@ -118,6 +149,7 @@
         }
       });
     }
+    inFlightClicks++;
     try {
       var resp = await fetch('/_wasp/event', {
         method: 'POST',
@@ -140,6 +172,20 @@
         return;
       }
       var batch = await resp.json();
+      // If the click target sits inside a [data-wasp-bind-grid]
+      // element, the delta-poll loop is authoritative — applying the
+      // server's full HTML response would clobber concurrent
+      // optimistic paints from rapid clicks. Skip the swap; the next
+      // delta poll picks up the change.
+      // NOTE: e.currentTarget is nulled by the browser after the
+      // first await, so check via paintEl (captured synchronously
+      // above) instead.
+      var inGridBinding = paintEl && paintEl.closest &&
+                          paintEl.closest('[data-wasp-bind-grid]');
+      if (inGridBinding) {
+        // Nothing to do — store poll will catch up authoritatively.
+        return;
+      }
       // Sends snap to bottom (user wants to see their new message
       // / image). Reactions, create-room, replies — preserve scroll
       // so clicking 👍 on an older message doesn't yank the view.
@@ -150,6 +196,7 @@
       clearedEls.forEach(function (c) { c.el.value = c.prev; });
     } finally {
       disabledEls.forEach(function (el) { el.disabled = false; });
+      inFlightClicks--;
     }
   }
 
@@ -195,6 +242,9 @@
     lastBatchId = batch.batchId || lastBatchId;
     _wireEvents(target);
     _waspPersistRestore(target);
+    // Reset bindings — old elements are gone, scan new ones.
+    stores = {};
+    _waspScanBindings(target);
     if (kept) _restoreKeepState(target, kept);
     if (scrollKept) _restoreScroll(scrollKept);
     if (focusInfo && focusInfo.name) {
@@ -211,8 +261,9 @@
     // need arises.
     // Tail snap — only when no explicit scroll restore happened.
     if (scrollStrategy === 'tail' && !scrollKept) {
-      var scroller = document.getElementById('chat-scroll');
-      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      _waspSnapChatToBottom();
+      requestAnimationFrame(_waspSnapChatToBottom);
+      setTimeout(_waspSnapChatToBottom, 150);
     }
   }
 
@@ -535,6 +586,11 @@
     if (href.startsWith('http://') || href.startsWith('https://')) return;
     if (href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
     if (a.getAttribute('target') === '_blank') return;
+    // Opt-out: links into a separate sub-app (e.g. a Blazor WASM SPA
+    // hosted as static assets) should be a real browser navigation
+    // so they load their own bootstrapper instead of being routed
+    // through /_wasp/render.
+    if (a.hasAttribute('data-wasp-no-spa')) return;
     // Resolve relative href to a path.
     var url = new URL(a.href, location.origin);
     if (url.origin !== location.origin) return;
@@ -554,6 +610,117 @@
     get: function () { return lastBatchId; },
     set: function (v) { lastBatchId = v; },
   });
+
+  // ─── Cooldown status indicator ────────────────────────────────────
+  // Any element with [data-wasp-paint-status] gets its textContent +
+  // class updated every 100 ms based on the cooldown of the nearest
+  // [data-wasp-cooldown-ms] element on the page. Shows "+" green when
+  // a click would be accepted, "× Ns" red while we're in the
+  // cooldown window.
+  setInterval(function () {
+    var cool = document.querySelector('[data-wasp-cooldown-ms]');
+    if (!cool) return;
+    var ms = parseInt(cool.getAttribute('data-wasp-cooldown-ms') || '0', 10);
+    if (ms <= 0) return;
+    // Source of truth is localStorage keyed by current username —
+    // same key the click handler uses, so the indicator stays
+    // accurate across SPA navs (palette colour changes) and reloads.
+    var u = (document.querySelector('input[name="username"]') || {}).value || 'anon';
+    var last = 0;
+    try { last = parseInt(localStorage.getItem('wasp:cooldown:' + u) || '0', 10); } catch (_) {}
+    var remaining = ms - (Date.now() - last);
+    var ready = remaining <= 0;
+    document.querySelectorAll('[data-wasp-paint-status]').forEach(function (s) {
+      if (ready) {
+        if (s.textContent !== '+') s.textContent = '+';
+        s.className = 'wasp-status wasp-status-ready';
+      } else {
+        var sec = Math.ceil(remaining / 1000);
+        s.textContent = '× ' + sec + 's';
+        s.className = 'wasp-status wasp-status-cooling';
+      }
+    });
+  }, 100);
+
+  // ─── data-wasp-bind realtime stores ───────────────────────────────
+  // Markup pattern:
+  //   <span data-wasp-bind="counter:value">@initial</span>
+  //   <div  data-wasp-bind-grid="place"   data-wasp-grid-palette='[colours]'>
+  // The bridge polls /api/<store>?since=<cursor> a few times per second
+  // and patches just the bound elements — no innerHTML swap, no full
+  // render. Much cheaper than the full /_wasp/render poll, and feels
+  // like push.
+  var stores = {};   // name -> { cursor, fields: { fieldName: [elements] }, grids: [{el, palette}] }
+
+  function _waspScanBindings(root) {
+    root = root || document;
+    root.querySelectorAll('[data-wasp-bind]').forEach(function (el) {
+      var spec = el.getAttribute('data-wasp-bind');  // "counter:value"
+      var i = spec.indexOf(':');
+      if (i < 0) return;
+      var name = spec.slice(0, i), field = spec.slice(i + 1);
+      if (!stores[name]) stores[name] = { cursor: 0, fields: {}, grids: [] };
+      if (!stores[name].fields[field]) stores[name].fields[field] = [];
+      stores[name].fields[field].push(el);
+    });
+    root.querySelectorAll('[data-wasp-bind-grid]').forEach(function (el) {
+      var name = el.getAttribute('data-wasp-bind-grid');
+      var palette = [];
+      try { palette = JSON.parse(el.getAttribute('data-wasp-grid-palette') || '[]'); }
+      catch (_) {}
+      if (!stores[name]) stores[name] = { cursor: 0, fields: {}, grids: [] };
+      stores[name].grids.push({ el: el, palette: palette });
+    });
+  }
+
+  async function _waspPollStores() {
+    while (true) {
+      // Same race-avoidance as the reactivity poll — don't overwrite
+      // optimistic UI while the user's click is mid-consensus.
+      if (inFlightClicks > 0) {
+        await new Promise(function (r) { setTimeout(r, 200); });
+        continue;
+      }
+      var names = Object.keys(stores);
+      for (var i = 0; i < names.length; i++) {
+        var name = names[i];
+        var s = stores[name];
+        try {
+          var resp = await origFetch('/api/' + name + '?since=' + s.cursor,
+                                     { headers: { 'accept': 'application/json' } });
+          if (!resp.ok) continue;
+          var data = await resp.json();
+          if (data.unchanged) continue;
+          if (data.resync) {
+            // Server can't fit our requested delta — let the standard
+            // reactivity poll do a full render-batch swap instead.
+            continue;
+          }
+          // Scalar fields: update every bound element's textContent.
+          Object.keys(s.fields).forEach(function (f) {
+            if (data[f] !== undefined) {
+              s.fields[f].forEach(function (el) { el.textContent = data[f]; });
+            }
+          });
+          // Grid changes: apply each [x, y, colour] to the right cell.
+          if (data.changes && s.grids.length > 0) {
+            s.grids.forEach(function (g) {
+              var cells = g.el.children;
+              var cols = parseInt(g.el.getAttribute('data-wasp-grid-cols') || '40', 10);
+              data.changes.forEach(function (c) {
+                var idx = c[1] * cols + c[0];
+                var cell = cells[idx];
+                if (cell) cell.style.background = g.palette[c[2]] || '#000';
+              });
+            });
+          }
+          if (data.cursor !== undefined) s.cursor = data.cursor;
+        } catch (_) { /* network blip — try again next tick */ }
+      }
+      // Faster than the full-render poll: bound updates are 10s of bytes.
+      await new Promise(function (r) { setTimeout(r, document.hidden ? 4000 : 400); });
+    }
+  }
 
   // ─── Cross-device reactivity poll ─────────────────────────────────
   // Render-as-query has no server push (canisters can't initiate
@@ -595,6 +762,12 @@
         var batch = await resp.json();
         if (batch.unchanged) continue;
         if (batch.batchId && batch.batchId === lastBatchId) continue;
+        // While the user's click POST is mid-consensus, the canister's
+        // current state is "pre-click" — applying this poll batch would
+        // visibly undo the user's optimistic action (e.g. paint a pixel
+        // and watch it flicker back to white). Skip this round; the
+        // POST will return its own up-to-date batch soon.
+        if (inFlightClicks > 0) continue;
         _applyBatch(batch, { keepState: true });
       } catch (e) {
         // network blip — try again next interval
@@ -606,12 +779,25 @@
   // these are background requests, no event triggers.
   var origFetch = window.fetch;
 
+  function _waspSnapChatToBottom() {
+    var sc = document.getElementById('chat-scroll');
+    if (sc) sc.scrollTop = sc.scrollHeight;
+  }
   function _waspHydrate() {
     _wireEvents();
     _waspPersistRestore();
-    var sc = document.getElementById('chat-scroll');
-    if (sc) sc.scrollTop = sc.scrollHeight;
+    _waspScanBindings();
+    // The first scroll fires before avatars + emoji fonts have laid
+    // out, so scrollHeight is short. Re-snap after the next paint and
+    // again once async fonts/images settle.
+    _waspSnapChatToBottom();
+    requestAnimationFrame(_waspSnapChatToBottom);
+    setTimeout(_waspSnapChatToBottom, 150);
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(_waspSnapChatToBottom).catch(function(){});
+    }
     _reactivityPoll();
+    _waspPollStores();
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _waspHydrate);

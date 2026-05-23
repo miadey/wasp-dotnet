@@ -24,6 +24,8 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(ChatService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(PixelService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(ImageStore))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(TetrisService))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(TetrisAssets))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspRouter))]
     [ModuleInitializer]
@@ -42,6 +44,7 @@ public static class Program
             builder.Services.AddSingleton<ChatService>();
             builder.Services.AddSingleton<PixelService>();
             builder.Services.AddSingleton<ImageStore>();
+            builder.Services.AddSingleton<TetrisService>();
             builder.Services.AddSingleton<IWaspRenderer>(sp =>
             {
                 var r = new WaspRouter(sp);
@@ -84,6 +87,95 @@ public static class Program
                 if (!images.TryGet(id, out var ct, out var data)) return null;
                 return (data, ct);
             });
+
+            // ─── Realtime stores ──────────────────────────────────
+            // Tiny typed query endpoints that return only the deltas
+            // a client hasn't seen yet. The bridge polls them every
+            // few hundred ms via [data-wasp-bind] — feels live, costs
+            // almost no bandwidth. Mutations still use existing
+            // /_wasp/event POST so reads/writes split cleanly:
+            //   read  = query (~300 ms, free)
+            //   write = update (~1.5 s, costs cycles)
+            var counterSvc = app.Services.GetRequiredService<CounterService>();
+            IcResponseCertV2.RegisterPassThroughPath("/api/counter", "GET");
+            IcServer.RegisterQueryHandler("/api/counter", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                long since = 0;
+                var s = ExtractQueryParam(req.Url, "since");
+                if (s is not null) long.TryParse(s, out since);
+                var json = counterSvc.DeltaSinceJson(since);
+                return (Encoding.UTF8.GetBytes(json), "application/json; charset=utf-8");
+            });
+
+            var placeSvc = app.Services.GetRequiredService<PixelService>();
+            IcResponseCertV2.RegisterPassThroughPath("/api/place", "GET");
+            IcServer.RegisterQueryHandler("/api/place", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                long since = 0;
+                var s = ExtractQueryParam(req.Url, "since");
+                if (s is not null) long.TryParse(s, out since);
+                var json = placeSvc.DeltaSinceJson(since);
+                return (Encoding.UTF8.GetBytes(json), "application/json; charset=utf-8");
+            });
+
+            // ─── Tetris (Blazor WebAssembly) ──────────────────────
+            // Static assets: index.html, app.css, audio.js, and the
+            // entire _framework/ tree (the .NET runtime + DLLs). The
+            // TetrisWasm publish output is embedded as managed
+            // resources via .csproj and registered here on init.
+            TetrisAssets.Register();
+
+            // Leaderboard API for the game to talk to. GET on the
+            // query path (~300 ms), POST on update (~1.5 s, only fires
+            // on game-over).
+            var tetris = app.Services.GetRequiredService<TetrisService>();
+            IcResponseCertV2.RegisterPassThroughPath("/api/tetris/scores", "GET");
+            IcServer.RegisterQueryHandler("/api/tetris/scores", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                int limit = 20;
+                var lim = ExtractQueryParam(req.Url, "limit");
+                if (lim is not null && int.TryParse(lim, out var n) && n > 0 && n <= 100) limit = n;
+                var top = tetris.Top(limit);
+                var sb = new StringBuilder();
+                sb.Append("{\"scores\":[");
+                for (int i = 0; i < top.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    var e = top[i];
+                    sb.Append("{\"username\":\"").Append(EscapeJson(e.Username))
+                      .Append("\",\"score\":").Append(e.Score)
+                      .Append(",\"lines\":").Append(e.Lines)
+                      .Append(",\"level\":").Append(e.Level)
+                      .Append(",\"atMs\":").Append(e.AtMs)
+                      .Append('}');
+                }
+                sb.Append("]}");
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+
+            app.MapPost("/api/tetris/score", async (HttpContext ctx) =>
+            {
+                using var body = new System.IO.MemoryStream();
+                await ctx.Request.Body.CopyToAsync(body);
+                var json = Encoding.UTF8.GetString(body.ToArray());
+                var username = ExtractJsonString(json, "username") ?? "Anonymous";
+                var scoreStr = ExtractJsonNumber(json, "score");
+                var linesStr = ExtractJsonNumber(json, "lines");
+                var levelStr = ExtractJsonNumber(json, "level");
+                long.TryParse(scoreStr, out var score);
+                int.TryParse(linesStr, out var lines);
+                int.TryParse(levelStr, out var level);
+                var rank = tetris.Submit(username, score, lines, level);
+                ctx.Response.StatusCode = 200;
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                var resp = "{\"rank\":" + (rank?.ToString() ?? "null") + "}";
+                var bytes = Encoding.UTF8.GetBytes(resp);
+                ctx.Response.ContentLength = bytes.Length;
+                await ctx.Response.Body.WriteAsync(bytes);
+            }).DisableAntiforgery();
         }
         catch (Exception ex)
         {
@@ -106,6 +198,55 @@ public static class Program
                 return Uri.UnescapeDataString(part.Substring(eq + 1));
         }
         return null;
+    }
+
+    private static string? ExtractJsonString(string json, string field)
+    {
+        var marker = "\"" + field + "\":\"";
+        int i = json.IndexOf(marker, StringComparison.Ordinal);
+        if (i < 0) return null;
+        i += marker.Length;
+        var sb = new StringBuilder();
+        while (i < json.Length)
+        {
+            var c = json[i];
+            if (c == '\\' && i + 1 < json.Length)
+            {
+                var esc = json[i + 1];
+                sb.Append(esc == 'n' ? '\n' : esc == 't' ? '\t' : esc);
+                i += 2; continue;
+            }
+            if (c == '"') break;
+            sb.Append(c); i++;
+        }
+        return sb.ToString();
+    }
+
+    private static string? ExtractJsonNumber(string json, string field)
+    {
+        var marker = "\"" + field + "\":";
+        int i = json.IndexOf(marker, StringComparison.Ordinal);
+        if (i < 0) return null;
+        i += marker.Length;
+        while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+        int start = i;
+        while (i < json.Length && (char.IsDigit(json[i]) || json[i] == '-' || json[i] == '.')) i++;
+        return start == i ? null : json.Substring(start, i - start);
+    }
+
+    private static string EscapeJson(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var sb = new StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (c == '\\') sb.Append("\\\\");
+            else if (c == '"') sb.Append("\\\"");
+            else if (c == '\n') sb.Append("\\n");
+            else if (c < 0x20) sb.Append($"\\u{(int)c:x4}");
+            else sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     private static void RegisterShell(IWaspRenderer renderer, string path)
@@ -139,6 +280,16 @@ public static class Program
         sb.Append("<a href=\"/weather\"").Append(Active("/weather")).Append("><span class=\"nav-i\">☂</span>Weather</a>");
         sb.Append("<a href=\"/chat\"").Append(Active("/chat")).Append("><span class=\"nav-i\">#</span>Chat</a>");
         sb.Append("<a href=\"/place\"").Append(Active("/place")).Append("><span class=\"nav-i\">▦</span>Place</a>");
+        // Tetris is a Blazor WASM SPA — full-page reload (no SPA nav
+        // since it has its own routing/runtime), so the link doesn't
+        // include the bridge intercept. The "/tetris" path matches
+        // both /tetris and /tetris/ for hover-active feedback.
+        var inTetris = normalized.StartsWith("/tetris", StringComparison.OrdinalIgnoreCase);
+        // data-wasp-no-spa: Tetris is a Blazor WASM sub-app; let the
+        // browser do a full-page load so the WASM bootstrapper runs.
+        sb.Append("<a href=\"/tetris\" data-wasp-no-spa")
+          .Append(inTetris ? " class=\"active\"" : "")
+          .Append("><span class=\"nav-i\">▼</span>Tetris</a>");
         sb.Append("</nav>");
         sb.Append("<div class=\"sidebar-foot\">on-chain · always</div>");
         sb.Append("</aside>");
@@ -254,10 +405,35 @@ public static class Program
             color: #fff; border: 0;
             padding: 0.55rem 1.1rem; border-radius: 8px;
             font-size: 0.95rem; font-weight: 500; cursor: pointer;
-            transition: filter 0.12s ease, transform 0.05s ease;
+            transition: filter 0.12s ease, transform 0.05s ease, opacity 0.12s ease;
         }
-        button.btn-primary:hover { filter: brightness(1.08); }
-        button.btn-primary:active { transform: translateY(1px); }
+        button.btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+        button.btn-primary:active:not(:disabled) { transform: translateY(1px); }
+        /* While the click POST is mid-consensus the bridge sets
+           disabled=true. Style it so the user sees the in-flight
+           state instead of an apparently clickable button. */
+        button.btn-primary:disabled {
+            cursor: progress;
+            opacity: 0.6;
+            background: linear-gradient(135deg, #5b8def 0%, #4a76d9 100%);
+            filter: none;
+            position: relative;
+        }
+        button.btn-primary:disabled::after {
+            content: "";
+            display: inline-block;
+            margin-left: 0.55rem;
+            width: 0.85rem; height: 0.85rem;
+            border: 2px solid rgba(255,255,255,0.4);
+            border-top-color: #fff;
+            border-radius: 50%;
+            vertical-align: -0.15rem;
+            animation: wasp-spin 0.7s linear infinite;
+        }
+        @keyframes wasp-spin {
+            from { transform: rotate(0deg); }
+            to   { transform: rotate(360deg); }
+        }
         .table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
         .table th, .table td {
             padding: 0.65rem 0.5rem;
@@ -734,12 +910,35 @@ public static class Program
 
         .px-toolbar {
             display: grid;
-            grid-template-columns: 200px 1fr auto;
+            grid-template-columns: auto 200px 1fr auto;
             gap: 1rem; align-items: center;
             background: var(--bg-elev);
             border: 1px solid var(--border);
             border-radius: 14px;
             padding: 0.9rem 1rem;
+        }
+
+        /* Cooldown status indicator — green plus when click is ready,
+           red countdown while we are within the per-user cooldown
+           window. Updated client-side by the bridge every 100 ms. */
+        .wasp-status {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-width: 42px; height: 42px; padding: 0 0.7rem;
+            border-radius: 10px;
+            font-weight: 700; font-size: 1.05rem;
+            font-variant-numeric: tabular-nums;
+            transition: background 0.15s, color 0.15s, border-color 0.15s;
+            user-select: none;
+        }
+        .wasp-status-ready {
+            background: rgba(46, 204, 113, 0.18);
+            color: #2ecc71;
+            border: 1px solid rgba(46, 204, 113, 0.45);
+        }
+        .wasp-status-cooling {
+            background: rgba(231, 76, 60, 0.18);
+            color: #ff6b5d;
+            border: 1px solid rgba(231, 76, 60, 0.5);
         }
         .px-username {
             background: #1e2129; color: #fff;

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Tetris · Blazor on ICP</title>
+    <base href="/tetris/" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet" />
+    <link href="app.css" rel="stylesheet" />
+</head>
+<body>
+    <div id="app">
+        <div class="boot-screen">
+            <div class="boot-mark">▦</div>
+            <div class="boot-text">Loading Tetris…</div>
+            <div class="boot-hint">first load: pulling .NET runtime &amp; game (~3 MB compressed) from canister</div>
+        </div>
+    </div>
+
+    <div id="blazor-error-ui">
+        Something went wrong. Reload the page to retry.
+        <a href="" class="reload">Reload</a>
+    </div>
+
+    <script src="_framework/blazor.webassembly.js"></script>
+    <script src="audio.js"></script>
+</body>
+</html>

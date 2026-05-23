@@ -7,6 +7,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO"
 
+# Publish the TetrisWasm Blazor WebAssembly project first on the host
+# (the docker image doesn't ship the Blazor WASM SDK targets). Its
+# publish output is picked up by BlazorWasp.csproj's <EmbeddedResource>
+# glob and embedded into the canister wasm as static assets.
+echo "[blazorwasp] publishing TetrisWasm (Blazor WebAssembly)..."
+dotnet publish aot/samples/TetrisWasm/TetrisWasm.csproj -c Release --nologo --verbosity quiet
+
 echo "[blazorwasp] AOT-compiling for wasm32-wasi via docker..."
 docker run --rm --platform linux/amd64 -v "$REPO:/work" -v wasp-nuget:/nuget \
   wasp-dotnet-build:latest \

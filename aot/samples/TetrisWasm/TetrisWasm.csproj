@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Tetris</RootNamespace>
+
+    <!-- We host this app at /tetris/ on the canister; the boot loader
+         needs a matching base href. -->
+    <StaticWebAssetBasePath>tetris</StaticWebAssetBasePath>
+
+    <!-- Skip the dev pre-rendered icudt files we don't need; cut size. -->
+    <BlazorWebAssemblyJiterpreter>true</BlazorWebAssemblyJiterpreter>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.*-*" />
+  </ItemGroup>
+
+</Project>

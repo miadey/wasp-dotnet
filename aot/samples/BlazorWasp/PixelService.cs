@@ -44,6 +44,16 @@ public sealed unsafe class PixelService
     // resets across canister upgrades; that's intentional for a demo).
     private readonly Dictionary<string, long> _cooldowns = new(StringComparer.OrdinalIgnoreCase);
 
+    // ─── Realtime delta log ──────────────────────────────────────────
+    // Heap-only ring buffer of the last MaxRecent placements. Each
+    // gets a monotonic cursor id; clients poll DeltasSince(theirCursor)
+    // and receive only the changes they haven't seen.  Survives across
+    // calls within a canister session; resets on upgrade (the next
+    // poll round-trip seeds fresh from the full grid Snapshot).
+    private const int MaxRecent = 1000;
+    private readonly Queue<(long id, int x, int y, byte color)> _recent = new();
+    private long _cursor;
+
     public int PaletteSize => Palette.Length;
     public long PlacedCount => Load().count;
 
@@ -103,8 +113,43 @@ public sealed unsafe class PixelService
         _grid = grid;
         Persist(grid, _placedCount);
         _cooldowns[username] = NowMs();
+        // Record delta so realtime clients see this without polling
+        // the whole grid.
+        _cursor++;
+        _recent.Enqueue((_cursor, x, y, (byte)colorIndex));
+        while (_recent.Count > MaxRecent) _recent.Dequeue();
         return true;
     }
+
+    /// <summary>
+    /// JSON delta for clients. If their cursor is current → unchanged.
+    /// If they've fallen too far behind (more than MaxRecent placements
+    /// ago) → tell them to resync with a full snapshot.
+    /// </summary>
+    public string DeltaSinceJson(long sinceCursor)
+    {
+        if (sinceCursor == _cursor)
+            return $"{{\"unchanged\":true,\"cursor\":{_cursor}}}";
+        // If client is behind by more than the ring buffer can cover,
+        // they need a full resync. The bridge handles that case by
+        // doing a full page render — same as today.
+        if (_recent.Count > 0 && sinceCursor < _recent.Peek().id - 1)
+            return $"{{\"resync\":true,\"cursor\":{_cursor}}}";
+        var sb = new System.Text.StringBuilder();
+        sb.Append("{\"cursor\":").Append(_cursor).Append(",\"changes\":[");
+        bool first = true;
+        foreach (var d in _recent)
+        {
+            if (d.id <= sinceCursor) continue;
+            if (!first) sb.Append(',');
+            sb.Append("[").Append(d.x).Append(',').Append(d.y).Append(',').Append(d.color).Append("]");
+            first = false;
+        }
+        sb.Append("]}");
+        return sb.ToString();
+    }
+
+    public long Cursor => _cursor;
 
     // ─── storage ─────────────────────────────────────────────────────
     private (byte[] grid, long count) Load()

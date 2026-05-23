@@ -48,6 +48,21 @@
     <UnmanagedEntryPointsAssembly Include="Wasp.AspNetCore" />
   </ItemGroup>
 
+  <!-- TetrisWasm Blazor WebAssembly publish output, embedded as
+       managed resources. Each file becomes available via
+       Assembly.GetManifestResourceStream("tetris/<path>") at runtime;
+       TetrisAssets registers them as static assets under /tetris/.
+       Build order: publish TetrisWasm first (build-and-deploy.sh
+       handles this), then this project picks up the publish dir.
+       Only embed the uncompressed versions — boundary nodes won't
+       transparently encode/decode brotli for us. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*"
+                      Exclude="..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*.br;..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*.gz">
+      <LogicalName>tetris/%(RecursiveDir)%(FileName)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
   <Target Name="StripWasmComponentTypeWit" BeforeTargets="LinkNativeLlvm">
     <ItemGroup>
       <WasmComponentTypeWit Remove="@(WasmComponentTypeWit)" />

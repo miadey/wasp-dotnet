@@ -29,4 +29,17 @@ public sealed unsafe class CounterService
         if (Ic0.stable64_size() == 0) Ic0.stable64_grow(1);
         Ic0.stable64_write(StableOffset, (ulong)(nint)(&value), sizeof(int));
     }
+
+    /// <summary>
+    /// Realtime delta: the count itself doubles as the monotonic cursor.
+    /// Clients poll with their last-seen cursor; we either reply
+    /// "unchanged" (8 bytes) or hand them the new value.
+    /// </summary>
+    public string DeltaSinceJson(long sinceCursor)
+    {
+        int cur = Count;
+        if ((long)cur == sinceCursor)
+            return $"{{\"unchanged\":true,\"cursor\":{cur}}}";
+        return $"{{\"value\":{cur},\"cursor\":{cur}}}";
+    }
 }
