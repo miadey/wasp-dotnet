@@ -355,7 +355,10 @@ public static class Program
         .dc-channel-tag { color: #80848e; font-size: 0.8rem; }
         .dc-messages {
             flex: 1 1 auto; min-height: 0; overflow-y: auto;
-            padding: 1rem 0; scroll-behavior: smooth;
+            padding: 1rem 0;
+            /* No scroll-behavior: smooth — we manage scrollTop
+               explicitly after each render-batch, and smooth would
+               animate a visible top→bottom scroll on every poll. */
         }
         .dc-messages::-webkit-scrollbar { width: 14px; }
         .dc-messages::-webkit-scrollbar-track { background: #2b2d31; }
@@ -457,34 +460,46 @@ public static class Program
         .dc-react-badge .dc-react-e { font-size: 0.9rem; line-height: 1; }
         .dc-react-badge .dc-react-n { font-variant-numeric: tabular-nums; }
 
-        /* Per-message actions bar — top-right of message on hover.
-           Replaces the old always-on-hover emoji picker with a small
-           toolbar (reply + emoji-trigger). Emoji popover opens on
-           click rather than hover so picking is two intentional taps,
-           not a hover-fight. */
+        /* Per-message actions — inline at the end of the head row,
+           right after the timestamp + reactions. Hidden until the
+           message is hovered or focused. For grouped messages
+           (dc-message-head-compact) the head row exists only to host
+           the actions, so it has no min-height. */
         .dc-actions {
-            position: absolute;
-            top: -14px; right: 1rem;
-            display: flex; gap: 1px;
+            /* Sit inline immediately after the timestamp — no
+               margin-left:auto, so it doesn't get pushed to the far
+               right of the row. */
+            margin-left: 0.4rem;
+            position: relative;            /* anchor for the popover */
+            display: inline-flex;
+            align-items: center; gap: 1px;
             background: #2b2d31;
             border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 8px;
-            padding: 2px;
-            box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+            border-radius: 6px;
+            padding: 1px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
             opacity: 0; pointer-events: none;
-            transform: translateY(4px);
-            transition: opacity 0.12s ease, transform 0.12s ease;
-            z-index: 5;
+            transition: opacity 0.12s ease;
+            flex: 0 0 auto;
         }
         .dc-message:hover .dc-actions,
         .dc-message:focus-within .dc-actions {
-            opacity: 1; pointer-events: auto; transform: translateY(0);
+            opacity: 1; pointer-events: auto;
+        }
+        .dc-message-head-compact {
+            min-height: 0; margin-bottom: 0;
+            /* Grouped (no username/time) — actions land at the left
+               of the head row, vertically aligned with where the
+               username would be on the previous non-grouped row. */
+        }
+        .dc-message-grouped .dc-message-head-compact {
+            margin-top: 0;
         }
         .dc-action {
             background: transparent; border: 0; cursor: pointer;
-            padding: 0.3rem 0.5rem;
-            border-radius: 5px;
-            font-size: 1rem; line-height: 1;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.95rem; line-height: 1;
             color: #b5bac1;
             text-decoration: none;
             transition: background 0.1s, color 0.1s;
@@ -492,9 +507,8 @@ public static class Program
         .dc-action:hover { background: rgba(255,255,255,0.08); color: #fff; }
         .dc-action:active { transform: scale(0.94); }
 
-        /* Generic popover container — toggled to display:flex when JS
-           adds [data-open]. Inner emoji-popover floats below the
-           trigger button. */
+        /* Generic popover — toggled to display:flex when JS adds
+           [data-open]. Drops below the trigger pill. */
         .dc-popover {
             position: absolute;
             top: calc(100% + 4px); right: 0;

@@ -105,9 +105,9 @@
                                 <span class="dc-reply-quote-text">@Truncate(parent.Text, 80)</span>
                             </div>
                         }
-                        @if (!grouped)
-                        {
-                            <div class="dc-message-head">
+                        <div class="dc-message-head @(grouped ? "dc-message-head-compact" : null)">
+                            @if (!grouped)
+                            {
                                 <span class="dc-username" style="@UsernameStyle(msg.Username)">@msg.Username</span>
                                 <span class="dc-time">@FormatTime(msg.AtMs)</span>
                                 @if (liveReactions.Count > 0)
@@ -124,8 +124,24 @@
                                         }
                                     </span>
                                 }
+                            }
+                            <div class="dc-actions" aria-hidden="true">
+                                <button type="button" class="dc-action"
+                                        data-wasp-reply-to="@msg.Id"
+                                        aria-label="reply">↩</button>
+                                <button type="button" class="dc-action"
+                                        data-wasp-popover-trigger
+                                        aria-label="add reaction">☺</button>
+                                <div class="dc-popover dc-emoji-popover" data-wasp-popover>
+                                    @foreach (var emoji in ChatService.ReactionEmojis)
+                                    {
+                                        <button type="button" class="dc-react-pick"
+                                                data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{emoji}\"}}")'
+                                                aria-label="react @emoji">@emoji</button>
+                                    }
+                                </div>
                             </div>
-                        }
+                        </div>
                         @if (!string.IsNullOrEmpty(msg.Text))
                         {
                             <div class="dc-text">@msg.Text</div>
@@ -136,22 +152,6 @@
                                 <img src="/_chat/img?id=@msg.ImageId" alt="attachment" loading="lazy" />
                             </a>
                         }
-                    </div>
-                    <div class="dc-actions" aria-hidden="true">
-                        <button type="button" class="dc-action"
-                                data-wasp-reply-to="@msg.Id"
-                                aria-label="reply">↩</button>
-                        <button type="button" class="dc-action"
-                                data-wasp-popover-trigger
-                                aria-label="add reaction">☺</button>
-                        <div class="dc-popover dc-emoji-popover" data-wasp-popover>
-                            @foreach (var emoji in ChatService.ReactionEmojis)
-                            {
-                                <button type="button" class="dc-react-pick"
-                                        data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{emoji}\"}}")'
-                                        aria-label="react @emoji">@emoji</button>
-                            }
-                        </div>
                     </div>
                 </div>
                 prevUser = msg.Username;

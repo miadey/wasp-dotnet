@@ -140,7 +140,11 @@
         return;
       }
       var batch = await resp.json();
-      _applyBatch(batch);
+      // Sends snap to bottom (user wants to see their new message
+      // / image). Reactions, create-room, replies — preserve scroll
+      // so clicking 👍 on an older message doesn't yank the view.
+      var isSend = !!(args.text || args.imageData);
+      _applyBatch(batch, { scrollStrategy: isSend ? 'tail' : 'preserve' });
     } catch (err) {
       console.warn('[wasp] event error', err);
       clearedEls.forEach(function (c) { c.el.value = c.prev; });
@@ -177,7 +181,15 @@
     // background reactivity poll — sends and SPA nav want the fresh
     // server state untouched.
     var kept = (opts && opts.keepState) ? _snapshotKeepState(target) : null;
-    var scrollKept = (opts && opts.keepState) ? _snapshotScroll() : null;
+    // Scroll strategy: 'tail' snaps to bottom (default for sends,
+    // SPA nav into a new room — show the latest message). 'preserve'
+    // restores the prior scrollTop (sticky-to-bottom if was near
+    // bottom). 'preserve' is the default for reactions, replies,
+    // create-room — anywhere the user isn't expecting to be yanked
+    // around.
+    var scrollStrategy = (opts && opts.scrollStrategy)
+        || ((opts && opts.keepState) ? 'preserve' : 'tail');
+    var scrollKept = (scrollStrategy === 'preserve') ? _snapshotScroll() : null;
 
     target.innerHTML = batch.html;
     lastBatchId = batch.batchId || lastBatchId;
@@ -197,8 +209,11 @@
     // bottom — chat list, log viewer, etc. Looks for a #chat-scroll
     // id for now; generalise to a data-wasp-stick attribute when the
     // need arises.
-    var scroller = document.getElementById('chat-scroll');
-    if (scroller && !(kept || scrollKept)) scroller.scrollTop = scroller.scrollHeight;
+    // Tail snap — only when no explicit scroll restore happened.
+    if (scrollStrategy === 'tail' && !scrollKept) {
+      var scroller = document.getElementById('chat-scroll');
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    }
   }
 
   // ─── data-wasp-keep — survive reactivity-poll DOM swaps ───────────
