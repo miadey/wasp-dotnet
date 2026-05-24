@@ -261,9 +261,12 @@
     // need arises.
     // Tail snap — only when no explicit scroll restore happened.
     if (scrollStrategy === 'tail' && !scrollKept) {
-      _waspSnapChatToBottom();
-      requestAnimationFrame(_waspSnapChatToBottom);
-      setTimeout(_waspSnapChatToBottom, 150);
+      _waspChatScrollWatch();
+    } else if (target.querySelector && target.querySelector('#chat-scroll')) {
+      // Even when not tailing, re-attach the observer to the new
+      // #chat-scroll element so future content growth keeps users
+      // pinned to bottom (when they were already there).
+      _waspChatScrollWatch();
     }
   }
 
@@ -783,21 +786,81 @@
     var sc = document.getElementById('chat-scroll');
     if (sc) sc.scrollTop = sc.scrollHeight;
   }
+
+  // Reactive scroll-to-bottom. The messages container changes height
+  // multiple times after the initial render: avatars paint, emoji
+  // fonts swap in, inline reactions push lines down, images decode.
+  // A handful of fixed-delay snaps misses some of these. Instead,
+  // watch the scrollHeight while the user is "near bottom" and
+  // re-snap any time it grows. The instant the user scrolls up to
+  // read history, we stop forcing them back down.
+  var _chatStickToBottom = true;
+  var _chatObserver = null;
+  function _waspChatScrollWatch() {
+    var sc = document.getElementById('chat-scroll');
+    if (!sc) return;
+    if (_chatObserver) { try { _chatObserver.disconnect(); } catch (_) {} }
+    _chatStickToBottom = true;
+    _waspSnapChatToBottom();
+    if (!window.ResizeObserver) return;
+    sc.addEventListener('scroll', function () {
+      // Within 80px of the bottom counts as "still tailing".
+      _chatStickToBottom = (sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 80;
+    }, { passive: true });
+    _chatObserver = new ResizeObserver(function () {
+      if (_chatStickToBottom) sc.scrollTop = sc.scrollHeight;
+    });
+    _chatObserver.observe(sc);
+    // Children's individual layout shifts (avatar load, emoji glyph
+    // paint, image decode) also count.
+    Array.prototype.forEach.call(sc.children, function (c) {
+      try { _chatObserver.observe(c); } catch (_) {}
+    });
+  }
+
+  // ── Online presence ─────────────────────────────────────────
+  // Every page sends a heartbeat to /api/online-ping every 10 s and
+  // polls /api/online-count every 5 s. Any element with the attribute
+  // data-online-count has its textContent set to the live count, so a
+  // single <span data-online-count> in the sidebar (or a sub-app's
+  // header) automatically displays the number.
+  function _waspOnlineSetup() {
+    let p = localStorage.getItem('wasp-online-id');
+    if (!p) {
+      p = 'web-' + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem('wasp-online-id', p);
+    }
+    const n = localStorage.getItem('wasp-online-name') || 'Visitor';
+
+    function ping() {
+      try {
+        fetch('/api/online-ping?p=' + encodeURIComponent(p) + '&n=' + encodeURIComponent(n),
+          { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } })
+          .catch(() => {});
+      } catch (_) { /* ignore */ }
+    }
+    function refresh() {
+      fetch('/api/online-count').then(r => r.ok ? r.json() : null).then(j => {
+        if (!j) return;
+        const c = j.count || 0;
+        document.querySelectorAll('[data-online-count]').forEach(el => {
+          el.textContent = String(c);
+        });
+      }).catch(() => {});
+    }
+    ping(); refresh();
+    setInterval(ping, 10000);
+    setInterval(refresh, 5000);
+  }
+
   function _waspHydrate() {
     _wireEvents();
     _waspPersistRestore();
     _waspScanBindings();
-    // The first scroll fires before avatars + emoji fonts have laid
-    // out, so scrollHeight is short. Re-snap after the next paint and
-    // again once async fonts/images settle.
-    _waspSnapChatToBottom();
-    requestAnimationFrame(_waspSnapChatToBottom);
-    setTimeout(_waspSnapChatToBottom, 150);
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(_waspSnapChatToBottom).catch(function(){});
-    }
+    _waspChatScrollWatch();
     _reactivityPoll();
     _waspPollStores();
+    _waspOnlineSetup();
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _waspHydrate);

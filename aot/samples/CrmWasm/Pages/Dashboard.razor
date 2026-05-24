@@ -1,0 +1,115 @@
+@page "/"
+@page "/dashboard"
+@inject ApiClient Api
+@inject NavigationManager Nav
+
+<PageTitle>Dashboard · Wasp CRM</PageTitle>
+
+<div class="page-head">
+    <h1>Dashboard</h1>
+    <div class="page-sub">Live snapshot of your pipeline + activity</div>
+</div>
+
+@if (_loading)
+{
+    <div class="loading">Loading…</div>
+}
+else if (_d is null)
+{
+    <div class="empty"><p>Could not load dashboard data.</p></div>
+}
+else
+{
+    <div class="kpi-row">
+        <div class="kpi-card">
+            <div class="kpi-label">Weighted pipeline</div>
+            <div class="kpi-val">@FormatUsd(_d.WeightedCents)</div>
+            <div class="kpi-sub">Σ deal value × stage probability</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Won this month</div>
+            <div class="kpi-val accent">@FormatUsd(_d.WonThisMonthCents)</div>
+            <div class="kpi-sub">last 30 days</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Contacts</div>
+            <div class="kpi-val">@_d.ContactCount</div>
+            <div class="kpi-sub">on file</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">Tasks</div>
+            <div class="kpi-val @(_d.OverdueTasks > 0 ? "danger" : "")">@_d.OverdueTasks <span class="kpi-secondary">overdue</span></div>
+            <div class="kpi-sub">@_d.TodayTasks due today</div>
+        </div>
+    </div>
+
+    <div class="dash-grid">
+        <div class="dash-card">
+            <h3>Pipeline by stage</h3>
+            <div class="bar-chart">
+                @{ long max = 1; foreach (var s in _d.Stages) if (s.ValueCents > max) max = s.ValueCents; }
+                @foreach (var s in _d.Stages)
+                {
+                    var pct = (double)s.ValueCents / max * 100.0;
+                    <div class="bar-row">
+                        <div class="bar-label">@s.Name <span class="muted">(@s.Count)</span></div>
+                        <div class="bar-track">
+                            <div class="bar-fill" style="width:@(pct.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture))%; background:@StageColor(s.Name);"></div>
+                        </div>
+                        <div class="bar-val">@FormatUsd(s.ValueCents)</div>
+                    </div>
+                }
+            </div>
+        </div>
+
+        <div class="dash-card">
+            <h3>Hottest leads</h3>
+            @if (_d.HotLeads.Length == 0)
+            {
+                <p class="muted">No scored leads yet — log activities on contacts to start scoring.</p>
+            }
+            else
+            {
+                <ul class="lead-list">
+                    @foreach (var l in _d.HotLeads)
+                    {
+                        var url = "/crm/contacts/" + l.Id;
+                        <li class="lead-row" @onclick="() => Nav.NavigateTo(url)">
+                            <div class="avatar-mini" style="@HueStyle(l.Name)">@InitialOf(l.Name)</div>
+                            <div class="lead-name">@l.Name</div>
+                            <div class="lead-score">@l.Score</div>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    DashboardData? _d;
+    bool _loading = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _d = await Api.GetDashboardAsync();
+        _loading = false;
+    }
+
+    string FormatUsd(long cents) => $"${(cents / 100m):N0}";
+
+    string StageColor(string name) => name switch
+    {
+        "New"         => "#6366f1",
+        "Qualified"   => "#0ea5e9",
+        "Proposal"    => "#8b5cf6",
+        "Negotiation" => "#f59e0b",
+        "Won"         => "#10b981",
+        "Lost"        => "#64748b",
+        _             => "#94a3b8",
+    };
+
+    int HueFor(string s) { int h = 0; foreach (var c in s) h = (h * 131 + c) & 0xFFFFFF; return h % 360; }
+    string HueStyle(string s) => $"background: hsl({HueFor(s)}, 50%, 50%);";
+    string InitialOf(string s) => string.IsNullOrEmpty(s) ? "?" : s.Substring(0, 1).ToUpper();
+}

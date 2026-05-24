@@ -475,3 +475,18 @@ kbd {
     .leaderboard { margin: 1.5rem 0 0; padding: 1rem; }
     .lb-row { grid-template-columns: 32px 1fr 70px 40px 35px; font-size: 0.78rem; gap: 0.3rem; }
 }
+
+.start-online {
+    margin-top: 1rem;
+    display: inline-flex; align-items: center; gap: 0.45rem;
+    padding: 0.4rem 0.85rem;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 999px;
+    color: rgba(255,255,255,0.7); font-size: 0.85rem;
+}
+.start-online-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #22c55e; box-shadow: 0 0 8px rgba(34,197,94,0.7);
+    animation: tetris-online-pulse 2s ease-in-out infinite;
+}
+@keyframes tetris-online-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }

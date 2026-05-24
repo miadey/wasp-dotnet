@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Crm</RootNamespace>
+
+    <!-- Asset base path = /crm/ on the canister. Mirrors TetrisWasm. -->
+    <StaticWebAssetBasePath>crm</StaticWebAssetBasePath>
+
+    <BlazorWebAssemblyJiterpreter>true</BlazorWebAssemblyJiterpreter>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.*-*" />
+    <PackageReference Include="Microsoft.FluentUI.AspNetCore.Components" Version="5.0.0-rc.1-26048.1" />
+  </ItemGroup>
+
+</Project>

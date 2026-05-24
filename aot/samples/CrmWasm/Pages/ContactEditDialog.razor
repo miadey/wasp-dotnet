@@ -1,0 +1,50 @@
+@* Vanilla modal — no Fluent UI dependency. Parent passes the
+   Contact to edit + callbacks. *@
+
+<div class="modal-overlay" @onclick="OnCancel">
+    <div class="modal" @onclick:stopPropagation="true">
+        <header class="modal-head">
+            <h2>@Title</h2>
+            <button class="modal-close" @onclick="OnCancel" aria-label="Close">×</button>
+        </header>
+        <div class="modal-body">
+            <div class="form-row">
+                <label class="field">
+                    <span>First name</span>
+                    <input class="input" type="text" @bind="Contact.FirstName" @bind:event="oninput" />
+                </label>
+                <label class="field">
+                    <span>Last name</span>
+                    <input class="input" type="text" @bind="Contact.LastName"  @bind:event="oninput" />
+                </label>
+            </div>
+            <label class="field"><span>Email</span><input class="input" type="email" @bind="Contact.Email" @bind:event="oninput" /></label>
+            <label class="field"><span>Phone</span><input class="input" type="tel"   @bind="Contact.Phone" @bind:event="oninput" /></label>
+            <div class="form-row">
+                <label class="field"><span>Company</span><input class="input" type="text" @bind="Contact.Company" @bind:event="oninput" /></label>
+                <label class="field"><span>Title</span>  <input class="input" type="text" @bind="Contact.Title"   @bind:event="oninput" /></label>
+            </div>
+            <label class="field"><span>Tags (comma-separated)</span><input class="input" type="text" @bind="Contact.Tags" @bind:event="oninput" /></label>
+            <label class="field"><span>Notes</span><textarea class="input" rows="4" @bind="Contact.Notes" @bind:event="oninput"></textarea></label>
+        </div>
+        <footer class="modal-foot">
+            <button class="btn btn-stealth" @onclick="OnCancel">Cancel</button>
+            <button class="btn btn-accent" @onclick="Save" disabled="@(!CanSave())">@PrimaryLabel</button>
+        </footer>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Contact Contact { get; set; } = new();
+    [Parameter] public string Title { get; set; } = "Contact";
+    [Parameter] public string PrimaryLabel { get; set; } = "Save";
+    [Parameter] public EventCallback<Contact> OnSave { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    bool CanSave() =>
+        !string.IsNullOrWhiteSpace(Contact.FirstName) ||
+        !string.IsNullOrWhiteSpace(Contact.LastName)  ||
+        !string.IsNullOrWhiteSpace(Contact.Email);
+
+    Task Save() => OnSave.InvokeAsync(Contact);
+}

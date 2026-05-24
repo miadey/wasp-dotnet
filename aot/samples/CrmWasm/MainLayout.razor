@@ -1,0 +1,131 @@
+@inherits LayoutComponentBase
+@inject AuthService Auth
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+@implements IDisposable
+
+<div class="crm-shell">
+    <header class="crm-bar">
+        <a class="crm-back" href="/" data-wasp-no-spa>← back to the rest of the app</a>
+        <div class="crm-title">WASP·CRM<span class="dot">·</span>on<span class="dot">·</span>ICP</div>
+
+        @if (_authReady && Auth.IsAuthenticated)
+        {
+            <nav class="crm-nav">
+                <NavLink href="/crm/" Match="NavLinkMatch.All" class="navlink" ActiveClass="navlink-active">Dashboard</NavLink>
+                <NavLink href="/crm/contacts" class="navlink" ActiveClass="navlink-active">Contacts</NavLink>
+                <NavLink href="/crm/companies" class="navlink" ActiveClass="navlink-active">Companies</NavLink>
+                <NavLink href="/crm/deals" class="navlink" ActiveClass="navlink-active">Deals</NavLink>
+                <NavLink href="/crm/tasks" class="navlink" ActiveClass="navlink-active">Tasks</NavLink>
+                <button class="navlink navlink-search" @onclick="@(() => _showSearch = true)" title="Cmd-K / Ctrl-K">⌕ Search</button>
+            </nav>
+        }
+        else
+        {
+            <div class="crm-nav"></div>
+        }
+
+        <div class="crm-user">
+            <span class="online-badge" title="People active on Blazor-on-ICP right now">
+                <span class="online-dot"></span>
+                <span data-online-count>—</span> online
+            </span>
+            @if (Auth.IsAuthenticated)
+            {
+                <span class="crm-principal" title="@Auth.Principal">
+                    <span class="crm-principal-dot"></span>
+                    @Auth.ShortPrincipal
+                </span>
+                <button class="btn btn-stealth" @onclick="Logout">Sign out</button>
+            }
+            else if (_authReady)
+            {
+                <button class="btn btn-accent" @onclick="Login" disabled="@_busy">
+                    @(_busy ? "Connecting…" : "Sign in with Internet Identity")
+                </button>
+            }
+        </div>
+    </header>
+
+    <main class="crm-main">
+        @if (!_authReady)
+        {
+            <div class="auth-gate">
+                <div class="boot-mark">⌬</div>
+                <p>Checking Internet Identity…</p>
+            </div>
+        }
+        else if (!Auth.IsAuthenticated)
+        {
+            <div class="auth-gate">
+                <div class="boot-mark">⌬</div>
+                <h1>Sign in to Wasp CRM</h1>
+                <p class="auth-sub">
+                    This CRM lives on the Internet Computer. Authenticate with
+                    Internet Identity to access contacts, companies, deals, tasks
+                    and your activity timeline.
+                </p>
+                <button class="btn btn-accent btn-big" @onclick="Login" disabled="@_busy">
+                    @(_busy ? "Connecting…" : "Sign in with Internet Identity")
+                </button>
+                @if (!string.IsNullOrEmpty(Auth.LastError))
+                {
+                    <p class="auth-error">@Auth.LastError</p>
+                    <p class="auth-foot-small">If the popup didn't open, allow popups for this site and try again.</p>
+                }
+                <p class="auth-foot">No password. No subscription. Your data stays on-chain.</p>
+            </div>
+        }
+        else
+        {
+            @Body
+        }
+    </main>
+
+    @if (_showSearch && Auth.IsAuthenticated)
+    {
+        <SearchPalette OnClose="() => _showSearch = false" />
+    }
+</div>
+
+@code {
+    bool _busy = false;
+    bool _showSearch = false;
+    bool _authReady = false;
+    DotNetObjectReference<MainLayout>? _ref;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Auth.InitializeAsync();
+        _authReady = true;
+        _ref = DotNetObjectReference.Create(this);
+        try { await JS.InvokeVoidAsync("crmHotkeys.install", _ref); } catch { /* JS not present yet */ }
+    }
+
+    [JSInvokable]
+    public void OpenSearch()
+    {
+        if (!Auth.IsAuthenticated) return;
+        _showSearch = true;
+        StateHasChanged();
+    }
+
+    async Task Login()
+    {
+        _busy = true; StateHasChanged();
+        await Auth.LoginAsync();
+        _busy = false; StateHasChanged();
+    }
+
+    async Task Logout()
+    {
+        await Auth.LogoutAsync();
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        try { JS.InvokeVoidAsync("crmHotkeys.uninstall"); } catch { }
+        _ref?.Dispose();
+    }
+}

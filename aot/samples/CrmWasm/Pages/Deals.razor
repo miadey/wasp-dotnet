@@ -1,0 +1,266 @@
+@page "/deals"
+@inject ApiClient Api
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+<PageTitle>Deals · Wasp CRM</PageTitle>
+
+<div class="contacts-header">
+    <h1>Deals</h1>
+    <div class="contacts-actions">
+        <div class="kpi-inline">
+            <span class="muted">Weighted total:</span>
+            <strong>@FormatUsd(WeightedTotal())</strong>
+        </div>
+        <button class="btn btn-accent" @onclick="OpenNew">+ New deal</button>
+    </div>
+</div>
+
+@if (_loading)
+{
+    <div class="loading">Loading…</div>
+}
+else
+{
+    <div class="kanban">
+        @foreach (var stage in Enumerable.Range(0, _stageNames.Length))
+        {
+            var col = _byStage[stage];
+            <div class="kanban-col" data-stage="@stage"
+                 @ondragover:preventDefault="true"
+                 @ondragenter:preventDefault="true"
+                 @ondrop="@(e => OnDrop(e, stage))">
+                <div class="kanban-col-head" style="border-top-color:@StageColor(stage)">
+                    <div class="kanban-col-title">@_stageNames[stage]</div>
+                    <div class="kanban-col-meta">@col.Count · @FormatUsd(col.Sum(d => d.ValueCents))</div>
+                </div>
+                <div class="kanban-col-body">
+                    @foreach (var d in col)
+                    {
+                        var rotting = IsRotting(d);
+                        <div class="kanban-card @(rotting ? "rotting" : "")"
+                             draggable="true"
+                             @ondragstart="@(_ => OnDragStart(d.Id))"
+                             @onclick="() => OpenEdit(d)">
+                            <div class="kanban-card-title">@d.Title</div>
+                            <div class="kanban-card-meta">
+                                <span class="kanban-card-val">@d.ValueDisplay</span>
+                                <span class="muted">@d.Probability%</span>
+                            </div>
+                            @{
+                                var contact = LookupContact(d.ContactId);
+                                var company = LookupCompany(d.CompanyId);
+                            }
+                            @if (contact is not null || company is not null)
+                            {
+                                <div class="kanban-card-rel">
+                                    @if (contact is not null) { <span class="chip">@contact.DisplayName</span> }
+                                    @if (company is not null) { <span class="chip">@company.Name</span> }
+                                </div>
+                            }
+                            @if (rotting)
+                            {
+                                <div class="kanban-card-rot" title="Stuck in this stage">
+                                    🐌 stuck @DaysIn(d) d
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@if (_showDialog)
+{
+    <div class="modal-backdrop" @onclick="Close"></div>
+    <div class="modal" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <h2>@_dialogTitle</h2>
+            <button class="icon-btn" @onclick="Close">×</button>
+        </div>
+        <div class="modal-body">
+            <label class="field"><span>Title</span><input class="input" @bind="_draft.Title" /></label>
+            <div class="field-row">
+                <label class="field"><span>Value (USD)</span>
+                    <input class="input" type="number" min="0" step="100"
+                           value="@(_draft.ValueCents / 100)"
+                           @oninput="@(e => { long.TryParse(e.Value?.ToString(), out var v); _draft.ValueCents = v * 100; })" />
+                </label>
+                <label class="field"><span>Stage</span>
+                    <select class="input" @bind="_draft.Stage">
+                        @for (int i = 0; i < _stageNames.Length; i++)
+                        {
+                            var v = i; <option value="@v">@_stageNames[v]</option>
+                        }
+                    </select>
+                </label>
+            </div>
+            <div class="field-row">
+                <label class="field"><span>Contact</span>
+                    <select class="input" @bind="_draft.ContactId">
+                        <option value="0">— none —</option>
+                        @foreach (var c in _contacts) { <option value="@c.Id">@c.DisplayName</option> }
+                    </select>
+                </label>
+                <label class="field"><span>Company</span>
+                    <select class="input" @bind="_draft.CompanyId">
+                        <option value="0">— none —</option>
+                        @foreach (var c in _companies) { <option value="@c.Id">@c.Name</option> }
+                    </select>
+                </label>
+            </div>
+            <label class="field"><span>Expected close</span>
+                <input class="input" type="date"
+                       value="@FormatDate(_draft.ExpectedCloseAtMs)"
+                       @onchange="@(e => _draft.ExpectedCloseAtMs = ParseDate(e.Value?.ToString()))" />
+            </label>
+        </div>
+        <div class="modal-foot">
+            @if (_draft.Id > 0)
+            {
+                <button class="btn btn-danger" @onclick="Delete">Delete</button>
+            }
+            <div class="spacer"></div>
+            <button class="btn btn-stealth" @onclick="Close">Cancel</button>
+            <button class="btn btn-accent" @onclick="Save" disabled="@_saving">@(_saving ? "Saving…" : "Save")</button>
+        </div>
+    </div>
+}
+
+@code {
+    static readonly string[] _stageNames =
+        { "New", "Qualified", "Proposal", "Negotiation", "Won", "Lost" };
+    static readonly int[] _rotDays = { 14, 21, 30, 30, 0, 0 };
+
+    Deal[] _deals = Array.Empty<Deal>();
+    Contact[] _contacts = Array.Empty<Contact>();
+    Company[] _companies = Array.Empty<Company>();
+    List<Deal>[] _byStage = new[]
+    {
+        new List<Deal>(), new List<Deal>(), new List<Deal>(),
+        new List<Deal>(), new List<Deal>(), new List<Deal>(),
+    };
+    bool _loading = true;
+    bool _showDialog = false;
+    bool _saving = false;
+    Deal _draft = new();
+    string _dialogTitle = "";
+    long _dragId = 0;
+    Timer? _pollTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Load();
+        // Refresh kanban every 5 s so others' drags appear.
+        _pollTimer = new Timer(async _ => { await InvokeAsync(Load); }, null,
+            TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    async Task Load()
+    {
+        _deals     = await Api.ListDealsAsync();
+        _contacts  = await Api.ListContactsAsync();
+        _companies = await Api.ListCompaniesAsync();
+        for (int i = 0; i < _byStage.Length; i++) _byStage[i].Clear();
+        foreach (var d in _deals)
+        {
+            var s = Math.Max(0, Math.Min(_stageNames.Length - 1, d.Stage));
+            _byStage[s].Add(d);
+        }
+        _loading = false;
+        StateHasChanged();
+    }
+
+    long WeightedTotal() => _deals.Sum(d => d.ValueCents * d.Probability / 100);
+
+    Contact? LookupContact(long id) => id == 0 ? null : _contacts.FirstOrDefault(c => c.Id == id);
+    Company? LookupCompany(long id) => id == 0 ? null : _companies.FirstOrDefault(c => c.Id == id);
+
+    bool IsRotting(Deal d)
+    {
+        if (d.Stage >= 4) return false;
+        var rot = _rotDays[d.Stage];
+        if (rot == 0) return false;
+        var ageMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - d.StageChangedAtMs;
+        return ageMs > rot * 24L * 3600 * 1000;
+    }
+
+    long DaysIn(Deal d)
+    {
+        var ageMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - d.StageChangedAtMs;
+        return ageMs / (24L * 3600 * 1000);
+    }
+
+    void OnDragStart(long id) { _dragId = id; }
+
+    async Task OnDrop(DragEventArgs e, int stage)
+    {
+        if (_dragId == 0) return;
+        var id = _dragId; _dragId = 0;
+        var saved = await Api.MoveDealStageAsync(id, stage);
+        if (saved is not null) await Load();
+    }
+
+    void OpenNew()
+    {
+        _draft = new Deal
+        {
+            Stage = 0,
+            ExpectedCloseAtMs = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeMilliseconds(),
+        };
+        _dialogTitle = "New deal";
+        _showDialog = true;
+    }
+
+    void OpenEdit(Deal d)
+    {
+        _draft = new Deal
+        {
+            Id = d.Id, Title = d.Title, ContactId = d.ContactId, CompanyId = d.CompanyId,
+            ValueCents = d.ValueCents, Stage = d.Stage,
+            ExpectedCloseAtMs = d.ExpectedCloseAtMs, StageChangedAtMs = d.StageChangedAtMs,
+            CreatedAtMs = d.CreatedAtMs, UpdatedAtMs = d.UpdatedAtMs,
+        };
+        _dialogTitle = "Edit deal";
+        _showDialog = true;
+    }
+
+    void Close() { _showDialog = false; _saving = false; }
+
+    async Task Save()
+    {
+        _saving = true;
+        if (_draft.Id == 0) await Api.CreateDealAsync(_draft);
+        else                await Api.UpdateDealAsync(_draft);
+        _showDialog = false;
+        _saving = false;
+        await Load();
+    }
+
+    async Task Delete()
+    {
+        if (_draft.Id == 0) return;
+        await Api.DeleteDealAsync(_draft.Id);
+        _showDialog = false;
+        await Load();
+    }
+
+    string FormatUsd(long cents) => $"${cents / 100m:N0}";
+    string FormatDate(long ms)
+        => ms == 0 ? "" : DateTimeOffset.FromUnixTimeMilliseconds(ms).ToString("yyyy-MM-dd");
+    long ParseDate(string? s)
+        => DateTime.TryParse(s, out var d) ? new DateTimeOffset(d, TimeSpan.Zero).ToUnixTimeMilliseconds() : 0;
+
+    string StageColor(int i) => i switch
+    {
+        0 => "#6366f1", 1 => "#0ea5e9", 2 => "#8b5cf6",
+        3 => "#f59e0b", 4 => "#10b981", 5 => "#64748b", _ => "#94a3b8",
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_pollTimer is not null) await _pollTimer.DisposeAsync();
+    }
+}

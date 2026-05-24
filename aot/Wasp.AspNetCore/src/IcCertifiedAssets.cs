@@ -98,6 +98,17 @@ public static class IcCertifiedAssets
     public static HashTree.Labeled BuildV1Subtree() => new(Label, BuildAssetTree());
 
     /// <summary>
+    /// Build the v1 subtree with the named asset revealed and every other
+    /// leaf pruned. Used by <see cref="BuildHeaderValue"/> to keep the
+    /// IC-Certificate header below the IC gateway's HTTP/2 header limit
+    /// when many assets are registered. The root hash matches the
+    /// full-tree variant, so the boundary's verification of certified_data
+    /// still succeeds.
+    /// </summary>
+    public static HashTree.Labeled BuildV1SubtreePruned(string revealPath) =>
+        new(Label, BuildAssetTreeImpl(revealPath));
+
+    /// <summary>
     /// Notify the certified-data store that a registered subtree changed
     /// (used by <see cref="IcResponseCertV2"/> after a path is registered).
     /// Combines this assembly's v1 tree with the v2 contributor (if any)
@@ -162,17 +173,64 @@ public static class IcCertifiedAssets
         UpdateCertifiedData();
     }
 
-    private static HashTree BuildAssetTree()
+    private static HashTree BuildAssetTree() => BuildAssetTreeImpl(revealPath: null);
+
+    /// <summary>
+    /// Build the asset tree, optionally REVEALING only the requested path's
+    /// leaf and pruning every other label down to its hash. The pruned
+    /// witness has the same root hash as the full tree but is O(log N) in
+    /// size instead of O(N). Crucial when N gets large (e.g. a Blazor WASM
+    /// publish output with 100+ files) — without pruning, the resulting
+    /// IC-Certificate header bursts the HTTP/2 gateway's header limits and
+    /// the boundary returns "http2 stream error" instead of the response.
+    /// </summary>
+    private static HashTree BuildAssetTreeImpl(string? revealPath)
     {
         if (_entries.Count == 0) return HashTree.Empty.Instance;
         var pairs = new List<KeyValuePair<byte[], HashTree>>(_entries.Count);
         foreach (var kvp in _entries)
         {
             var labelBytes = Encoding.UTF8.GetBytes(kvp.Key);
-            pairs.Add(new KeyValuePair<byte[], HashTree>(
-                labelBytes, new HashTree.Leaf(kvp.Value)));
+            HashTree leaf = new HashTree.Leaf(kvp.Value);
+            // When pruning, ONLY the matched label keeps its leaf revealed;
+            // every other leaf becomes Pruned(sha256(leaf-domain || value)).
+            if (revealPath is not null && kvp.Key != revealPath)
+            {
+                leaf = new HashTree.Pruned(leaf.Hash);
+            }
+            pairs.Add(new KeyValuePair<byte[], HashTree>(labelBytes, leaf));
         }
-        return HashTree.BuildBalancedLabeled(pairs);
+        var tree = HashTree.BuildBalancedLabeled(pairs);
+        if (revealPath is null) return tree;
+        // Collapse forks whose BOTH children are pruned into a single
+        // Pruned(hash) node — drastically shrinks the witness when the
+        // revealed leaf is one of many siblings.
+        return Collapse(tree);
+    }
+
+    private static HashTree Collapse(HashTree t)
+    {
+        switch (t)
+        {
+            case HashTree.Fork f:
+                var l = Collapse(f.Left);
+                var r = Collapse(f.Right);
+                if (l is HashTree.Pruned && r is HashTree.Pruned)
+                {
+                    // Compute the original fork hash, then prune.
+                    return new HashTree.Pruned(new HashTree.Fork(l, r).Hash);
+                }
+                return new HashTree.Fork(l, r);
+            case HashTree.Labeled lab:
+                var sub = Collapse(lab.Subtree);
+                if (sub is HashTree.Pruned)
+                {
+                    return new HashTree.Pruned(new HashTree.Labeled(lab.Label, sub).Hash);
+                }
+                return new HashTree.Labeled(lab.Label, sub);
+            default:
+                return t;
+        }
     }
 
     /// <summary>
@@ -201,7 +259,9 @@ public static class IcCertifiedAssets
         // witness verifiable against that root we wrap our subtree with a
         // Pruned sibling carrying v2's subtree hash. When v2 isn't
         // registered, the v1 subtree IS the root and no wrapping is needed.
-        HashTree tree = BuildV1Subtree();
+        // The v1 subtree is pruned to reveal only the requested path —
+        // see BuildV1SubtreePruned for why.
+        HashTree tree = BuildV1SubtreePruned(path);
         var v2 = AdditionalSubtreeProvider?.Invoke();
         if (v2 is not null)
         {

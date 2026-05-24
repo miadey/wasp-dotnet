@@ -1,0 +1,160 @@
+@page "/companies"
+@inject ApiClient Api
+@inject NavigationManager Nav
+
+<PageTitle>Companies · Wasp CRM</PageTitle>
+
+<div class="contacts-header">
+    <h1>Companies</h1>
+    <div class="contacts-actions">
+        <button class="btn btn-accent" @onclick="OpenNew">+ New company</button>
+    </div>
+</div>
+
+@if (_loading)
+{
+    <div class="loading">Loading…</div>
+}
+else if (_items.Length == 0)
+{
+    <div class="empty">
+        <h2>No companies yet</h2>
+        <p>Click <strong>+ New company</strong> to add one.</p>
+    </div>
+}
+else
+{
+    <table class="grid">
+        <thead>
+            <tr>
+                <th style="width:40px"></th>
+                <th>Name</th>
+                <th>Industry</th>
+                <th>Size</th>
+                <th>Website</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var c in PageItems())
+            {
+                <tr class="grid-row" @onclick="() => OpenEdit(c)">
+                    <td><div class="avatar-mini" style="@HueStyle(c.Name)">@InitialOf(c.Name)</div></td>
+                    <td><strong>@c.Name</strong></td>
+                    <td>@c.Industry</td>
+                    <td>@c.Size</td>
+                    <td>@c.Website</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <div class="pager">
+        <button @onclick="Prev" disabled="@(_page == 0)">‹ Prev</button>
+        <span class="pager-info">
+            @(_page * _pageSize + 1)–@Math.Min((_page + 1) * _pageSize, _items.Length) of @_items.Length
+        </span>
+        <button @onclick="Next" disabled="@((_page + 1) * _pageSize >= _items.Length)">Next ›</button>
+    </div>
+}
+
+@if (_showDialog)
+{
+    <div class="modal-backdrop" @onclick="Close"></div>
+    <div class="modal" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <h2>@_dialogTitle</h2>
+            <button class="icon-btn" @onclick="Close">×</button>
+        </div>
+        <div class="modal-body">
+            <label class="field"><span>Name</span><input class="input" @bind="_draft.Name" /></label>
+            <label class="field"><span>Industry</span><input class="input" @bind="_draft.Industry" /></label>
+            <label class="field"><span>Size</span>
+                <select class="input" @bind="_draft.Size">
+                    <option value=""></option>
+                    <option>1-10</option><option>11-50</option>
+                    <option>51-200</option><option>201-1000</option>
+                    <option>1000+</option>
+                </select>
+            </label>
+            <label class="field"><span>Website</span><input class="input" placeholder="https://…" @bind="_draft.Website" /></label>
+            <label class="field"><span>Notes</span><textarea class="input ta" @bind="_draft.Notes"></textarea></label>
+        </div>
+        <div class="modal-foot">
+            @if (_draft.Id > 0)
+            {
+                <button class="btn btn-danger" @onclick="Delete">Delete</button>
+            }
+            <div class="spacer"></div>
+            <button class="btn btn-stealth" @onclick="Close">Cancel</button>
+            <button class="btn btn-accent" @onclick="Save" disabled="@_saving">@(_saving ? "Saving…" : "Save")</button>
+        </div>
+    </div>
+}
+
+@code {
+    Company[] _items = Array.Empty<Company>();
+    bool _loading = true;
+    bool _showDialog = false;
+    bool _saving = false;
+    Company _draft = new();
+    string _dialogTitle = "";
+    int _page = 0;
+    const int _pageSize = 25;
+
+    IEnumerable<Company> PageItems() => _items.Skip(_page * _pageSize).Take(_pageSize);
+    void Prev() { if (_page > 0) _page--; }
+    void Next() { if ((_page + 1) * _pageSize < _items.Length) _page++; }
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    async Task Load()
+    {
+        _loading = true;
+        _items = await Api.ListCompaniesAsync();
+        _loading = false;
+    }
+
+    void OpenNew()
+    {
+        _draft = new Company();
+        _dialogTitle = "New company";
+        _showDialog = true;
+    }
+
+    void OpenEdit(Company c)
+    {
+        _draft = new Company
+        {
+            Id = c.Id, Name = c.Name, Industry = c.Industry,
+            Size = c.Size, Website = c.Website, Notes = c.Notes
+        };
+        _dialogTitle = "Edit company";
+        _showDialog = true;
+    }
+
+    void Close() { _showDialog = false; _saving = false; }
+
+    async Task Save()
+    {
+        _saving = true;
+        if (_draft.Id == 0)
+            await Api.CreateCompanyAsync(_draft);
+        else
+            await Api.UpdateCompanyAsync(_draft);
+        _showDialog = false;
+        _saving = false;
+        await Load();
+    }
+
+    async Task Delete()
+    {
+        if (_draft.Id == 0) return;
+        await Api.DeleteCompanyAsync(_draft.Id);
+        _showDialog = false;
+        await Load();
+    }
+
+    int HueFor(string s) { int h = 0; foreach (var c in s) h = (h * 131 + c) & 0xFFFFFF; return h % 360; }
+    string HueStyle(string s) => $"background: hsl({HueFor(s)}, 50%, 50%);";
+    string InitialOf(string s) => string.IsNullOrEmpty(s) ? "?" : s.Substring(0, 1).ToUpper();
+}

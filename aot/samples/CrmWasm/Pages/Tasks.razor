@@ -1,0 +1,173 @@
+@page "/tasks"
+@inject ApiClient Api
+
+<PageTitle>Tasks · Wasp CRM</PageTitle>
+
+<div class="contacts-header">
+    <h1>Tasks</h1>
+    <div class="contacts-actions">
+        <button class="btn btn-accent" @onclick="OpenNew">+ New task</button>
+    </div>
+</div>
+
+@if (_loading)
+{
+    <div class="loading">Loading…</div>
+}
+else
+{
+    <div class="tasks-cols">
+        <div class="tasks-bucket overdue">
+            <h3>Overdue <span class="muted">@_overdue.Count</span></h3>
+            @if (_overdue.Count == 0) { <p class="muted">All clear.</p> }
+            @foreach (var t in _overdue) { @TaskRow(t) }
+        </div>
+        <div class="tasks-bucket today">
+            <h3>Today <span class="muted">@_today.Count</span></h3>
+            @if (_today.Count == 0) { <p class="muted">Nothing due today.</p> }
+            @foreach (var t in _today) { @TaskRow(t) }
+        </div>
+        <div class="tasks-bucket upcoming">
+            <h3>Upcoming <span class="muted">@_upcoming.Count</span></h3>
+            @if (_upcoming.Count == 0) { <p class="muted">No upcoming tasks.</p> }
+            @foreach (var t in _upcoming) { @TaskRow(t) }
+        </div>
+        <div class="tasks-bucket done">
+            <h3>Done <span class="muted">@_done.Count</span></h3>
+            @if (_done.Count == 0) { <p class="muted">No completed tasks yet.</p> }
+            @foreach (var t in _done) { @TaskRow(t) }
+        </div>
+    </div>
+}
+
+@if (_showDialog)
+{
+    <div class="modal-backdrop" @onclick="Close"></div>
+    <div class="modal" @onclick:stopPropagation="true">
+        <div class="modal-head">
+            <h2>@_dialogTitle</h2>
+            <button class="icon-btn" @onclick="Close">×</button>
+        </div>
+        <div class="modal-body">
+            <label class="field"><span>Title</span><input class="input" @bind="_draft.Title" /></label>
+            <div class="field-row">
+                <label class="field"><span>Due date</span>
+                    <input class="input" type="date"
+                           value="@FormatDate(_draft.DueAtMs)"
+                           @onchange="@(e => _draft.DueAtMs = ParseDate(e.Value?.ToString()))" />
+                </label>
+                <label class="field"><span>Priority</span>
+                    <select class="input" @bind="_draft.Priority">
+                        <option value="0">Low</option>
+                        <option value="1">Medium</option>
+                        <option value="2">High</option>
+                    </select>
+                </label>
+            </div>
+            <label class="field"><span>Notes</span><textarea class="input ta" @bind="_draft.Notes"></textarea></label>
+        </div>
+        <div class="modal-foot">
+            @if (_draft.Id > 0)
+            {
+                <button class="btn btn-danger" @onclick="Delete">Delete</button>
+            }
+            <div class="spacer"></div>
+            <button class="btn btn-stealth" @onclick="Close">Cancel</button>
+            <button class="btn btn-accent" @onclick="Save" disabled="@_saving">@(_saving ? "Saving…" : "Save")</button>
+        </div>
+    </div>
+}
+
+@code {
+    TaskItem[] _all = Array.Empty<TaskItem>();
+    List<TaskItem> _overdue = new(), _today = new(), _upcoming = new(), _done = new();
+    bool _loading = true;
+    bool _showDialog = false;
+    bool _saving = false;
+    TaskItem _draft = new();
+    string _dialogTitle = "";
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    async Task Load()
+    {
+        _loading = true;
+        _all = await Api.ListTasksAsync();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long dayMs = 24L * 3600 * 1000;
+        _overdue.Clear(); _today.Clear(); _upcoming.Clear(); _done.Clear();
+        foreach (var t in _all.OrderBy(t => t.DueAtMs == 0 ? long.MaxValue : t.DueAtMs))
+        {
+            if (t.Done) _done.Add(t);
+            else if (t.DueAtMs == 0) _upcoming.Add(t);
+            else if (t.DueAtMs < now) _overdue.Add(t);
+            else if (t.DueAtMs - now < dayMs) _today.Add(t);
+            else _upcoming.Add(t);
+        }
+        _loading = false;
+    }
+
+    RenderFragment TaskRow(TaskItem t) =>@<div class="task-row priority-@t.Priority">
+        <input type="checkbox" class="task-check" checked="@t.Done"
+               @onchange="@(_ => Toggle(t))" />
+        <div class="task-body" @onclick="() => OpenEdit(t)">
+            <div class="task-title @(t.Done ? "done" : "")">@t.Title</div>
+            <div class="task-meta">
+                <span class="prio prio-@t.Priority">@t.PriorityName</span>
+                @if (t.DueAtMs > 0) { <span class="muted">due @FormatDate(t.DueAtMs)</span> }
+            </div>
+        </div>
+    </div>;
+
+    async Task Toggle(TaskItem t)
+    {
+        t.Done = !t.Done;
+        await Api.UpdateTaskAsync(t);
+        await Load();
+    }
+
+    void OpenNew()
+    {
+        _draft = new TaskItem { Priority = 1, DueAtMs = DateTimeOffset.UtcNow.AddDays(1).ToUnixTimeMilliseconds() };
+        _dialogTitle = "New task";
+        _showDialog = true;
+    }
+
+    void OpenEdit(TaskItem t)
+    {
+        _draft = new TaskItem
+        {
+            Id = t.Id, Title = t.Title, Notes = t.Notes,
+            ContactId = t.ContactId, DealId = t.DealId,
+            DueAtMs = t.DueAtMs, Done = t.Done,
+            Priority = t.Priority, CreatedBy = t.CreatedBy,
+            CreatedAtMs = t.CreatedAtMs, UpdatedAtMs = t.UpdatedAtMs,
+        };
+        _dialogTitle = "Edit task";
+        _showDialog = true;
+    }
+
+    void Close() { _showDialog = false; _saving = false; }
+
+    async Task Save()
+    {
+        _saving = true;
+        if (_draft.Id == 0) await Api.CreateTaskAsync(_draft);
+        else                await Api.UpdateTaskAsync(_draft);
+        _showDialog = false; _saving = false;
+        await Load();
+    }
+
+    async Task Delete()
+    {
+        if (_draft.Id == 0) return;
+        await Api.DeleteTaskAsync(_draft.Id);
+        _showDialog = false;
+        await Load();
+    }
+
+    string FormatDate(long ms)
+        => ms == 0 ? "" : DateTimeOffset.FromUnixTimeMilliseconds(ms).ToString("yyyy-MM-dd");
+    long ParseDate(string? s)
+        => DateTime.TryParse(s, out var d) ? new DateTimeOffset(d, TimeSpan.Zero).ToUnixTimeMilliseconds() : 0;
+}

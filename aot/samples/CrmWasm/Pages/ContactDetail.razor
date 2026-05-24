@@ -1,0 +1,249 @@
+@page "/contacts/{Id:long}"
+@inject ApiClient Api
+@inject NavigationManager Nav
+@inject PresenceTracker Presence
+@implements IDisposable
+
+<PageTitle>@(_contact?.DisplayName ?? "Contact") · Wasp CRM</PageTitle>
+
+@if (_loading)
+{
+    <div class="loading">Loading…</div>
+}
+else if (_contact is null)
+{
+    <div class="empty">
+        <h2>Contact not found</h2>
+        <a class="btn btn-accent" href="/crm/">Back to contacts</a>
+    </div>
+}
+else
+{
+    <div class="detail-head">
+        <a class="btn btn-stealth" href="/crm/">← All contacts</a>
+
+        <div class="presence-stack" title="Currently viewing">
+            @foreach (var v in Presence.Viewers)
+            {
+                <span class="presence-dot" style="@HueStyle(v.Name)" title="@v.Name · last seen @AgoMs(v.LastSeenMs)">@InitialOf(v.Name)</span>
+            }
+            @if (Presence.Viewers.Length > 1)
+            {
+                <span class="presence-label">@Presence.Viewers.Length viewing</span>
+            }
+            else if (Presence.Viewers.Length == 1)
+            {
+                <span class="presence-label">just you</span>
+            }
+        </div>
+    </div>
+
+    <div class="detail-card">
+        <div class="detail-avatar" style="@HueStyle(_contact.DisplayName)">@_contact.Initials</div>
+        <div class="detail-headline">
+            <h1>@_contact.DisplayName</h1>
+            <div class="detail-sub">
+                @if (!string.IsNullOrEmpty(_contact.Title)) { @_contact.Title }
+                @if (!string.IsNullOrEmpty(_contact.Title) && !string.IsNullOrEmpty(_contact.Company)) { <text> · </text> }
+                @if (!string.IsNullOrEmpty(_contact.Company)) { @_contact.Company }
+            </div>
+            <div class="tag-row">
+                @foreach (var t in _contact.TagList) { <span class="tag">@t</span> }
+            </div>
+        </div>
+        <div class="detail-actions">
+            <button class="btn btn-accent" @onclick="OpenEdit">Edit</button>
+            <button class="btn btn-danger" @onclick="Delete">Delete</button>
+        </div>
+    </div>
+
+    <div class="detail-grid">
+        <div class="detail-card detail-pane">
+            <h3>Contact details</h3>
+            <dl>
+                <dt>Email</dt><dd>@(string.IsNullOrEmpty(_contact.Email) ? "—" : _contact.Email)</dd>
+                <dt>Phone</dt><dd>@(string.IsNullOrEmpty(_contact.Phone) ? "—" : _contact.Phone)</dd>
+                <dt>Company</dt><dd>@(string.IsNullOrEmpty(_contact.Company) ? "—" : _contact.Company)</dd>
+                <dt>Title</dt><dd>@(string.IsNullOrEmpty(_contact.Title) ? "—" : _contact.Title)</dd>
+                <dt>Lead score</dt>
+                <dd>
+                    <span class="lead-pill" title="Recent-90-day activity × recency weight">
+                        @_leadScore
+                    </span>
+                    @if (_leadScore == 0) { <span class="muted">— log an activity to start scoring</span> }
+                </dd>
+                <dt>Created</dt><dd>@FormatTime(_contact.CreatedAtMs)</dd>
+                <dt>Updated</dt><dd>@FormatTime(_contact.UpdatedAtMs)</dd>
+            </dl>
+        </div>
+        <div class="detail-card detail-pane">
+            <h3>Notes</h3>
+            <p>@(string.IsNullOrEmpty(_contact.Notes) ? "(empty)" : _contact.Notes)</p>
+        </div>
+    </div>
+
+    <div class="detail-card">
+        <div class="timeline-head">
+            <h3>Activity timeline</h3>
+            <div class="timeline-compose">
+                <select class="input input-mini" @bind="_actType">
+                    <option value="0">📝 Note</option>
+                    <option value="1">📞 Call</option>
+                    <option value="2">✉️ Email</option>
+                    <option value="3">🤝 Meeting</option>
+                </select>
+                <input class="input input-mini" placeholder="Subject" @bind="_actSubject" />
+                <input class="input" placeholder="What happened?" @bind="_actBody" />
+                <button class="btn btn-accent" @onclick="LogActivity" disabled="@_loggingAct">Log</button>
+            </div>
+        </div>
+
+        @if (_activities.Length == 0)
+        {
+            <p class="muted">No activity yet. Log the first interaction above.</p>
+        }
+        else
+        {
+            <ol class="timeline">
+                @foreach (var a in _activities)
+                {
+                    <li class="timeline-item">
+                        <div class="timeline-dot">@TypeEmoji(a.Type)</div>
+                        <div class="timeline-body">
+                            <div class="timeline-row">
+                                <strong>@(string.IsNullOrEmpty(a.Subject) ? a.TypeName : a.Subject)</strong>
+                                <span class="muted">@FormatTime(a.AtMs) @(string.IsNullOrEmpty(a.CreatedBy) ? "" : "· " + a.CreatedBy)</span>
+                            </div>
+                            @if (!string.IsNullOrEmpty(a.Body))
+                            {
+                                <div class="timeline-text">@a.Body</div>
+                            }
+                        </div>
+                        <button class="icon-btn" title="Delete activity"
+                                @onclick="() => DeleteActivity(a)">×</button>
+                    </li>
+                }
+            </ol>
+        }
+    </div>
+}
+
+@if (_showEdit && _contact is not null)
+{
+    <ContactEditDialog Contact="_draft"
+                       Title="Edit contact"
+                       PrimaryLabel="Save"
+                       OnSave="OnEditSaved"
+                       OnCancel="() => _showEdit = false" />
+}
+
+@code {
+    [Parameter] public long Id { get; set; }
+    Contact? _contact;
+    bool _loading = true;
+    bool _showEdit = false;
+    Contact _draft = new();
+
+    Activity[] _activities = Array.Empty<Activity>();
+    int _actType = 0;
+    string _actSubject = "";
+    string _actBody = "";
+    bool _loggingAct = false;
+    int _leadScore = 0;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading = true;
+        _contact = await Api.GetContactAsync(Id);
+        _loading = false;
+        if (_contact is not null)
+        {
+            Presence.OnChanged += OnPresenceChanged;
+            Presence.Start("contact:" + Id);
+            await ReloadActivities();
+        }
+    }
+
+    async Task ReloadActivities()
+    {
+        _activities = await Api.ListActivitiesAsync(contactId: Id);
+        _leadScore = await Api.LeadScoreAsync(Id);
+        StateHasChanged();
+    }
+
+    async Task LogActivity()
+    {
+        if (string.IsNullOrWhiteSpace(_actBody) && string.IsNullOrWhiteSpace(_actSubject)) return;
+        _loggingAct = true;
+        await Api.CreateActivityAsync(new Activity
+        {
+            Type = _actType, Subject = _actSubject, Body = _actBody,
+            ContactId = Id,
+        });
+        _actSubject = ""; _actBody = "";
+        _loggingAct = false;
+        await ReloadActivities();
+    }
+
+    async Task DeleteActivity(Activity a)
+    {
+        await Api.DeleteActivityAsync(a.Id);
+        await ReloadActivities();
+    }
+
+    string TypeEmoji(int t) => t switch { 1 => "📞", 2 => "✉️", 3 => "🤝", _ => "📝" };
+
+    void OnPresenceChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Presence.OnChanged -= OnPresenceChanged;
+        Presence.Stop();
+    }
+
+    void OpenEdit()
+    {
+        if (_contact is null) return;
+        _draft = new Contact
+        {
+            Id = _contact.Id,
+            FirstName = _contact.FirstName, LastName = _contact.LastName,
+            Email = _contact.Email, Phone = _contact.Phone,
+            Company = _contact.Company, Title = _contact.Title,
+            Tags = _contact.Tags, Notes = _contact.Notes,
+            CreatedAtMs = _contact.CreatedAtMs, UpdatedAtMs = _contact.UpdatedAtMs,
+        };
+        _showEdit = true;
+    }
+
+    async Task OnEditSaved(Contact edited)
+    {
+        var saved = await Api.UpdateContactAsync(edited);
+        _showEdit = false;
+        if (saved is not null) _contact = saved;
+    }
+
+    async Task Delete()
+    {
+        if (_contact is null) return;
+        if (await Api.DeleteContactAsync(_contact.Id))
+            Nav.NavigateTo("/crm/");
+    }
+
+    int HueFor(string s) { int h = 0; foreach (var c in s) h = (h * 131 + c) & 0xFFFFFF; return h % 360; }
+    string HueStyle(string s) => $"background: hsl({HueFor(s)}, 50%, 50%);";
+    string InitialOf(string s) => string.IsNullOrEmpty(s) ? "?" : s.Substring(0, 1).ToUpper();
+
+    string FormatTime(long ms)
+    {
+        if (ms <= 0) return "—";
+        var t = DateTimeOffset.FromUnixTimeMilliseconds(ms);
+        return t.ToString("yyyy-MM-dd HH:mm");
+    }
+    string AgoMs(long ms)
+    {
+        var ago = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - ms;
+        if (ago < 5000) return "just now";
+        return (ago / 1000) + "s ago";
+    }
+}

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wasp CRM · on the Internet Computer</title>
+    <base href="/crm/" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet" />
+    <link href="_content/Microsoft.FluentUI.AspNetCore.Components/css/reboot.css" rel="stylesheet" />
+    <link href="app.css" rel="stylesheet" />
+</head>
+<body>
+    <div id="app">
+        <div class="boot-screen">
+            <div class="boot-mark">⌬</div>
+            <div class="boot-text">Loading Wasp CRM…</div>
+            <div class="boot-hint">first load: pulling .NET runtime + Fluent UI from canister</div>
+        </div>
+    </div>
+
+    <div id="blazor-error-ui">
+        Something went wrong. Reload to retry.
+        <a href="" class="reload">Reload</a>
+    </div>
+
+    <script type="module" src="auth.js"></script>
+    <script src="_framework/blazor.webassembly.js"></script>
+    <script src="_content/Microsoft.FluentUI.AspNetCore.Components/js/loading-theme.js" type="text/javascript"></script>
+    <loading-theme storage-name="theme"></loading-theme>
+    <link href="_content/Microsoft.FluentUI.AspNetCore.Components/Microsoft.FluentUI.AspNetCore.Components.bundle.scp.css" rel="stylesheet" />
+</body>
+</html>

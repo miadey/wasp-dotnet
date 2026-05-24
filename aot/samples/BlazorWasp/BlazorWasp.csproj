@@ -61,6 +61,10 @@
                       Exclude="..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*.br;..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*.gz">
       <LogicalName>tetris/%(RecursiveDir)%(FileName)%(Extension)</LogicalName>
     </EmbeddedResource>
+    <EmbeddedResource Include="..\CrmWasm\bin\Release\net10.0\publish\wwwroot\crm\**\*"
+                      Exclude="..\CrmWasm\bin\Release\net10.0\publish\wwwroot\crm\**\*.br;..\CrmWasm\bin\Release\net10.0\publish\wwwroot\crm\**\*.gz">
+      <LogicalName>crm/%(RecursiveDir)%(FileName)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <Target Name="StripWasmComponentTypeWit" BeforeTargets="LinkNativeLlvm">

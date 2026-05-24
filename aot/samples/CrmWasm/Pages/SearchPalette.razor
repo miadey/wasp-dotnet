@@ -1,0 +1,94 @@
+@inject ApiClient Api
+@inject NavigationManager Nav
+
+<div class="palette-backdrop" @onclick="Close"></div>
+<div class="palette" @onclick:stopPropagation="true">
+    <div class="palette-input-row">
+        <span class="palette-icon">⌕</span>
+        <input class="palette-input"
+               placeholder="Search contacts, companies, deals…"
+               @bind="_q" @bind:event="oninput" @bind:after="OnTyped" autofocus />
+        <span class="palette-hint">esc</span>
+    </div>
+    <div class="palette-results">
+        @if (_results is null)
+        {
+            <div class="palette-empty">Start typing to search.</div>
+        }
+        else
+        {
+            if (_results.Contacts.Length > 0)
+            {
+                <div class="palette-section">Contacts</div>
+                @foreach (var h in _results.Contacts)
+                {
+                    <button class="palette-hit" @onclick="@(() => Go($"/crm/contacts/{h.Id}"))">
+                        <span class="palette-hit-label">@h.Label</span>
+                        <span class="palette-hit-sub">@h.Sub</span>
+                    </button>
+                }
+            }
+            if (_results.Companies.Length > 0)
+            {
+                <div class="palette-section">Companies</div>
+                @foreach (var h in _results.Companies)
+                {
+                    <button class="palette-hit" @onclick="@(() => Go("/crm/companies"))">
+                        <span class="palette-hit-label">@h.Label</span>
+                        <span class="palette-hit-sub">@h.Sub</span>
+                    </button>
+                }
+            }
+            if (_results.Deals.Length > 0)
+            {
+                <div class="palette-section">Deals</div>
+                @foreach (var h in _results.Deals)
+                {
+                    <button class="palette-hit" @onclick="@(() => Go("/crm/deals"))">
+                        <span class="palette-hit-label">@h.Label</span>
+                        <span class="palette-hit-sub">@h.Sub</span>
+                    </button>
+                }
+            }
+            if (_results.Contacts.Length + _results.Companies.Length + _results.Deals.Length == 0)
+            {
+                <div class="palette-empty">No matches for “@_q”.</div>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter] public EventCallback OnClose { get; set; }
+    string _q = "";
+    SearchResults? _results;
+    CancellationTokenSource? _cts;
+
+    async Task OnTyped()
+    {
+        _cts?.Cancel();
+        _cts = new CancellationTokenSource();
+        var token = _cts.Token;
+        var query = _q;
+        try
+        {
+            await Task.Delay(150, token);
+            if (token.IsCancellationRequested) return;
+            if (string.IsNullOrWhiteSpace(query)) { _results = null; StateHasChanged(); return; }
+            _results = await Api.SearchAsync(query);
+            StateHasChanged();
+        }
+        catch (TaskCanceledException) { /* ignore */ }
+    }
+
+    async Task Go(string url)
+    {
+        await Close();
+        Nav.NavigateTo(url);
+    }
+
+    async Task Close()
+    {
+        if (OnClose.HasDelegate) await OnClose.InvokeAsync();
+    }
+}

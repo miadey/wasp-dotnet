@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -26,6 +28,9 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(ImageStore))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(TetrisService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(TetrisAssets))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CrmService))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(CrmAssets))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(PresenceService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspRouter))]
     [ModuleInitializer]
@@ -45,6 +50,8 @@ public static class Program
             builder.Services.AddSingleton<PixelService>();
             builder.Services.AddSingleton<ImageStore>();
             builder.Services.AddSingleton<TetrisService>();
+            builder.Services.AddSingleton<CrmService>();
+            builder.Services.AddSingleton<PresenceService>();
             builder.Services.AddSingleton<IWaspRenderer>(sp =>
             {
                 var r = new WaspRouter(sp);
@@ -176,6 +183,448 @@ public static class Program
                 ctx.Response.ContentLength = bytes.Length;
                 await ctx.Response.Body.WriteAsync(bytes);
             }).DisableAntiforgery();
+
+            // ─── CRM (Blazor WebAssembly) ─────────────────────────
+            CrmAssets.Register();
+            var crm = app.Services.GetRequiredService<CrmService>();
+            var presence = app.Services.GetRequiredService<PresenceService>();
+
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/contacts", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/contacts", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var qStr = ExtractQueryParam(req.Url, "q");
+                var matched = crm.Search(qStr);
+                var sb = new StringBuilder();
+                sb.Append("{\"items\":[");
+                for (int i = 0; i < matched.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    SerializeContact(sb, matched[i]);
+                }
+                sb.Append("],\"total\":").Append(matched.Count).Append("}");
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/contact-get", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/contact-get", (req) =>
+            {
+                // Single-contact lookup. Implemented as /api/crm/contact-get?id=N
+                // because IcServer query routing is exact-path only — for
+                // /api/crm/contacts/{id} we'd need prefix matching.
+                if (req.Method != "GET") return null;
+                var ids = ExtractQueryParam(req.Url, "id");
+                if (ids is null || !long.TryParse(ids, out var id)) return null;
+                var c = crm.Find(id);
+                if (c is null) return null;
+                var sb = new StringBuilder();
+                SerializeContact(sb, c);
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+
+            app.MapPost("/api/crm/contacts", async (HttpContext ctx) =>
+            {
+                var c = await ReadContactFromBodyAsync(ctx);
+                if (c is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.Create(c);
+                var sb = new StringBuilder();
+                SerializeContact(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+
+            app.MapMethods("/api/crm/contacts/{id:long}", new[] { "PUT" }, async (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return; }
+                var draft = await ReadContactFromBodyAsync(ctx);
+                if (draft is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.Update(id, draft);
+                if (saved is null) { ctx.Response.StatusCode = 404; return; }
+                var sb = new StringBuilder();
+                SerializeContact(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+
+            app.MapMethods("/api/crm/contacts/{id:long}", new[] { "DELETE" }, (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return Task.CompletedTask; }
+                var ok = crm.Delete(id);
+                ctx.Response.StatusCode = ok ? 200 : 404;
+                return Task.CompletedTask;
+            }).DisableAntiforgery();
+
+            // ─── Presence ─────────────────────────────────────────
+            // Use a query-param ?recordId=... POST to avoid the
+            // route-template + colon-in-value parsing quirks of
+            // Minimal API routing on the canister.
+            app.MapPost("/api/crm/presence-heartbeat", async (HttpContext ctx) =>
+            {
+                var recordId = ctx.Request.Query["recordId"].ToString();
+                using var body = new System.IO.MemoryStream();
+                await ctx.Request.Body.CopyToAsync(body);
+                var json = Encoding.UTF8.GetString(body.ToArray());
+                var principal = ExtractJsonString(json, "principal") ?? ExtractJsonString(json, "Principal") ?? "anon";
+                var name = ExtractJsonString(json, "name") ?? ExtractJsonString(json, "Name") ?? "Guest";
+                presence.Heartbeat(recordId, principal, name);
+                Reply.Print($"[crm-presence] heartbeat record={recordId} principal={principal} name={name}");
+                ctx.Response.StatusCode = 200;
+                await ctx.Response.WriteAsync("{\"ok\":true}");
+            }).DisableAntiforgery();
+
+            // ─── Global online counter ────────────────────────────
+            // Every browser tab pings /api/online-ping every ~10 s. The
+            // count of distinct principals that pinged within the last
+            // 30 s = "online right now". Heap-only; resets on upgrade.
+            app.MapPost("/api/online-ping", async (HttpContext ctx) =>
+            {
+                var p = ctx.Request.Query["p"].ToString();
+                if (string.IsNullOrEmpty(p)) p = "anon-" + Random.Shared.Next(10000, 99999);
+                var n = ctx.Request.Query["n"].ToString();
+                if (string.IsNullOrEmpty(n)) n = "Guest";
+                presence.Heartbeat("__online__", p, n);
+                ctx.Response.StatusCode = 200;
+                await ctx.Response.WriteAsync("{\"ok\":true}");
+            }).DisableAntiforgery();
+            IcResponseCertV2.RegisterPassThroughPath("/api/online-count", "GET");
+            IcServer.RegisterQueryHandler("/api/online-count", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var n = presence.Viewers("__online__").Count;
+                var resp = "{\"count\":" + n + "}";
+                return (Encoding.UTF8.GetBytes(resp), "application/json; charset=utf-8");
+            });
+
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/presence-get", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/presence-get", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var rid = ExtractQueryParam(req.Url, "recordId");
+                if (rid is null) return null;
+                var list = presence.Viewers(rid);
+                var sb = new StringBuilder();
+                sb.Append("{\"viewers\":[");
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    var v = list[i];
+                    sb.Append("{\"principal\":\"").Append(EscapeJson(v.Principal))
+                      .Append("\",\"name\":\"").Append(EscapeJson(v.Name))
+                      .Append("\",\"lastSeenMs\":").Append(v.LastSeenMs).Append('}');
+                }
+                sb.Append("]}");
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+
+            // ─── Companies ────────────────────────────────────────
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/companies", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/companies", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var items = crm.AllCompanies();
+                var sb = new StringBuilder();
+                sb.Append("{\"items\":[");
+                for (int i = 0; i < items.Count; i++) { if (i>0) sb.Append(','); SerializeCompany(sb, items[i]); }
+                sb.Append("],\"total\":").Append(items.Count).Append('}');
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/company-get", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/company-get", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var ids = ExtractQueryParam(req.Url, "id");
+                if (ids is null || !long.TryParse(ids, out var id)) return null;
+                var c = crm.FindCompany(id);
+                if (c is null) return null;
+                var sb = new StringBuilder(); SerializeCompany(sb, c);
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+            app.MapPost("/api/crm/companies", async (HttpContext ctx) =>
+            {
+                var c = await ReadCompanyFromBodyAsync(ctx);
+                if (c is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.CreateCompany(c);
+                var sb = new StringBuilder(); SerializeCompany(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+            app.MapMethods("/api/crm/companies/{id:long}", new[] { "PUT" }, async (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return; }
+                var d = await ReadCompanyFromBodyAsync(ctx);
+                if (d is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.UpdateCompany(id, d);
+                if (saved is null) { ctx.Response.StatusCode = 404; return; }
+                var sb = new StringBuilder(); SerializeCompany(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+            app.MapMethods("/api/crm/companies/{id:long}", new[] { "DELETE" }, (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return Task.CompletedTask; }
+                ctx.Response.StatusCode = crm.DeleteCompany(id) ? 200 : 404;
+                return Task.CompletedTask;
+            }).DisableAntiforgery();
+
+            // ─── Deals ────────────────────────────────────────────
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/deals", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/deals", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var items = crm.AllDeals();
+                var sb = new StringBuilder();
+                sb.Append("{\"items\":[");
+                for (int i = 0; i < items.Count; i++) { if (i>0) sb.Append(','); SerializeDeal(sb, items[i]); }
+                sb.Append("],\"total\":").Append(items.Count).Append('}');
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/deal-get", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/deal-get", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var ids = ExtractQueryParam(req.Url, "id");
+                if (ids is null || !long.TryParse(ids, out var id)) return null;
+                var d = crm.FindDeal(id);
+                if (d is null) return null;
+                var sb = new StringBuilder(); SerializeDeal(sb, d);
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+            app.MapPost("/api/crm/deals", async (HttpContext ctx) =>
+            {
+                var d = await ReadDealFromBodyAsync(ctx);
+                if (d is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.CreateDeal(d);
+                var sb = new StringBuilder(); SerializeDeal(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+            app.MapMethods("/api/crm/deals/{id:long}", new[] { "PUT" }, async (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return; }
+                var d = await ReadDealFromBodyAsync(ctx);
+                if (d is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.UpdateDeal(id, d);
+                if (saved is null) { ctx.Response.StatusCode = 404; return; }
+                var sb = new StringBuilder(); SerializeDeal(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+            app.MapMethods("/api/crm/deals/{id:long}", new[] { "DELETE" }, (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return Task.CompletedTask; }
+                ctx.Response.StatusCode = crm.DeleteDeal(id) ? 200 : 404;
+                return Task.CompletedTask;
+            }).DisableAntiforgery();
+            // Drag-to-stage on the kanban — light-weight PATCH-style endpoint.
+            app.MapPost("/api/crm/deal-stage", async (HttpContext ctx) =>
+            {
+                using var ms = new System.IO.MemoryStream();
+                await ctx.Request.Body.CopyToAsync(ms);
+                var json = Encoding.UTF8.GetString(ms.ToArray());
+                if (!long.TryParse(ExtractJsonNumber(json, "id"), out var id)) { ctx.Response.StatusCode = 400; return; }
+                if (!int.TryParse(ExtractJsonNumber(json, "stage"), out var stage)) { ctx.Response.StatusCode = 400; return; }
+                var d = crm.FindDeal(id);
+                if (d is null) { ctx.Response.StatusCode = 404; return; }
+                var saved = crm.UpdateDeal(id, d with { Stage = stage });
+                var sb = new StringBuilder(); SerializeDeal(sb, saved!);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+
+            // ─── Activities ───────────────────────────────────────
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/activities", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/activities", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                long.TryParse(ExtractQueryParam(req.Url, "contactId") ?? "0", out var cid);
+                long.TryParse(ExtractQueryParam(req.Url, "dealId") ?? "0", out var did);
+                var items = crm.ActivitiesFor(cid, did);
+                var sb = new StringBuilder();
+                sb.Append("{\"items\":[");
+                for (int i = 0; i < items.Count; i++) { if (i>0) sb.Append(','); SerializeActivity(sb, items[i]); }
+                sb.Append("],\"total\":").Append(items.Count).Append('}');
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+            app.MapPost("/api/crm/activities", async (HttpContext ctx) =>
+            {
+                var a = await ReadActivityFromBodyAsync(ctx);
+                if (a is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.CreateActivity(a);
+                var sb = new StringBuilder(); SerializeActivity(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+            app.MapMethods("/api/crm/activities/{id:long}", new[] { "DELETE" }, (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return Task.CompletedTask; }
+                ctx.Response.StatusCode = crm.DeleteActivity(id) ? 200 : 404;
+                return Task.CompletedTask;
+            }).DisableAntiforgery();
+
+            // ─── Tasks ────────────────────────────────────────────
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/tasks", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/tasks", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var items = crm.AllTasks();
+                var sb = new StringBuilder();
+                sb.Append("{\"items\":[");
+                for (int i = 0; i < items.Count; i++) { if (i>0) sb.Append(','); SerializeTask(sb, items[i]); }
+                sb.Append("],\"total\":").Append(items.Count).Append('}');
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+            app.MapPost("/api/crm/tasks", async (HttpContext ctx) =>
+            {
+                var t = await ReadTaskFromBodyAsync(ctx);
+                if (t is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.CreateTask(t);
+                var sb = new StringBuilder(); SerializeTask(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+            app.MapMethods("/api/crm/tasks/{id:long}", new[] { "PUT" }, async (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return; }
+                var d = await ReadTaskFromBodyAsync(ctx);
+                if (d is null) { ctx.Response.StatusCode = 400; return; }
+                var saved = crm.UpdateTask(id, d);
+                if (saved is null) { ctx.Response.StatusCode = 404; return; }
+                var sb = new StringBuilder(); SerializeTask(sb, saved);
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+            app.MapMethods("/api/crm/tasks/{id:long}", new[] { "DELETE" }, (HttpContext ctx) =>
+            {
+                if (!long.TryParse(ctx.Request.RouteValues["id"]?.ToString(), out var id))
+                { ctx.Response.StatusCode = 400; return Task.CompletedTask; }
+                ctx.Response.StatusCode = crm.DeleteTask(id) ? 200 : 404;
+                return Task.CompletedTask;
+            }).DisableAntiforgery();
+
+            // ─── Lead score (computed on the fly) ─────────────────
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/lead-score", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/lead-score", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var ids = ExtractQueryParam(req.Url, "contactId");
+                if (ids is null || !long.TryParse(ids, out var id)) return null;
+                var score = crm.LeadScore(id);
+                var resp = "{\"contactId\":" + id + ",\"score\":" + score + "}";
+                return (Encoding.UTF8.GetBytes(resp), "application/json; charset=utf-8");
+            });
+
+            // ─── Dashboard aggregates ─────────────────────────────
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/dashboard", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/dashboard", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var deals = crm.AllDeals();
+                var tasks = crm.AllTasks();
+                var contacts = crm.All();
+                var now = (long)(Ic0.time() / 1_000_000UL);
+                long monthStart = now - 30L * 24 * 3600 * 1000;
+                // Per-stage totals + weighted pipeline.
+                long[] stageValueCents = new long[6];
+                int[]  stageCount      = new int[6];
+                long   weightedCents   = 0;
+                long   wonMonthCents   = 0;
+                foreach (var d in deals)
+                {
+                    var s = Math.Max(0, Math.Min(5, d.Stage));
+                    stageValueCents[s] += d.ValueCents;
+                    stageCount[s]++;
+                    weightedCents += d.ValueCents * CrmService.StageProbability[s] / 100;
+                    if (s == (int)CrmService.DealStage.Won && d.StageChangedAtMs >= monthStart)
+                        wonMonthCents += d.ValueCents;
+                }
+                int overdueTasks = 0, todayTasks = 0;
+                long dayMs = 24L * 3600 * 1000;
+                foreach (var t in tasks)
+                {
+                    if (t.Done) continue;
+                    if (t.DueAtMs == 0) continue;
+                    if (t.DueAtMs < now) overdueTasks++;
+                    else if (t.DueAtMs - now < dayMs) todayTasks++;
+                }
+                // Hottest 5 leads.
+                var ranked = new List<(long id, string name, int score)>();
+                foreach (var c in contacts)
+                {
+                    var sc = crm.LeadScore(c.Id);
+                    if (sc > 0) ranked.Add((c.Id, (c.FirstName + " " + c.LastName).Trim(), sc));
+                }
+                ranked.Sort((a, b) => b.score.CompareTo(a.score));
+                var sb = new StringBuilder();
+                sb.Append("{\"stages\":[");
+                for (int i = 0; i < 6; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append("{\"name\":\"").Append(CrmService.StageNames[i])
+                      .Append("\",\"count\":").Append(stageCount[i])
+                      .Append(",\"valueCents\":").Append(stageValueCents[i])
+                      .Append(",\"probability\":").Append(CrmService.StageProbability[i]).Append('}');
+                }
+                sb.Append("],\"weightedCents\":").Append(weightedCents)
+                  .Append(",\"wonThisMonthCents\":").Append(wonMonthCents)
+                  .Append(",\"overdueTasks\":").Append(overdueTasks)
+                  .Append(",\"todayTasks\":").Append(todayTasks)
+                  .Append(",\"contactCount\":").Append(contacts.Count)
+                  .Append(",\"hotLeads\":[");
+                for (int i = 0; i < Math.Min(5, ranked.Count); i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append("{\"id\":").Append(ranked[i].id)
+                      .Append(",\"name\":\"").Append(EscapeJson(ranked[i].name))
+                      .Append("\",\"score\":").Append(ranked[i].score).Append('}');
+                }
+                sb.Append("]}");
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+
+            // ─── Global Cmd-K search ──────────────────────────────
+            IcResponseCertV2.RegisterPassThroughPath("/api/crm/search", "GET");
+            IcServer.RegisterQueryHandler("/api/crm/search", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var q = (ExtractQueryParam(req.Url, "q") ?? "").Trim().ToLowerInvariant();
+                var sb = new StringBuilder();
+                sb.Append("{\"contacts\":[");
+                int n = 0;
+                if (q.Length > 0)
+                {
+                    foreach (var c in crm.Search(q))
+                    {
+                        if (n++ > 0) sb.Append(',');
+                        sb.Append("{\"id\":").Append(c.Id)
+                          .Append(",\"label\":\"").Append(EscapeJson((c.FirstName + " " + c.LastName).Trim()))
+                          .Append("\",\"sub\":\"").Append(EscapeJson(c.Email)).Append("\"}");
+                        if (n >= 8) break;
+                    }
+                }
+                sb.Append("],\"companies\":[");
+                n = 0;
+                if (q.Length > 0) foreach (var c in crm.AllCompanies())
+                {
+                    if (!c.Name.ToLowerInvariant().Contains(q) &&
+                        !c.Industry.ToLowerInvariant().Contains(q)) continue;
+                    if (n++ > 0) sb.Append(',');
+                    sb.Append("{\"id\":").Append(c.Id)
+                      .Append(",\"label\":\"").Append(EscapeJson(c.Name))
+                      .Append("\",\"sub\":\"").Append(EscapeJson(c.Industry)).Append("\"}");
+                    if (n >= 8) break;
+                }
+                sb.Append("],\"deals\":[");
+                n = 0;
+                if (q.Length > 0) foreach (var d in crm.AllDeals())
+                {
+                    if (!d.Title.ToLowerInvariant().Contains(q)) continue;
+                    if (n++ > 0) sb.Append(',');
+                    sb.Append("{\"id\":").Append(d.Id)
+                      .Append(",\"label\":\"").Append(EscapeJson(d.Title))
+                      .Append("\",\"sub\":\"").Append(CrmService.StageNames[Math.Max(0,Math.Min(5,d.Stage))]).Append("\"}");
+                    if (n >= 8) break;
+                }
+                sb.Append("]}");
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
         }
         catch (Exception ex)
         {
@@ -184,6 +633,188 @@ public static class Program
             IcServer.InitFailureMessage = msg;
             Reply.Print("[init-fail] " + msg);
         }
+    }
+
+    private static void SerializeContact(StringBuilder sb, CrmService.Contact c)
+    {
+        sb.Append("{\"id\":").Append(c.Id)
+          .Append(",\"firstName\":\"").Append(EscapeJson(c.FirstName))
+          .Append("\",\"lastName\":\"").Append(EscapeJson(c.LastName))
+          .Append("\",\"email\":\"").Append(EscapeJson(c.Email))
+          .Append("\",\"phone\":\"").Append(EscapeJson(c.Phone))
+          .Append("\",\"company\":\"").Append(EscapeJson(c.Company))
+          .Append("\",\"title\":\"").Append(EscapeJson(c.Title))
+          .Append("\",\"notes\":\"").Append(EscapeJson(c.Notes))
+          .Append("\",\"tags\":\"").Append(EscapeJson(c.Tags))
+          .Append("\",\"createdAtMs\":").Append(c.CreatedAtMs)
+          .Append(",\"updatedAtMs\":").Append(c.UpdatedAtMs)
+          .Append('}');
+    }
+
+    private static async Task<CrmService.Contact?> ReadContactFromBodyAsync(HttpContext ctx)
+    {
+        using var ms = new System.IO.MemoryStream();
+        await ctx.Request.Body.CopyToAsync(ms);
+        var json = Encoding.UTF8.GetString(ms.ToArray());
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        var idStr = ExtractJsonNumber(json, "id");
+        long.TryParse(idStr, out var id);
+        return new CrmService.Contact(
+            id,
+            ExtractJsonString(json, "firstName") ?? "",
+            ExtractJsonString(json, "lastName")  ?? "",
+            ExtractJsonString(json, "email")     ?? "",
+            ExtractJsonString(json, "phone")     ?? "",
+            ExtractJsonString(json, "company")   ?? "",
+            ExtractJsonString(json, "title")     ?? "",
+            ExtractJsonString(json, "notes")     ?? "",
+            ExtractJsonString(json, "tags")      ?? "",
+            0, 0);
+    }
+
+    private static void SerializeCompany(StringBuilder sb, CrmService.Company c)
+    {
+        sb.Append("{\"id\":").Append(c.Id)
+          .Append(",\"name\":\"").Append(EscapeJson(c.Name))
+          .Append("\",\"industry\":\"").Append(EscapeJson(c.Industry))
+          .Append("\",\"website\":\"").Append(EscapeJson(c.Website))
+          .Append("\",\"size\":\"").Append(EscapeJson(c.Size))
+          .Append("\",\"notes\":\"").Append(EscapeJson(c.Notes))
+          .Append("\",\"createdAtMs\":").Append(c.CreatedAtMs)
+          .Append(",\"updatedAtMs\":").Append(c.UpdatedAtMs)
+          .Append('}');
+    }
+
+    private static async Task<CrmService.Company?> ReadCompanyFromBodyAsync(HttpContext ctx)
+    {
+        using var ms = new System.IO.MemoryStream();
+        await ctx.Request.Body.CopyToAsync(ms);
+        var json = Encoding.UTF8.GetString(ms.ToArray());
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        long.TryParse(ExtractJsonNumber(json, "id") ?? "0", out var id);
+        return new CrmService.Company(id,
+            ExtractJsonString(json, "name") ?? "",
+            ExtractJsonString(json, "industry") ?? "",
+            ExtractJsonString(json, "website") ?? "",
+            ExtractJsonString(json, "size") ?? "",
+            ExtractJsonString(json, "notes") ?? "",
+            0, 0);
+    }
+
+    private static void SerializeDeal(StringBuilder sb, CrmService.Deal d)
+    {
+        var s = Math.Max(0, Math.Min(5, d.Stage));
+        sb.Append("{\"id\":").Append(d.Id)
+          .Append(",\"title\":\"").Append(EscapeJson(d.Title))
+          .Append("\",\"contactId\":").Append(d.ContactId)
+          .Append(",\"companyId\":").Append(d.CompanyId)
+          .Append(",\"valueCents\":").Append(d.ValueCents)
+          .Append(",\"stage\":").Append(s)
+          .Append(",\"stageName\":\"").Append(CrmService.StageNames[s])
+          .Append("\",\"probability\":").Append(CrmService.StageProbability[s])
+          .Append(",\"expectedCloseAtMs\":").Append(d.ExpectedCloseAtMs)
+          .Append(",\"stageChangedAtMs\":").Append(d.StageChangedAtMs)
+          .Append(",\"createdAtMs\":").Append(d.CreatedAtMs)
+          .Append(",\"updatedAtMs\":").Append(d.UpdatedAtMs)
+          .Append('}');
+    }
+
+    private static async Task<CrmService.Deal?> ReadDealFromBodyAsync(HttpContext ctx)
+    {
+        using var ms = new System.IO.MemoryStream();
+        await ctx.Request.Body.CopyToAsync(ms);
+        var json = Encoding.UTF8.GetString(ms.ToArray());
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        long.TryParse(ExtractJsonNumber(json, "id") ?? "0", out var id);
+        long.TryParse(ExtractJsonNumber(json, "contactId") ?? "0", out var cid);
+        long.TryParse(ExtractJsonNumber(json, "companyId") ?? "0", out var coid);
+        long.TryParse(ExtractJsonNumber(json, "valueCents") ?? "0", out var val);
+        int.TryParse(ExtractJsonNumber(json, "stage") ?? "0", out var stage);
+        long.TryParse(ExtractJsonNumber(json, "expectedCloseAtMs") ?? "0", out var ec);
+        return new CrmService.Deal(id,
+            ExtractJsonString(json, "title") ?? "",
+            cid, coid, val, stage, ec, 0, 0, 0);
+    }
+
+    private static void SerializeActivity(StringBuilder sb, CrmService.Activity a)
+    {
+        var t = Math.Max(0, Math.Min(3, a.Type));
+        sb.Append("{\"id\":").Append(a.Id)
+          .Append(",\"type\":").Append(t)
+          .Append(",\"typeName\":\"").Append(CrmService.ActivityTypeNames[t])
+          .Append("\",\"subject\":\"").Append(EscapeJson(a.Subject))
+          .Append("\",\"body\":\"").Append(EscapeJson(a.Body))
+          .Append("\",\"contactId\":").Append(a.ContactId)
+          .Append(",\"dealId\":").Append(a.DealId)
+          .Append(",\"createdBy\":\"").Append(EscapeJson(a.CreatedBy))
+          .Append("\",\"atMs\":").Append(a.AtMs)
+          .Append('}');
+    }
+
+    private static async Task<CrmService.Activity?> ReadActivityFromBodyAsync(HttpContext ctx)
+    {
+        using var ms = new System.IO.MemoryStream();
+        await ctx.Request.Body.CopyToAsync(ms);
+        var json = Encoding.UTF8.GetString(ms.ToArray());
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        int.TryParse(ExtractJsonNumber(json, "type") ?? "0", out var t);
+        long.TryParse(ExtractJsonNumber(json, "contactId") ?? "0", out var cid);
+        long.TryParse(ExtractJsonNumber(json, "dealId") ?? "0", out var did);
+        long.TryParse(ExtractJsonNumber(json, "atMs") ?? "0", out var at);
+        return new CrmService.Activity(0, t,
+            ExtractJsonString(json, "subject") ?? "",
+            ExtractJsonString(json, "body") ?? "",
+            cid, did,
+            ExtractJsonString(json, "createdBy") ?? "Guest",
+            at);
+    }
+
+    private static void SerializeTask(StringBuilder sb, CrmService.TaskItem t)
+    {
+        var p = Math.Max(0, Math.Min(2, t.Priority));
+        sb.Append("{\"id\":").Append(t.Id)
+          .Append(",\"title\":\"").Append(EscapeJson(t.Title))
+          .Append("\",\"notes\":\"").Append(EscapeJson(t.Notes))
+          .Append("\",\"contactId\":").Append(t.ContactId)
+          .Append(",\"dealId\":").Append(t.DealId)
+          .Append(",\"dueAtMs\":").Append(t.DueAtMs)
+          .Append(",\"done\":").Append(t.Done ? "true" : "false")
+          .Append(",\"priority\":").Append(p)
+          .Append(",\"priorityName\":\"").Append(CrmService.TaskPriorityNames[p])
+          .Append("\",\"createdBy\":\"").Append(EscapeJson(t.CreatedBy))
+          .Append("\",\"createdAtMs\":").Append(t.CreatedAtMs)
+          .Append(",\"updatedAtMs\":").Append(t.UpdatedAtMs)
+          .Append('}');
+    }
+
+    private static async Task<CrmService.TaskItem?> ReadTaskFromBodyAsync(HttpContext ctx)
+    {
+        using var ms = new System.IO.MemoryStream();
+        await ctx.Request.Body.CopyToAsync(ms);
+        var json = Encoding.UTF8.GetString(ms.ToArray());
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        long.TryParse(ExtractJsonNumber(json, "id") ?? "0", out var id);
+        long.TryParse(ExtractJsonNumber(json, "contactId") ?? "0", out var cid);
+        long.TryParse(ExtractJsonNumber(json, "dealId") ?? "0", out var did);
+        long.TryParse(ExtractJsonNumber(json, "dueAtMs") ?? "0", out var due);
+        int.TryParse(ExtractJsonNumber(json, "priority") ?? "0", out var prio);
+        // crude bool extract — match the field text after the colon
+        bool done = json.IndexOf("\"done\":true", StringComparison.Ordinal) >= 0;
+        return new CrmService.TaskItem(id,
+            ExtractJsonString(json, "title") ?? "",
+            ExtractJsonString(json, "notes") ?? "",
+            cid, did, due, done, prio,
+            ExtractJsonString(json, "createdBy") ?? "Guest",
+            0, 0);
+    }
+
+    private static async Task WriteJsonAsync(HttpContext ctx, string json)
+    {
+        ctx.Response.StatusCode = 200;
+        ctx.Response.ContentType = "application/json; charset=utf-8";
+        var bytes = Encoding.UTF8.GetBytes(json);
+        ctx.Response.ContentLength = bytes.Length;
+        await ctx.Response.Body.WriteAsync(bytes);
     }
 
     private static string? ExtractQueryParam(string url, string name)
@@ -290,7 +921,16 @@ public static class Program
         sb.Append("<a href=\"/tetris\" data-wasp-no-spa")
           .Append(inTetris ? " class=\"active\"" : "")
           .Append("><span class=\"nav-i\">▼</span>Tetris</a>");
+        var inCrm = normalized.StartsWith("/crm", StringComparison.OrdinalIgnoreCase);
+        sb.Append("<a href=\"/crm\" data-wasp-no-spa")
+          .Append(inCrm ? " class=\"active\"" : "")
+          .Append("><span class=\"nav-i\">⌬</span>CRM</a>");
         sb.Append("</nav>");
+        // Online users — live count of clients heartbeating in the last
+        // 30 s. data-online-count is wired by wasp.js (poll + heartbeat
+        // every 10 s; updates the innerText reactively).
+        sb.Append("<div class=\"sidebar-online\"><span class=\"online-dot\"></span>");
+        sb.Append("<span data-online-count>—</span> online</div>");
         sb.Append("<div class=\"sidebar-foot\">on-chain · always</div>");
         sb.Append("</aside>");
         // Chat + Place want the full viewport (no padding, no max-width,
@@ -379,8 +1019,19 @@ public static class Program
             font-size: 1rem;
         }
         .nav a.active .nav-i { color: #fff; }
+        .sidebar-online {
+            margin-top: auto; padding: 1rem 1.5rem 0.4rem;
+            color: rgba(255,255,255,0.65); font-size: 0.82rem;
+            display: flex; align-items: center; gap: 0.45rem;
+        }
+        .sidebar-online .online-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #22c55e; box-shadow: 0 0 8px rgba(34,197,94,0.7);
+            animation: online-pulse 2s ease-in-out infinite;
+        }
+        @keyframes online-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
         .sidebar-foot {
-            margin-top: auto; padding: 1rem 1.5rem 0;
+            padding: 0.2rem 1.5rem 0.8rem;
             color: rgba(255,255,255,0.35); font-size: 0.75rem;
             letter-spacing: 0.04em; text-transform: uppercase;
         }

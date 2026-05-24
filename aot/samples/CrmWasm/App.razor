@@ -1,0 +1,19 @@
+@* Root component — vanilla Blazor Router. No Fluent UI dependency
+   (5.0 RC is mid-migration and renames broke too many tags;
+   styling matches Fluent design language via app.css). *@
+
+<Router AppAssembly="@typeof(App).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+        <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="@typeof(MainLayout)">
+            <div class="empty-page">
+                <h1>404</h1>
+                <p>No CRM page lives at this URL.</p>
+                <a class="btn btn-accent" href="/crm/">Back to contacts</a>
+            </div>
+        </LayoutView>
+    </NotFound>
+</Router>

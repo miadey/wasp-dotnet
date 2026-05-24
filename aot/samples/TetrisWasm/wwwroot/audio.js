@@ -78,3 +78,32 @@
     },
   };
 })();
+
+// ── Online presence ────────────────────────────────────────────────
+// Heartbeat to /api/online-ping every 10s and refresh [data-online-count]
+// every 5s. Same mechanism the BlazorWasp shell and CRM use, so the
+// Tetris start screen shows the canister-wide active-user count.
+(function() {
+    let p = localStorage.getItem('wasp-online-id');
+    if (!p) {
+        p = 'web-' + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem('wasp-online-id', p);
+    }
+    const n = localStorage.getItem('wasp-online-name') || 'Tetris player';
+    const ping = () => {
+        fetch('/api/online-ping?p=' + encodeURIComponent(p) + '&n=' + encodeURIComponent(n),
+            { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } })
+            .catch(() => {});
+    };
+    const refresh = () => {
+        fetch('/api/online-count').then(r => r.ok ? r.json() : null).then(j => {
+            if (!j) return;
+            document.querySelectorAll('[data-online-count]').forEach(el => {
+                el.textContent = String(j.count || 0);
+            });
+        }).catch(() => {});
+    };
+    ping(); refresh();
+    setInterval(ping, 10000);
+    setInterval(refresh, 5000);
+})();
