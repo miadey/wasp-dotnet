@@ -19,7 +19,7 @@ shared/tools/icp-publish/icp-publish.sh "$RAW" "$TMP"
 echo "[todoef] wasi-stub..."
 shared/tools/wasi-stub/target/release/wasi-stub "$TMP" "$TMP2"
 echo "[todoef] wasm-opt..."
-wasm-opt -Oz \
+wasm-opt -Oz --converge \
   --enable-bulk-memory --enable-multivalue --enable-reference-types \
   --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext \
   "$TMP2" -o "$OUT"

@@ -43,6 +43,16 @@
   var POLL_FAST_MS = 150;
   var POLL_SLOW_MS = 1000;
   var HOLD_TIMEOUT_MS = 25000;
+  // Idle tier — once a connection has been established and quiet for
+  // longer than IDLE_AFTER_MS, back the cadence off further so a truly
+  // idle tab costs ~1 poll / 2.5 s instead of 1 / 1 s. "Quiet" is
+  // tracked per-connection by recording the last-activity wall-clock
+  // ms on the same per-id _firstPollAt state object (key
+  // _firstPollAt['__act__' + id]); we stamp it on every non-empty poll
+  // response and on every inbound /_blazor POST. Warmup and the fast
+  // path are untouched, so first interaction is never delayed.
+  var POLL_IDLE_MS = 2500;
+  var IDLE_AFTER_MS = 30000;
 
   // SignalR's LongPolling connect sequence:
   //   1. POST /_blazor/negotiate         (we already speed this up via v2)
@@ -117,6 +127,10 @@
     // POST /_blazor?id=…  — batching of handshake + circuit-init
     if (url && url.match(/\/_blazor\?id=/) && method === 'POST') {
       var pid = _extractId(url);
+      // Inbound send = real traffic. Stamp last-activity so a tab that
+      // just sent a user event isn't immediately demoted to the idle
+      // tier on its next poll.
+      if (pid) _firstPollAt['__act__' + pid] = Date.now();
       var body = init && init.body;
       var bodyBytes;
       if (body instanceof Uint8Array) {
@@ -212,6 +226,9 @@
         if (resp.status !== 200) return resp;
         var cl = parseInt(resp.headers.get('content-length') || '-1', 10);
         if (cl > 0 || cl < 0) {
+          // Non-empty body = real traffic. Stamp last-activity so the
+          // idle tier resets and we stay responsive while data flows.
+          if (id) _firstPollAt['__act__' + id] = Date.now();
           // If we're owed a duplicate-ack strip (we fed SignalR a fake
           // ack during the batching), strip the server's real ack
           // prefix `{}\x1e` here so SignalR's blazorpack parser doesn't
@@ -237,7 +254,19 @@
           return resp;
         }
         var inWarmup = id && (Date.now() - _firstPollAt[id]) < WARMUP_WINDOW_MS;
-        await new Promise(function (r) { setTimeout(r, inWarmup ? POLL_FAST_MS : POLL_SLOW_MS); });
+        // After warmup, drop to the slow tier; if the connection has
+        // also been quiet (no non-empty poll / no inbound POST) for
+        // longer than IDLE_AFTER_MS, drop further to the idle tier.
+        var pollMs;
+        if (inWarmup) {
+          pollMs = POLL_FAST_MS;
+        } else {
+          var lastAct = id ? _firstPollAt['__act__' + id] : 0;
+          if (!lastAct) lastAct = id ? _firstPollAt[id] : 0;
+          var quietFor = lastAct ? (Date.now() - lastAct) : 0;
+          pollMs = (quietFor > IDLE_AFTER_MS) ? POLL_IDLE_MS : POLL_SLOW_MS;
+        }
+        await new Promise(function (r) { setTimeout(r, pollMs); });
       }
       return await origFetch(input, init);
     }

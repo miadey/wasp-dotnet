@@ -30,7 +30,7 @@ echo "[blazorvanilla] wasi-stub $TMP -> $TMP2..."
 shared/tools/wasi-stub/target/release/wasi-stub "$TMP" "$TMP2"
 
 echo "[blazorvanilla] wasm-opt $TMP2 -> $OUT..."
-wasm-opt -Oz \
+wasm-opt -Oz --converge \
   --enable-bulk-memory \
   --enable-multivalue \
   --enable-reference-types \

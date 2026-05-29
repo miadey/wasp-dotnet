@@ -19,7 +19,7 @@ TMP2=$(mktemp -t wasp-wa.XXXXXX.wasm)
 echo ">>> icp-publish + wasi-stub + wasm-opt"
 "$REPO/shared/tools/icp-publish/icp-publish.sh" "$OUT_RAW" "$TMP"
 "$REPO/shared/tools/wasi-stub/target/release/wasi-stub" "$TMP" "$TMP2"
-wasm-opt -Oz \
+wasm-opt -Oz --converge \
     --enable-bulk-memory --enable-multivalue --enable-reference-types \
     --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext \
     "$TMP2" -o "$OUT_FINAL"

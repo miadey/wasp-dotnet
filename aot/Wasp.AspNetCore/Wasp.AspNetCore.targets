@@ -12,6 +12,28 @@
   -->
 
   <PropertyGroup>
+    <!-- Centralized NativeAOT size + feature-switch defaults for IC canisters.
+         Hoisted from per-sample csprojs so MvcVanilla / WebApiVanilla / RazorOnIc /
+         AspNetCore* stop drifting larger than the Wasp.* samples that hand-rolled
+         these. Each is guarded so a leaf csproj can override by setting it first.
+         Code-section effect is modest (diagnostics are already dead-stubbed via
+         ILLink.Substitutions.xml; much of the win is DATA, which the IC does not
+         count) but it removes whole dead subsystems (COM/UTF7/BinaryFormatter/
+         Debugger) and standardizes the knobs. -->
+    <IlcOptimizationPreference Condition="'$(IlcOptimizationPreference)'==''">Size</IlcOptimizationPreference>
+    <OptimizationPreference Condition="'$(OptimizationPreference)'==''">Size</OptimizationPreference>
+    <IlcGenerateStackTraceData Condition="'$(IlcGenerateStackTraceData)'==''">false</IlcGenerateStackTraceData>
+    <EventSourceSupport Condition="'$(EventSourceSupport)'==''">false</EventSourceSupport>
+    <MetricsSupport Condition="'$(MetricsSupport)'==''">false</MetricsSupport>
+    <DebuggerSupport Condition="'$(DebuggerSupport)'==''">false</DebuggerSupport>
+    <HttpActivityPropagationSupport Condition="'$(HttpActivityPropagationSupport)'==''">false</HttpActivityPropagationSupport>
+    <BuiltInComInteropSupport Condition="'$(BuiltInComInteropSupport)'==''">false</BuiltInComInteropSupport>
+    <EnableUnsafeBinaryFormatterSerialization Condition="'$(EnableUnsafeBinaryFormatterSerialization)'==''">false</EnableUnsafeBinaryFormatterSerialization>
+    <EnableUnsafeUTF7Encoding Condition="'$(EnableUnsafeUTF7Encoding)'==''">false</EnableUnsafeUTF7Encoding>
+    <_AggressiveAttributeTrimming Condition="'$(_AggressiveAttributeTrimming)'==''">true</_AggressiveAttributeTrimming>
+  </PropertyGroup>
+
+  <PropertyGroup>
     <_WaspAspNetCoreDir>$(MSBuildThisFileDirectory)</_WaspAspNetCoreDir>
     <_WaspAspNetCoreSubstitutions>$(_WaspAspNetCoreDir)ILLink.Substitutions.xml</_WaspAspNetCoreSubstitutions>
   </PropertyGroup>

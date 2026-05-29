@@ -428,7 +428,7 @@ public sealed class CircuitHubFacade : IBlazorHubFacade, IAsyncDisposable
                 if (ctxField is null)
                 {
                     TraceLog($"[facade]   ERROR: _context field not found on {dispatcherType.FullName} (trim metadata missing)");
-                    return;
+                    throw new InvalidOperationException("Blazor circuit dispatch broken: RendererSynchronizationContextDispatcher._context not found — the ASP.NET Core renderer internals changed; the wasm-wasi inline-dispatch reflection hack in CircuitHubFacade needs updating.");
                 }
                 var rsc = (System.Threading.SynchronizationContext?)ctxField.GetValue(dispatcher);
                 if (rsc is null)

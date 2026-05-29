@@ -1,9 +1,7 @@
 // Candid interface for the CircuitOnIc backend canister.
 //
-// Exports four IC-WebSocket protocol methods (via Wasp.WebSockets) plus
-// the Wasp.AspNetCore HTTP handler. The IC-WS methods are what the
-// gateway calls; http_request is what blazor.web.js's first GET hits to
-// fetch the Counter HTML shell.
+// Exports the Wasp.AspNetCore HTTP handler. http_request is what
+// blazor.web.js's first GET hits to fetch the Counter HTML shell.
 
 type HeaderField = record { text; text };
 type HttpRequest = record {
@@ -18,50 +16,7 @@ type HttpResponse = record {
   body: blob;
 };
 
-type ClientPrincipal = principal;
-type ClientKey = record {
-  client_principal: ClientPrincipal;
-  client_nonce: nat64;
-};
-type WebsocketMessage = record {
-  client_key: ClientKey;
-  sequence_num: nat64;
-  timestamp: nat64;
-  is_service_message: bool;
-  content: blob;
-};
-type CanisterWsOpenArguments = record {
-  client_nonce: nat64;
-  gateway_principal: principal;
-};
-type CanisterWsCloseArguments = record { client_key: ClientKey };
-type CanisterWsMessageArguments = record { msg: WebsocketMessage };
-type CanisterWsGetMessagesArguments = record { nonce: nat64 };
-
-type CanisterOutputMessage = record {
-  client_key: ClientKey;
-  key: text;
-  content: blob;
-};
-type CanisterOutputCertifiedMessages = record {
-  messages: vec CanisterOutputMessage;
-  cert: blob;
-  tree: blob;
-  is_end_of_queue: bool;
-};
-
-type CanisterWsOpenResult = variant { Ok; Err: text };
-type CanisterWsCloseResult = variant { Ok; Err: text };
-type CanisterWsMessageResult = variant { Ok; Err: text };
-type CanisterWsGetMessagesResult = variant {
-  Ok: CanisterOutputCertifiedMessages;
-  Err: text;
-};
-
 service : {
+  // IC-WebSocket methods removed: this canister exports only http_request[_update] (long-polling transport).
   http_request: (HttpRequest) -> (HttpResponse) query;
-  ws_open: (CanisterWsOpenArguments) -> (CanisterWsOpenResult);
-  ws_close: (CanisterWsCloseArguments) -> (CanisterWsCloseResult);
-  ws_message: (CanisterWsMessageArguments) -> (CanisterWsMessageResult);
-  ws_get_messages: (CanisterWsGetMessagesArguments) -> (CanisterWsGetMessagesResult) query;
 }

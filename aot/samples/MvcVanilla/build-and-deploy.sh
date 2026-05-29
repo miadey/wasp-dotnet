@@ -40,7 +40,7 @@ docker run --rm --platform linux/amd64 \
 echo ">>> icp-publish + wasi-stub + wasm-opt"
 "$REPO/shared/tools/icp-publish/icp-publish.sh" "$OUT_RAW" "$TMP1"
 "$REPO/shared/tools/wasi-stub/target/release/wasi-stub" "$TMP1" "$TMP2"
-wasm-opt -Oz --enable-bulk-memory --enable-multivalue --enable-reference-types \
+wasm-opt -Oz --converge --enable-bulk-memory --enable-multivalue --enable-reference-types \
   --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext \
   "$TMP2" -o "$OUT_FINAL"
 rm -f "$TMP1" "$TMP2"
