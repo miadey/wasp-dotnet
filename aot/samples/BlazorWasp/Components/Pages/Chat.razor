@@ -154,45 +154,9 @@
 <PageTitle>#@activeRoom.Name · chat</PageTitle>
 
 <div class="dc-shell @(activeThreadId > 0 ? "dc-shell-thread" : null)">
-    <nav class="dc-rail" aria-label="Servers">
-        @foreach (var srv in serverList)
-        {
-            var railCls = (!dmMode && srv.Id == activeServerId) ? "dc-rail-server active" : "dc-rail-server";
-            var srvKind = Kinds.KindOf(srv.Id);
-            var railHref = srvKind == ServerKind.Forum ? $"/forum?s={srv.Id}" : srvKind == ServerKind.Feed ? $"/feed?s={srv.Id}" : $"/chat?s={srv.Id}";
-            <a class="@railCls" href="@railHref" data-server-id="@srv.Id" title="@(srv.Name + (srvKind == ServerKind.Forum ? " (forum)" : srvKind == ServerKind.Feed ? " (feed)" : "") + (Membership.IsPrivate(srv.Id) ? " · private" : ""))" aria-label="@srv.Name">
-                <span class="dc-rail-pill" aria-hidden="true"></span>
-                <span class="dc-rail-icon" style="@RailIconStyle(srv)">@RailGlyph(srv)</span>
-                @if (Membership.IsPrivate(srv.Id))
-                {
-                    <span class="dc-rail-lock" aria-hidden="true">🔒</span>
-                }
-            </a>
-        }
-        <span class="dc-rail-sep" aria-hidden="true"></span>
-        <a class="dc-rail-server dc-rail-dm @(dmMode ? "active" : null)" href="/chat?dm=1" data-dm-rail title="Direct Messages" aria-label="Direct Messages">
-            <span class="dc-rail-pill" aria-hidden="true"></span>
-            <span class="dc-rail-icon dc-rail-dm-icon" aria-hidden="true">✉</span>
-            <span class="dc-rail-dm-lock" aria-hidden="true">🔒</span>
-        </a>
-        @* Create-server: super-admin only. Hidden by default; the signed
-           server-actions client unhides it after /api/server/myrole confirms
-           super-admin, and routes the click through a signed update call. *@
-        <form class="dc-rail-add" autocomplete="off" data-create-server-ui hidden>
-            <input name="newServer" type="text" class="dc-rail-add-input" placeholder="name" maxlength="20" data-wasp-keep />
-            <input type="hidden" name="newServerKind" value="discussion" data-wasp-keep />
-            <div class="dc-kind-pick" role="group" aria-label="Server kind">
-                <button type="button" class="dc-kindbtn on" data-kind-pick="discussion" title="Discussion — live channels (chat)">💬</button>
-                <button type="button" class="dc-kindbtn" data-kind-pick="forum" title="Forum — topics, replies &amp; accepted answers">▤</button>
-                <button type="button" class="dc-kindbtn" data-kind-pick="feed" title="Feed — a timeline of posts">📰</button>
-            </div>
-            <label class="dc-rail-private" title="Private: members only (signed reads)">
-                <input name="newServerPrivate" type="checkbox" data-wasp-keep /> 🔒
-            </label>
-            <button type="button" class="dc-rail-server dc-rail-plus" data-create-server aria-label="Create server">+</button>
-        </form>
-    </nav>
-
+    @* The server/forum/feed rail moved to the shell sidebar (WrapWithSidebar →
+       .spaces): one labeled, named list instead of this icon rail. Channels for
+       the active server are still listed here in .dc-rooms. *@
     <aside class="dc-rooms">
         @if (dmMode)
         {

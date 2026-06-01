@@ -1052,11 +1052,12 @@
         var link = document.querySelector('.dc-room[data-room-id="' + rid + '"]');
         if (link) link.classList.toggle('dc-room-unread', hasUnread);
       });
-      // Aggregate unread onto each server-rail icon.
+      // Aggregate unread onto each server entry (the sidebar spaces list; the
+      // old icon rail used the same data-server-id + .dc-rail-unread hook).
       Object.keys(srvCh).forEach(function (sid) {
         var any = srvCh[sid].some(function (rid) { return (unreadByRoom[rid] || 0) > 0; });
-        var rail = document.querySelector('.dc-rail-server[data-server-id="' + sid + '"]');
-        if (rail) rail.classList.toggle('dc-rail-unread', any);
+        var entry = document.querySelector('[data-server-id="' + sid + '"]');
+        if (entry) entry.classList.toggle('dc-rail-unread', any);
       });
     }).catch(function () {});
   }

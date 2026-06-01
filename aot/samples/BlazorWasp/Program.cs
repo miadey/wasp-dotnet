@@ -96,7 +96,10 @@ public static class Program
                 r.AddRoute<StableExplorerPage>("/stable");
                 r.AddRoute<Forum>("/forum");
                 r.AddRoute<Feed>("/feed");
-                r.WrapShell((path, inner) => WrapWithSidebar(path, inner));
+                r.WrapShell((path, inner) => WrapWithSidebar(path, inner,
+                    sp.GetRequiredService<ServerService>(),
+                    sp.GetRequiredService<ServerKindService>(),
+                    sp.GetRequiredService<MembershipService>()));
                 return r;
             });
 
@@ -2448,6 +2451,37 @@ public static class Program
         return sb.ToString();
     }
 
+    // HTML-escape for raw StringBuilder markup (the shell builders below are
+    // not Razor, so they don't auto-escape). Server names allow <>&"' (only
+    // '|' and control chars are stripped at creation), so any name rendered
+    // into the sidebar MUST go through this.
+    private static string HtmlEsc(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var sb = new StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (c == '&') sb.Append("&amp;");
+            else if (c == '<') sb.Append("&lt;");
+            else if (c == '>') sb.Append("&gt;");
+            else if (c == '"') sb.Append("&quot;");
+            else if (c == '\'') sb.Append("&#39;");
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    // Sidebar space-icon: first letter + a stable hue from the name (mirrors the
+    // avatar colouring used in the feed). No Regex / no LINQ (AOT-safe).
+    private static string SpaceGlyph(string name)
+        => string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpperInvariant();
+    private static int SpaceHue(string name)
+    {
+        int h = 0;
+        foreach (var c in name) h = (h * 31 + c) & 0xffff;
+        return h % 360;
+    }
+
     private static void RegisterShell(IWaspRenderer renderer, string path)
     {
         var batch = renderer.Render(new WaspRenderRequest { Path = path });
@@ -2482,7 +2516,8 @@ public static class Program
     internal static string WaveMark() =>
         "<span class=\"sg-brand-mark\"><svg width='22' height='22' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' aria-hidden='true'><line x1='3' y1='10' x2='3' y2='14'/><line x1='8' y1='5' x2='8' y2='19'/><line x1='12' y1='2.5' x2='12' y2='21.5'/><line x1='16' y1='7' x2='16' y2='17'/><line x1='21' y1='11' x2='21' y2='13'/></svg></span>";
 
-    private static string WrapWithSidebar(string currentPath, string innerHtml)
+    private static string WrapWithSidebar(string currentPath, string innerHtml,
+        ServerService servers, ServerKindService kinds, MembershipService membership)
     {
         var normalized = currentPath;
         int q = normalized.IndexOf('?');
@@ -2528,11 +2563,53 @@ public static class Program
         sb.Append("<a class=\"brand\" href=\"/\">");
         sb.Append("<span class=\"brand-text\" style=\"display:inline-flex;align-items:center;gap:0.5rem;color:#5B8CFF\">").Append(WaveMark()).Append("</span><span class=\"brand-text\">WASP <span style=\"color:#5B8CFF;font-family:ui-monospace,monospace;font-weight:600\">Bzzz</span></span>");
         sb.Append("</a>");
-        // Chat product: nav is just the landing + the app. The other demo routes
-        // (counter/weather/place/tetris/crm) still exist but aren't promoted here.
-        sb.Append("<nav class=\"nav\">");
-        sb.Append("<a href=\"/\"").Append(Active("/")).Append("><span class=\"nav-i\">").Append(Icon("home")).Append("</span>Home</a>");
-        sb.Append("<a href=\"/chat\"").Append(Active("/chat")).Append("><span class=\"nav-i\">").Append(Icon("chat")).Append("</span>Chat</a>");
+        // ── Spaces nav: the app's servers grouped by kind (Servers / Forums /
+        // Feeds) + a Direct-messages entry. Replaces the old Home/Chat links.
+        // Pure Blazor SSR — the list is baked into the certified shell at deploy
+        // and refreshes within ~5s via the /_wasp/render poll (the sidebar lives
+        // inside #wasp-root). The per-group "+ New" buttons are super-admin-only
+        // (revealed by the signed client, same gate as the old create-server +),
+        // and the unread dot is toggled by the existing wasp.js bridge.
+        string queryStr = q >= 0 ? currentPath.Substring(q + 1) : "";
+        int activeS = 0; bool dmActive = false;
+        foreach (var part in queryStr.Split('&'))
+        {
+            if (part.StartsWith("s=", StringComparison.Ordinal)) int.TryParse(part.Substring(2), out activeS);
+            else if (part == "dm=1") dmActive = true;
+        }
+        var spaceServers = servers.ListServers();
+        void Group(string heading, ServerKind kind, string routeBase, bool sectionActive, string kindKey, string newLabel)
+        {
+            sb.Append("<div class=\"spaces-grp\">");
+            sb.Append("<div class=\"spaces-h\">").Append(heading).Append("</div>");
+            int shown = 0;
+            foreach (var srv in spaceServers)
+            {
+                if (kinds.KindOf(srv.Id) != kind) continue;
+                shown++;
+                var active = sectionActive && !dmActive && srv.Id == activeS;
+                sb.Append("<a class=\"space-item").Append(active ? " active" : "").Append("\" data-server-id=\"").Append(srv.Id).Append("\" href=\"").Append(routeBase).Append("?s=").Append(srv.Id).Append("\">");
+                sb.Append("<span class=\"space-ic\" style=\"background:hsl(").Append(SpaceHue(srv.Name)).Append(",46%,42%)\">").Append(HtmlEsc(SpaceGlyph(srv.Name))).Append("</span>");
+                sb.Append("<span class=\"space-nm\">").Append(HtmlEsc(srv.Name)).Append("</span>");
+                if (membership.IsPrivate(srv.Id)) sb.Append("<span class=\"space-lock\" aria-hidden=\"true\">\U0001F512</span>");
+                sb.Append("</a>");
+            }
+            if (shown == 0) sb.Append("<div class=\"space-empty\">None yet</div>");
+            sb.Append("<button type=\"button\" class=\"space-new\" data-new-space=\"").Append(kindKey).Append("\" data-create-server-ui hidden>+ ").Append(newLabel).Append("</button>");
+            sb.Append("</div>");
+        }
+        sb.Append("<nav class=\"spaces\" aria-label=\"Spaces\">");
+        Group("Servers", ServerKind.Discussion, "/chat", normalized == "/chat", "discussion", "New server");
+        Group("Forums", ServerKind.Forum, "/forum", normalized == "/forum", "forum", "New forum");
+        Group("Feeds", ServerKind.Feed, "/feed", normalized == "/feed", "feed", "New feed");
+        sb.Append("<div class=\"spaces-grp\"><a class=\"space-item space-dm").Append(dmActive ? " active" : "").Append("\" href=\"/chat?dm=1\"><span class=\"space-ic space-ic-dm\" aria-hidden=\"true\">✉</span><span class=\"space-nm\">Direct messages</span></a></div>");
+        // Shared create form (hidden; a "+ New X" button sets the kind + reveals it).
+        sb.Append("<form class=\"space-create\" data-create-form autocomplete=\"off\" hidden>");
+        sb.Append("<input name=\"newServer\" type=\"text\" class=\"space-create-in\" placeholder=\"name\" maxlength=\"20\" data-wasp-keep />");
+        sb.Append("<input type=\"hidden\" name=\"newServerKind\" value=\"discussion\" data-wasp-keep />");
+        sb.Append("<label class=\"space-create-priv\"><input type=\"checkbox\" name=\"newServerPrivate\" data-wasp-keep /> Private</label>");
+        sb.Append("<div class=\"space-create-row\"><button type=\"button\" class=\"space-create-go\" data-create-server>Create</button><button type=\"button\" class=\"space-create-x\" data-create-cancel>Cancel</button></div>");
+        sb.Append("</form>");
         sb.Append("</nav>");
         // Internet Identity sign-in — wasp-ii.js swaps these between
         // signed-out / signed-in states on load and on every II event.
@@ -2640,6 +2717,30 @@ public static class Program
             font-size: 1rem;
         }
         .nav a.active .nav-i { color: #fff; }
+        /* Spaces nav (servers / forums / feeds, grouped + named) — replaces .nav */
+        .spaces { display: flex; flex-direction: column; gap: 0.1rem; padding: 0 0.5rem; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+        .spaces::-webkit-scrollbar { width: 0; }
+        .spaces-grp { display: flex; flex-direction: column; gap: 1px; margin-bottom: 0.5rem; }
+        .spaces-h { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.06em; color: #8b95ab; font-weight: 700; padding: 0.45rem 0.85rem 0.2rem; }
+        .space-item { display: flex; align-items: center; gap: 0.55rem; color: #c8d0e0; text-decoration: none; padding: 0.32rem 0.6rem; border-radius: 8px; font-size: 0.9rem; font-weight: 500; transition: background 0.12s ease, color 0.12s ease; position: relative; }
+        .space-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
+        .space-item.active { background: linear-gradient(90deg, rgba(91,141,239,0.25), rgba(177,108,242,0.15)); color: #fff; box-shadow: inset 0 0 0 1px rgba(91,141,239,0.35); }
+        .space-ic { flex: 0 0 auto; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 0.8rem; }
+        .space-ic-dm { background: #313338; }
+        .space-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+        .space-lock { font-size: 0.7rem; opacity: 0.7; flex: 0 0 auto; }
+        .space-empty { color: #6b7488; font-size: 0.78rem; padding: 0.1rem 0.85rem 0.3rem; }
+        .space-new { margin: 0.15rem 0.3rem 0; background: transparent; color: #8b95ab; border: 1px dashed rgba(255,255,255,0.14); border-radius: 8px; padding: 0.3rem 0.5rem; font: inherit; font-size: 0.8rem; cursor: pointer; text-align: left; transition: background 0.12s, color 0.12s, border-color 0.12s; }
+        .space-new:hover { background: rgba(91,141,239,0.12); color: #fff; border-color: rgba(91,141,239,0.4); }
+        .space-create { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.5rem; margin: 0 0.3rem 0.5rem; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; }
+        .space-create-in { background: #0e1420; color: #f2f3f5; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 0.35rem 0.5rem; font: inherit; font-size: 0.85rem; outline: none; }
+        .space-create-in:focus { border-color: rgba(91,141,239,0.6); }
+        .space-create-priv { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: #c8d0e0; }
+        .space-create-row { display: flex; gap: 0.4rem; }
+        .space-create-go { flex: 1; background: #5b8def; color: #fff; border: 0; border-radius: 6px; padding: 0.35rem; font: inherit; font-size: 0.82rem; cursor: pointer; }
+        .space-create-go:hover { background: #4a7ad8; }
+        .space-create-x { background: transparent; color: #8b95ab; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 0.35rem 0.6rem; font: inherit; font-size: 0.82rem; cursor: pointer; }
+        .space-item.dc-rail-unread .space-nm::after { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #f23f42; margin-left: 0.4rem; vertical-align: middle; }
         .sidebar-auth {
             margin-top: auto;
             padding: 0.85rem 1rem 0.4rem;
@@ -2780,7 +2881,7 @@ public static class Program
         main.fullbleed { padding: 0; max-width: none; height: 100vh; overflow: hidden; }
         .dc-shell {
             display: grid;
-            grid-template-columns: 72px 240px 1fr 220px;
+            grid-template-columns: 240px 1fr 220px;
             grid-template-rows: 100%;   /* pin the single row to grid height so children
                                            don't stretch past the viewport */
             height: 100%;
@@ -3526,7 +3627,7 @@ public static class Program
         }
 
         /* ── Public message threads (right panel, replaces members) ── */
-        .dc-shell-thread { grid-template-columns: 72px 240px 1fr 380px; }
+        .dc-shell-thread { grid-template-columns: 240px 1fr 380px; }
         .dc-thread { background: #2b2d31; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid rgba(0,0,0,0.3); }
         .dc-thread-header {
             flex: 0 0 auto; height: 48px; display: flex; align-items: center; justify-content: space-between;
@@ -3626,11 +3727,11 @@ public static class Program
             /* Desktop-but-cramped: drop the member rail before forcing
                the full mobile collapse so the channel keeps its width.
                Keep the 56px server rail. */
-            .dc-shell { grid-template-columns: 56px 240px 1fr; }
+            .dc-shell { grid-template-columns: 240px 1fr; }
             .dc-members { display: none; }
             /* When a thread is open at this width there's no room for a 4th
                column, so the thread takes over the channel's slot. */
-            .dc-shell-thread { grid-template-columns: 56px 240px 1fr; }
+            .dc-shell-thread { grid-template-columns: 240px 1fr; }
             .dc-shell-thread .dc-channel { display: none; }
             .dc-shell-thread .dc-thread { border-left: 0; }
         }
@@ -3860,24 +3961,29 @@ public static class Program
             }
             .brand-mark { width: 24px; height: 24px; font-size: 0.85rem; }
             .brand-text { display: none; }
-            .nav {
+            /* Spaces nav collapses to a horizontal scroller of chips; group
+               headers + the create UI are hidden on the 56px top bar. */
+            .spaces {
                 flex: 1 1 auto; flex-direction: row;
-                gap: 0; padding: 0;
-                overflow-x: auto; align-items: stretch;
+                gap: 0; padding: 0; min-height: 0;
+                overflow-x: auto; overflow-y: hidden; align-items: stretch;
             }
-            .nav a {
-                flex: 1 1 0; min-width: 56px;
+            .spaces-grp { flex-direction: row; margin-bottom: 0; gap: 0; }
+            .spaces-h, .space-new, .space-create, .space-empty, .space-lock { display: none; }
+            .space-item {
+                flex: 0 0 auto; max-width: 84px;
                 flex-direction: column; gap: 2px;
-                padding: 0.35rem 0.25rem;
-                font-size: 0.68rem; font-weight: 600;
+                padding: 0.3rem 0.5rem;
+                font-size: 0.62rem; font-weight: 600;
                 border-radius: 0; text-align: center;
                 justify-content: center;
             }
-            .nav a.active {
+            .space-item.active {
                 background: linear-gradient(180deg, rgba(91,141,239,0.18), rgba(177,108,242,0.1));
                 box-shadow: inset 0 -2px 0 var(--accent);
             }
-            .nav-i { font-size: 1rem; width: auto; height: auto; }
+            .space-ic { width: 22px; height: 22px; font-size: 0.7rem; }
+            .space-nm { max-width: 72px; }
             .sidebar-foot { display: none; }
 
             main { padding: 1.25rem; }
@@ -4760,10 +4866,16 @@ let lastSid = -999, lastInfo = null;
 let lastPrivRoom = -1, lastPrivAt = 0, lastPrivThread = -1, lastPrivThreadAt = 0, lastSettingsSid = -1;
 let lastPFSid = -1, lastPFTid = -1, lastPFAt = 0, lastPFeedSid = -1, lastPFeedAt = 0;
 let lastFeedHomeAt = 0, feedTabChoice = null, feedHomeLimit = 60;
+let createFormOpen = false;
 function applyVisibility(info, sid) {
-  const sv = document.querySelector('[data-create-server-ui]');
+  // Spaces sidebar has one 'New' button per group — reveal them ALL for super.
+  const showCreate = !!(info && info.isSuperAdmin);
+  document.querySelectorAll('[data-create-server-ui]').forEach(el => { el.hidden = !showCreate; });
+  // Re-assert the create-form open state: the reactivity poll re-emits the form
+  // hidden from SSR every swap, so without this it would snap shut mid-typing.
+  const cf = document.querySelector('[data-create-form]');
+  if (cf) cf.hidden = !(showCreate && createFormOpen);
   const ch = document.querySelector('[data-create-channel-ui]');
-  if (sv) sv.hidden = !(info && info.isSuperAdmin);
   const canCh = info && (info.isSuperAdmin || info.role === 'admin' || info.role === 'owner');
   if (ch) ch.hidden = !(canCh && sid >= 1);
   // Moderator+ (or super) reveals per-message + channel mod controls. The server
@@ -4775,7 +4887,10 @@ function applyVisibility(info, sid) {
   document.querySelectorAll('[data-manage-ui]').forEach(el => { el.hidden = !(canMembers && sid >= 1); });
 }
 async function refreshRoleUi() {
-  if (location.pathname !== '/chat') return;
+  // The spaces sidebar (with the super-only New buttons) shows on every app
+  // route, so the role check must run on chat/forum/feed (not just /chat).
+  const _p = location.pathname;
+  if (_p !== '/chat' && _p !== '/forum' && _p !== '/feed') return;
   if (!signedIn()) { applyVisibility(null, 0); lastSid = -999; lastInfo = null; return; }
   const sid = activeServerId();
   if (sid === lastSid && lastInfo) { applyVisibility(lastInfo, sid); return; }
@@ -4798,7 +4913,7 @@ async function createServer() {
     await ensureAgent();
     const r = await signedCall('POST', '/api/servers', JSON.stringify({ name, private: String(priv), kind: kind }));
     if (r.status === 200) {
-      if (inp) inp.value = ''; let j = {}; try { j = JSON.parse(r.text); } catch (_) {} lastSid = -999;
+      if (inp) inp.value = ''; let j = {}; try { j = JSON.parse(r.text); } catch (_) {} lastSid = -999; createFormOpen = false;
       const id = j.id || ''; const k = j.kind || kind;
       if (k === 'forum') spaNav('/forum?s=' + id);
       else if (k === 'feed') spaNav('/feed?s=' + id);
@@ -4820,6 +4935,16 @@ async function createChannel() {
   } catch (_) { toast('network error'); }
 }
 document.addEventListener('click', (e) => {
+  const nsp = e.target.closest && e.target.closest('[data-new-space]');
+  if (nsp) {
+    e.preventDefault(); e.stopPropagation();
+    const kc = document.querySelector('[name=newServerKind]'); if (kc) kc.value = nsp.getAttribute('data-new-space') || 'discussion';
+    createFormOpen = true;
+    const form = document.querySelector('[data-create-form]');
+    if (form) { form.hidden = false; const inp = form.querySelector('[name=newServer]'); if (inp) inp.focus(); }
+    return;
+  }
+  if (e.target.closest && e.target.closest('[data-create-cancel]')) { e.preventDefault(); e.stopPropagation(); createFormOpen = false; const f = document.querySelector('[data-create-form]'); if (f) f.hidden = true; return; }
   if (e.target.closest && e.target.closest('[data-create-server]')) { e.preventDefault(); createServer(); return; }
   if (e.target.closest && e.target.closest('[data-create-channel]')) { e.preventDefault(); createChannel(); return; }
 });
@@ -4949,8 +5074,6 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest) return;
   const fv = e.target.closest('[data-forum-vote]');
   if (fv) { e.preventDefault(); voteForum(fv); return; }
-  const kp = e.target.closest('[data-kind-pick]');
-  if (kp) { e.preventDefault(); const v = kp.getAttribute('data-kind-pick'); const h = document.querySelector('[name=newServerKind]'); if (h) h.value = v; document.querySelectorAll('[data-kind-pick]').forEach(b => b.classList.toggle('on', b === kp)); return; }
   const nt = e.target.closest('[data-forum-new]');
   if (nt) { e.preventDefault(); const f = document.querySelector('[data-forum-newform]'); if (f) { f.hidden = false; const ti = f.querySelector('[data-forum-new-title]'); if (ti) ti.focus(); } return; }
   const nc = e.target.closest('[data-forum-new-cancel]');
