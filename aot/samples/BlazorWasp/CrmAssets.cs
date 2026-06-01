@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Wasp.AspNetCore;
 
@@ -12,6 +13,10 @@ namespace WaspSample.BlazorWasp;
 /// </summary>
 public static class CrmAssets
 {
+    // See TetrisAssets.BrHeader — uncertified Content-Encoding: br pass-through.
+    private static readonly IReadOnlyList<KeyValuePair<string, string>> BrHeader =
+        new[] { new KeyValuePair<string, string>("content-encoding", "br") };
+
     public static void Register()
     {
         var asm = typeof(CrmAssets).Assembly;
@@ -19,8 +24,12 @@ public static class CrmAssets
         foreach (var name in asm.GetManifestResourceNames())
         {
             if (!name.StartsWith("crm/", StringComparison.Ordinal)) continue;
-            var urlPath = "/" + name;
-            var contentType = ContentTypeFor(name);
+            // brotli-precompressed (".br"); serve at the stripped path with
+            // Content-Encoding: br, certifying the same compressed bytes (v1).
+            bool isBr = name.EndsWith(".br", StringComparison.Ordinal);
+            var logicalName = isBr ? name.Substring(0, name.Length - 3) : name;
+            var urlPath = "/" + logicalName;
+            var contentType = ContentTypeFor(logicalName);
             byte[] bytes;
             try
             {
@@ -36,8 +45,7 @@ public static class CrmAssets
             }
             try
             {
-                IcServer.RegisterStaticAsset(urlPath, bytes, contentType);
-                IcCertifiedAssets.Insert(urlPath, bytes);
+                IcServer.RegisterStaticAsset(urlPath, bytes, contentType, isBr ? BrHeader : null);
                 registered++;
             }
             catch (Exception ex)
@@ -46,20 +54,17 @@ public static class CrmAssets
             }
         }
         Wasp.IcCdk.Reply.Print($"[crm] registered {registered} static assets");
-        // /crm (no trailing slash) → serve index.html. Same trick as
-        // /tetris.
+        // /crm (no trailing slash) → serve index.html (also brotli).
         try
         {
-            using var s = asm.GetManifestResourceStream("crm/index.html");
+            using var s = asm.GetManifestResourceStream("crm/index.html.br");
             if (s is not null)
             {
                 using var ms = new MemoryStream();
                 s.CopyTo(ms);
                 var bytes = ms.ToArray();
-                IcServer.RegisterStaticAsset("/crm", bytes, "text/html; charset=utf-8");
-                IcCertifiedAssets.Insert("/crm", bytes);
-                IcServer.RegisterStaticAsset("/crm/", bytes, "text/html; charset=utf-8");
-                IcCertifiedAssets.Insert("/crm/", bytes);
+                IcServer.RegisterStaticAsset("/crm", bytes, "text/html; charset=utf-8", BrHeader);
+                IcServer.RegisterStaticAsset("/crm/", bytes, "text/html; charset=utf-8", BrHeader);
             }
         }
         catch { }

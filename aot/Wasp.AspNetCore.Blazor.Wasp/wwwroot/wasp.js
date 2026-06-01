@@ -268,6 +268,10 @@
       // pinned to bottom (when they were already there).
       _waspChatScrollWatch();
     }
+    // Re-apply client-side chat decorations (self-mention highlight,
+    // own-message edit/delete visibility, "new messages" divider,
+    // mark-as-read) after every DOM swap.
+    _waspChatDecorate();
   }
 
   // ─── data-wasp-keep — survive reactivity-poll DOM swaps ───────────
@@ -313,6 +317,13 @@
         if (t && rText) t.textContent = rText.value;
         badge.classList.add('is-active');
       }
+    }
+    // Re-derive the edit badge from a kept editMsgId so an in-progress
+    // edit survives a reactivity-poll DOM swap.
+    var eId = root.querySelector('input[name="editMsgId"]');
+    if (eId && eId.value) {
+      var eb = root.querySelector('.dc-edit-badge');
+      if (eb) eb.classList.add('is-active');
     }
   }
   function _snapshotScroll() {
@@ -447,7 +458,13 @@
         var u = msgEl.querySelector('.dc-username');
         var t = msgEl.querySelector('.dc-text');
         if (u) username = u.textContent || '';
-        if (t) text = (t.textContent || '').slice(0, 80);
+        if (t) {
+          // Read the message body but drop the trailing "(edited)" marker
+          // so the reply preview shows the text, not "hello(edited)".
+          text = Array.prototype.filter
+            .call(t.childNodes, function (n) { return !(n.classList && n.classList.contains('dc-edited')); })
+            .map(function (n) { return n.textContent; }).join('').slice(0, 80);
+        }
       }
       _setReplyTarget(reply.getAttribute('data-wasp-reply-to'), username, text);
       e.preventDefault();
@@ -548,6 +565,30 @@
     if (typeof s !== 'number') { ta.value += emoji; ta.focus(); return; }
     ta.value = ta.value.slice(0, s) + emoji + ta.value.slice(eEnd);
     var pos = s + emoji.length;
+    ta.focus();
+    try { ta.setSelectionRange(pos, pos); } catch (_) {}
+  });
+
+  // ─── Mention-insert buttons ───────────────────────────────────────
+  // <button data-wasp-mention="user99"> inserts "@user99 " into the
+  // first <textarea data-wasp-mention-target> on the page (or, as a
+  // fallback, the first textarea inside a <form> on the page). Unlike
+  // data-wasp-emoji the trigger can live outside the composer form —
+  // e.g. a Discord-style member rail rendered as a sibling <aside>.
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest && e.target.closest('[data-wasp-mention]');
+    if (!btn) return;
+    var name = btn.getAttribute('data-wasp-mention');
+    if (!name) return;
+    var ta = document.querySelector('textarea[data-wasp-mention-target]')
+          || document.querySelector('form textarea');
+    if (!ta) return;
+    e.preventDefault();
+    var insert = '@' + name + ' ';
+    var s = ta.selectionStart, eEnd = ta.selectionEnd;
+    if (typeof s !== 'number') { ta.value += insert; ta.focus(); return; }
+    ta.value = ta.value.slice(0, s) + insert + ta.value.slice(eEnd);
+    var pos = s + insert.length;
     ta.focus();
     try { ta.setSelectionRange(pos, pos); } catch (_) {}
   });
@@ -806,6 +847,8 @@
     sc.addEventListener('scroll', function () {
       // Within 80px of the bottom counts as "still tailing".
       _chatStickToBottom = (sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 80;
+      // Reaching the bottom marks the channel read + clears its badge.
+      _waspMarkRead(sc);
     }, { passive: true });
     _chatObserver = new ResizeObserver(function () {
       if (_chatStickToBottom) sc.scrollTop = sc.scrollHeight;
@@ -830,9 +873,18 @@
       p = 'web-' + Math.random().toString(36).slice(2, 10);
       localStorage.setItem('wasp-online-id', p);
     }
-    const n = localStorage.getItem('wasp-online-name') || 'Visitor';
+    // Prefer the II-bound display name when the user has signed in;
+    // fall back to a host-app-set 'wasp-online-name'; finally 'Visitor'.
+    // Read fresh each ping so a mid-session sign-in / sign-out flips
+    // the name on the next 10-s tick without needing a page reload.
+    function _displayName() {
+      return localStorage.getItem('wasp:ii:name')
+          || localStorage.getItem('wasp-online-name')
+          || 'Visitor';
+    }
 
     function ping() {
+      const n = _displayName();
       try {
         fetch('/api/online-ping?p=' + encodeURIComponent(p) + '&n=' + encodeURIComponent(n),
           { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } })
@@ -853,14 +905,552 @@
     setInterval(refresh, 5000);
   }
 
+  // ══ Discord-parity chat enhancements ════════════════════════════
+  // All client-side, layered on top of the server-rendered markup.
+
+  // The local user's display name — used for self-mention highlight,
+  // own-message edit/delete visibility, typing pings, and mark-as-read.
+  function _waspLocalName() {
+    // Must match the identity messages are POSTed under (the username
+    // input / wasp-persist:username), so own-message styling, self-mention
+    // highlight and typing all key off the same name the server stores.
+    var inp = document.querySelector('input[name="username"]');
+    // Strip a leading "@": a stale persisted value or an II display name
+    // can carry one (e.g. "@miadey"), but message data-author never does,
+    // so without this the own-message edit/delete match silently fails.
+    return ((inp && inp.value)
+         || localStorage.getItem('wasp-persist:username')
+         || localStorage.getItem('wasp:ii:name')
+         || '').trim().replace(/^@+/, '');
+  }
+  // Stable per-browser id (matches the online-presence ping id) used for
+  // typing self-exclusion so it doesn't depend on a display name.
+  function _waspClientId() {
+    var p = localStorage.getItem('wasp-online-id');
+    if (!p) { p = 'web-' + Math.random().toString(36).slice(2, 10); try { localStorage.setItem('wasp-online-id', p); } catch (_) {} }
+    return p;
+  }
+  function _waspChatRoom() {
+    var sc = document.getElementById('chat-scroll');
+    return sc ? sc.getAttribute('data-room-id') : null;
+  }
+
+  // ── Self-mention highlight + own-message action visibility ───────
+  function _waspChatDecorate() {
+    var sc = document.getElementById('chat-scroll');
+    if (!sc) return;
+    var me = _waspLocalName().toLowerCase();
+    sc.querySelectorAll('.dc-message').forEach(function (m) {
+      var author = (m.getAttribute('data-author') || '').toLowerCase();
+      m.classList.toggle('dc-message-own', !!me && author === me);
+    });
+    if (me) {
+      sc.querySelectorAll('.dc-mention').forEach(function (el) {
+        var t = (el.textContent || '').replace(/^@/, '').toLowerCase();
+        if (t === me) {
+          el.classList.add('dc-mention-self');
+          var msg = el.closest('.dc-message');
+          if (msg) msg.classList.add('dc-mention-me');
+        }
+      });
+    }
+    _waspApplyNewDivider(sc);
+    _waspMarkRead(sc);
+  }
+
+  // ── Unread state: localStorage last-read per room + "NEW" divider ─
+  var _chatAnchors = {};      // roomId -> last-read snapshot at room-open
+  var _chatCurrentRoom = null;
+  function _waspReadKey(room) { return 'wasp:chat:lastread:' + room; }
+  function _waspGetLastRead(room) {
+    try { return parseInt(localStorage.getItem(_waspReadKey(room)) || '0', 10) || 0; }
+    catch (_) { return 0; }
+  }
+  function _waspSetLastRead(room, v) {
+    try { localStorage.setItem(_waspReadKey(room), String(v)); } catch (_) {}
+  }
+  function _waspApplyNewDivider(sc) {
+    var room = sc.getAttribute('data-room-id');
+    if (!room) return;
+    // Re-anchor on room switch so a returning visit doesn't show a stale
+    // divider; keep the anchor stable while live in the same room.
+    if (_chatCurrentRoom !== room) {
+      _chatCurrentRoom = room;
+      _chatAnchors[room] = _waspGetLastRead(room);
+    }
+    var anchor = _chatAnchors[room];
+    var old = sc.querySelector('.dc-new-divider');
+    if (old) old.remove();
+    if (!anchor) return;   // never visited -> nothing is "new"
+    // When pinned to the bottom you're caught up — don't sprout a divider
+    // above the tail you're actively watching. It only appears once you've
+    // scrolled up to read history while new messages land below.
+    var atBottom = (sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 120;
+    if (atBottom) return;
+    var msgs = sc.querySelectorAll('.dc-message[data-msg-id]');
+    for (var i = 0; i < msgs.length; i++) {
+      if (parseInt(msgs[i].getAttribute('data-msg-id'), 10) > anchor) {
+        var div = document.createElement('div');
+        div.className = 'dc-new-divider';
+        div.innerHTML = '<span>New messages</span>';
+        msgs[i].parentNode.insertBefore(div, msgs[i]);
+        break;
+      }
+    }
+  }
+  function _waspMarkRead(sc) {
+    var room = sc.getAttribute('data-room-id');
+    if (!room) return;
+    var atBottom = (sc.scrollHeight - sc.scrollTop - sc.clientHeight) < 120;
+    if (!atBottom || document.hidden) return;
+    var msgs = sc.querySelectorAll('.dc-message[data-msg-id]');
+    var maxId = 0;
+    for (var i = 0; i < msgs.length; i++) {
+      var id = parseInt(msgs[i].getAttribute('data-msg-id'), 10);
+      if (id > maxId) maxId = id;
+    }
+    if (maxId > _waspGetLastRead(room)) {
+      _waspSetLastRead(room, maxId);
+      // Advance the in-room anchor too, so scrolling back up through
+      // now-read messages doesn't re-show a stale divider; a divider only
+      // returns for messages that land while you're scrolled away.
+      if (room === _chatCurrentRoom) _chatAnchors[room] = maxId;
+      _waspRefreshUnread();
+    }
+  }
+  // serverId(string) -> [roomId,...]; fetched once from /api/servers (exists).
+  var _serverChannels = null;
+  function _waspLoadServerChannels() {
+    if (_serverChannels) return Promise.resolve(_serverChannels);
+    return origFetch('/api/servers', { headers: { 'accept': 'application/json' } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        _serverChannels = {};
+        if (d && d.servers) d.servers.forEach(function (s) { _serverChannels[String(s.id)] = (s.channelIds || []).map(String); });
+        return _serverChannels;
+      }).catch(function () { _serverChannels = {}; return _serverChannels; });
+  }
+  function _waspRefreshUnread() {
+    Promise.all([
+      origFetch('/api/chat/room-cursors', { headers: { 'accept': 'application/json' } }).then(function (r) { return r.ok ? r.json() : null; }),
+      _waspLoadServerChannels()
+    ]).then(function (res) {
+      var data = res[0]; var srvCh = res[1] || {};
+      if (!data || !data.rooms) return;
+      var active = _waspChatRoom();
+      var unreadByRoom = {};
+      Object.keys(data.rooms).forEach(function (rid) {
+        var diff = (data.rooms[rid] || 0) - _waspGetLastRead(rid);
+        var hasUnread = diff > 0 && String(rid) !== String(active);
+        unreadByRoom[String(rid)] = hasUnread ? diff : 0;
+        var badge = document.querySelector('[data-room-unread="' + rid + '"]');
+        if (badge) {
+          badge.hidden = !hasUnread;
+          badge.textContent = hasUnread ? (diff > 99 ? '99+' : String(diff)) : '';
+          badge.classList.toggle('has-count', hasUnread);
+        }
+        var link = document.querySelector('.dc-room[data-room-id="' + rid + '"]');
+        if (link) link.classList.toggle('dc-room-unread', hasUnread);
+      });
+      // Aggregate unread onto each server-rail icon.
+      Object.keys(srvCh).forEach(function (sid) {
+        var any = srvCh[sid].some(function (rid) { return (unreadByRoom[rid] || 0) > 0; });
+        var rail = document.querySelector('.dc-rail-server[data-server-id="' + sid + '"]');
+        if (rail) rail.classList.toggle('dc-rail-unread', any);
+      });
+    }).catch(function () {});
+  }
+  async function _waspUnreadPoll() {
+    while (true) {
+      _waspRefreshUnread();
+      await new Promise(function (r) { setTimeout(r, document.hidden ? 12000 : 4000); });
+    }
+  }
+
+  // ── Typing indicators (heap-only presence bucket, polled) ────────
+  var _typingLastPing = 0;
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (!t || !t.matches || !t.matches('textarea[name="text"]') || !t.value) return;
+    var now = Date.now();
+    if (now - _typingLastPing < 3000) return;   // throttle: never per-keystroke
+    _typingLastPing = now;
+    var room = _waspChatRoom();
+    if (!room) return;
+    var name = _waspLocalName() || 'Someone';
+    var pid = _waspClientId();
+    try {
+      origFetch('/api/chat/typing-ping?roomId=' + encodeURIComponent(room)
+        + '&n=' + encodeURIComponent(name) + '&p=' + encodeURIComponent(pid),
+        { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } }).catch(function () {});
+    } catch (_) {}
+  });
+  function _waspTypingText(names) {
+    if (!names.length) return '';
+    if (names.length === 1) return names[0] + ' is typing…';
+    if (names.length === 2) return names[0] + ' and ' + names[1] + ' are typing…';
+    if (names.length === 3) return names[0] + ', ' + names[1] + ' and ' + names[2] + ' are typing…';
+    return 'Several people are typing…';
+  }
+  async function _waspTypingPoll() {
+    while (true) {
+      await new Promise(function (r) { setTimeout(r, document.hidden ? 8000 : 2000); });
+      var row = document.querySelector('.dc-typing');
+      var room = _waspChatRoom();
+      if (!row || !room) continue;
+      try {
+        var resp = await origFetch('/api/chat/typing?roomId=' + encodeURIComponent(room)
+          + '&self=' + encodeURIComponent(_waspClientId()),
+          { headers: { 'accept': 'application/json' } });
+        if (!resp.ok) continue;
+        var data = await resp.json();
+        var names = (data && data.names) || [];
+        row.textContent = _waspTypingText(names);
+        row.classList.toggle('is-active', names.length > 0);
+      } catch (_) {}
+    }
+  }
+
+  // ── @mention autocomplete (typeahead over the member rail) ───────
+  var _acBox = null, _acItems = [], _acIndex = 0, _acStart = -1, _acTa = null;
+  function _acClose() { if (_acBox) { _acBox.remove(); _acBox = null; } _acItems = []; _acIndex = 0; _acStart = -1; _acTa = null; }
+  function _acNames() {
+    var names = [];
+    document.querySelectorAll('.dc-member[data-wasp-mention]').forEach(function (b) {
+      var n = b.getAttribute('data-wasp-mention');
+      if (n && names.indexOf(n) < 0) names.push(n);
+    });
+    return names;
+  }
+  function _isWordChar(c) { return /[A-Za-z0-9_\-]/.test(c); }
+  function _acUpdate(ta) {
+    var val = ta.value, caret = ta.selectionStart, i = caret - 1;
+    while (i >= 0) {
+      var c = val[i];
+      if (c === '@') break;
+      if (!_isWordChar(c)) { _acClose(); return; }
+      i--;
+    }
+    if (i < 0) { _acClose(); return; }
+    if (i > 0 && _isWordChar(val[i - 1])) { _acClose(); return; }   // @ must follow non-word
+    var frag = val.slice(i + 1, caret).toLowerCase();
+    var matches = _acNames().filter(function (n) { return n.toLowerCase().indexOf(frag) === 0; }).slice(0, 8);
+    if (!matches.length) { _acClose(); return; }
+    _acStart = i; _acTa = ta; _acItems = matches; _acIndex = 0;
+    _acRender();
+  }
+  function _acRender() {
+    if (!_acBox) { _acBox = document.createElement('div'); _acBox.className = 'dc-ac'; document.body.appendChild(_acBox); }
+    _acBox.innerHTML = '';
+    _acItems.forEach(function (n, idx) {
+      var item = document.createElement('div');
+      item.className = 'dc-ac-item' + (idx === _acIndex ? ' active' : '');
+      item.textContent = '@' + n;
+      item.addEventListener('mousedown', function (e) { e.preventDefault(); _acAccept(idx); });
+      _acBox.appendChild(item);
+    });
+    var r = _acTa.getBoundingClientRect();
+    _acBox.style.left = r.left + 'px';
+    _acBox.style.width = Math.min(260, r.width) + 'px';
+    // Prefer above the textarea; if it would clip off the top, flip below.
+    var above = r.top - _acBox.offsetHeight - 6;
+    _acBox.style.top = (above >= 4 ? above : r.bottom + 6) + 'px';
+  }
+  function _acAccept(idx) {
+    if (!_acTa || _acStart < 0) { _acClose(); return; }
+    var ta = _acTa, name = _acItems[idx], caret = ta.selectionStart;
+    var before = ta.value.slice(0, _acStart), after = ta.value.slice(caret), insert = '@' + name + ' ';
+    ta.value = before + insert + after;
+    var pos = before.length + insert.length;
+    ta.focus();
+    try { ta.setSelectionRange(pos, pos); } catch (_) {}
+    _acClose();
+  }
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (t && t.matches && t.matches('textarea[data-wasp-mention-target]')) _acUpdate(t);
+  });
+  // Capture phase so Enter/Tab/Arrows are intercepted before enter-to-send.
+  document.addEventListener('keydown', function (e) {
+    if (!_acBox) return;
+    if (e.key === 'ArrowDown') { _acIndex = (_acIndex + 1) % _acItems.length; _acRender(); }
+    else if (e.key === 'ArrowUp') { _acIndex = (_acIndex - 1 + _acItems.length) % _acItems.length; _acRender(); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { _acAccept(_acIndex); }
+    else if (e.key === 'Escape') { _acClose(); }
+    else return;
+    e.preventDefault(); e.stopImmediatePropagation();
+  }, true);
+
+  // ── Edit message: load raw text into the composer ────────────────
+  document.addEventListener('click', function (e) {
+    var ed = e.target.closest && e.target.closest('[data-wasp-edit-id]');
+    if (ed) {
+      e.preventDefault(); e.stopPropagation();
+      _waspSetEditTarget(ed.getAttribute('data-wasp-edit-id'), ed.getAttribute('data-wasp-edit-raw') || '');
+      return;
+    }
+    var ce = e.target.closest && e.target.closest('[data-wasp-cancel-edit]');
+    if (ce) { e.preventDefault(); e.stopPropagation(); _waspSetEditTarget('', ''); }
+  });
+  function _waspSetEditTarget(id, raw) {
+    var idEl = document.querySelector('input[name="editMsgId"]');
+    if (idEl) idEl.value = id || '';
+    var badge = document.querySelector('.dc-edit-badge');
+    var ta = document.querySelector('textarea[name="text"]');
+    if (id) {
+      _setReplyTarget('', '', '');   // edit + reply are mutually exclusive
+      if (ta) { ta.value = raw; ta.focus(); try { ta.setSelectionRange(raw.length, raw.length); } catch (_) {} }
+      if (badge) badge.classList.add('is-active');
+    } else {
+      if (badge) badge.classList.remove('is-active');
+      if (ta) ta.value = '';
+    }
+  }
+
+  // ── Image lightbox (mounted on body, survives poll swaps) ────────
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('[data-wasp-lightbox]');
+    if (!a) return;
+    e.preventDefault();
+    _waspOpenLightbox(a.getAttribute('data-wasp-lightbox'));
+  });
+  function _waspOpenLightbox(src) {
+    if (!src) return;
+    var existing = document.querySelector('.dc-lightbox');   // never stack overlays
+    if (existing) existing.remove();
+    var ov = document.createElement('div');
+    ov.className = 'dc-lightbox';
+    var img = document.createElement('img');
+    img.src = src; img.alt = 'image';
+    var btn = document.createElement('button');
+    btn.className = 'dc-lightbox-close'; btn.setAttribute('aria-label', 'close'); btn.textContent = '×';
+    ov.appendChild(img); ov.appendChild(btn);
+    function close() { ov.remove(); document.removeEventListener('keydown', onKey); }
+    function onKey(ev) { if (ev.key === 'Escape') close(); }
+    ov.addEventListener('click', function (ev) { if (ev.target === ov || ev.target === btn) close(); });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(ov);
+  }
+
+  // ── Video embeds (click-to-load player, mounted on body) ─────────
+  // A video link renders as a [data-wasp-video] play card; the actual
+  // player (YouTube/Vimeo iframe or a <video> for direct files) only
+  // loads on click, into a body-level overlay that survives poll swaps
+  // — so no third-party request fires from the feed until the user opts in.
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-wasp-video]');
+    if (!b) return;
+    e.preventDefault();
+    _waspOpenVideo(b.getAttribute('data-wasp-video'), b.getAttribute('data-wasp-video-kind'));
+  });
+  function _waspOpenVideo(src, kind) {
+    if (!src) return;
+    var existing = document.querySelector('.dc-lightbox'); if (existing) existing.remove();
+    var ov = document.createElement('div');
+    ov.className = 'dc-lightbox dc-video-lightbox';
+    var frame = document.createElement('div');
+    frame.className = 'dc-video-frame';
+    var media;
+    if (kind === 'file') {
+      media = document.createElement('video');
+      media.src = src; media.controls = true; media.autoplay = true; media.playsInline = true;
+      media.setAttribute('playsinline', ''); media.setAttribute('referrerpolicy', 'no-referrer');
+    } else {
+      media = document.createElement('iframe');
+      media.src = src + (src.indexOf('?') >= 0 ? '&' : '?') + 'autoplay=1';
+      media.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
+      media.setAttribute('allowfullscreen', '');
+      // NOTE: do NOT set referrerpolicy=no-referrer here — YouTube/Vimeo embeds
+      // validate the embedding origin via the Referer and return Error 153
+      // without it. youtube-nocookie.com already gives privacy-enhanced (no
+      // cookies/tracking until play); the referrer just authorizes the embed.
+      media.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation allow-popups');
+    }
+    var btn = document.createElement('button');
+    btn.className = 'dc-lightbox-close'; btn.setAttribute('aria-label', 'close'); btn.textContent = '×';
+    frame.appendChild(media); ov.appendChild(frame); ov.appendChild(btn);
+    function close() { ov.remove(); document.removeEventListener('keydown', onKey); }
+    function onKey(ev) { if (ev.key === 'Escape') close(); }
+    ov.addEventListener('click', function (ev) { if (ev.target === ov || ev.target === btn) close(); });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(ov);
+  }
+
+  // ── Spoiler reveal (client-side only) ────────────────────────────
+  // ||spoiler|| renders as <span class='dc-spoiler' data-wasp-spoiler>.
+  // First click / Enter / Space reveals it (adds .dc-revealed). Body-level
+  // delegation survives poll DOM swaps; carries no data-wasp-args so a
+  // reveal never fires a server update.
+  function _waspRevealSpoiler(sp) {
+    if (!sp || sp.classList.contains('dc-revealed')) return;
+    sp.classList.add('dc-revealed');
+    sp.removeAttribute('role'); sp.removeAttribute('tabindex'); sp.setAttribute('aria-label', '');
+  }
+  document.addEventListener('click', function (e) {
+    var sp = e.target.closest && e.target.closest('[data-wasp-spoiler]');
+    if (!sp || sp.classList.contains('dc-revealed')) return;
+    e.preventDefault(); e.stopPropagation();
+    _waspRevealSpoiler(sp);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    var sp = e.target.closest && e.target.closest('[data-wasp-spoiler]');
+    if (!sp || sp.classList.contains('dc-revealed')) return;
+    e.preventDefault();
+    _waspRevealSpoiler(sp);
+  });
+
+  // ── Cmd-K global message search palette ──────────────────────────
+  // Body-mounted overlay (survives poll swaps). Hits from the free query
+  // GET /api/chat/search?q= ; jump via SPA to /chat?r=<name> (?r= resolves
+  // by channel NAME server-side). 150ms debounce, arrow/Enter/Esc nav.
+  var _ckBox = null, _ckHits = [], _ckIndex = 0, _ckSeq = 0, _ckTimer = null;
+  function _ckClose() {
+    if (_ckBox) { _ckBox.remove(); _ckBox = null; }
+    _ckHits = []; _ckIndex = 0;
+    if (_ckTimer) { clearTimeout(_ckTimer); _ckTimer = null; }
+  }
+  function _ckOpen() {
+    if (_ckBox) { var i0 = _ckBox.querySelector('.ck-input'); if (i0) i0.focus(); return; }
+    var ov = document.createElement('div');
+    ov.className = 'ck-backdrop';
+    ov.innerHTML =
+      '<div class="ck-palette" role="dialog" aria-label="Search messages">' +
+        '<div class="ck-input-row">' +
+          '<span class="ck-icon" aria-hidden="true">⌕</span>' +
+          '<input class="ck-input" type="text" placeholder="Search messages…" autocomplete="off" spellcheck="false">' +
+          '<span class="ck-hint">esc</span>' +
+        '</div>' +
+        '<div class="ck-results"><div class="ck-empty">Start typing to search.</div></div>' +
+      '</div>';
+    ov.addEventListener('mousedown', function (e) { if (e.target === ov) _ckClose(); });
+    document.body.appendChild(ov);
+    _ckBox = ov;
+    var input = ov.querySelector('.ck-input');
+    input.addEventListener('input', function () { _ckOnTyped(input.value); });
+    input.focus();
+  }
+  function _ckOnTyped(q) {
+    if (_ckTimer) clearTimeout(_ckTimer);
+    var query = (q || '').trim();
+    if (!query) { _ckRender(null); return; }
+    _ckTimer = setTimeout(function () {
+      var seq = ++_ckSeq;
+      origFetch('/api/chat/search?q=' + encodeURIComponent(query), { headers: { 'accept': 'application/json' } })
+        .then(function (r) { return r.ok ? r.json() : { results: [] }; })
+        .then(function (data) { if (seq !== _ckSeq || !_ckBox) return; _ckRender((data && data.results) || []); })
+        .catch(function () {});
+    }, 150);
+  }
+  function _ckRender(hits) {
+    if (!_ckBox) return;
+    var list = _ckBox.querySelector('.ck-results');
+    if (hits === null) { _ckHits = []; _ckIndex = 0; list.innerHTML = '<div class="ck-empty">Start typing to search.</div>'; return; }
+    _ckHits = hits; _ckIndex = 0;
+    if (!hits.length) { list.innerHTML = '<div class="ck-empty">No matches.</div>'; return; }
+    list.innerHTML = '';
+    hits.forEach(function (h, idx) {
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'ck-hit' + (idx === 0 ? ' active' : '');
+      var top = document.createElement('div'); top.className = 'ck-hit-top';
+      var ch = document.createElement('span'); ch.className = 'ck-hit-channel'; ch.textContent = '#' + (h.channelName || '');
+      var au = document.createElement('span'); au.className = 'ck-hit-author'; au.textContent = h.author || '';
+      top.appendChild(ch); top.appendChild(au);
+      var snip = document.createElement('div'); snip.className = 'ck-hit-snippet'; snip.textContent = h.snippet || '';
+      row.appendChild(top); row.appendChild(snip);
+      row.addEventListener('mousedown', function (e) { e.preventDefault(); _ckGo(idx); });
+      list.appendChild(row);
+    });
+  }
+  function _ckHighlight() {
+    if (!_ckBox) return;
+    _ckBox.querySelectorAll('.ck-hit').forEach(function (r, i) {
+      var on = (i === _ckIndex);
+      r.classList.toggle('active', on);
+      if (on && r.scrollIntoView) r.scrollIntoView({ block: 'nearest' });
+    });
+  }
+  function _ckGo(idx) {
+    var h = _ckHits[idx];
+    if (!h) return;
+    _ckClose();
+    _navigateTo('/chat?r=' + encodeURIComponent(h.channelName), true);
+  }
+  document.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      if (_ckBox) _ckClose(); else _ckOpen();
+    }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (!_ckBox) return;
+    if (e.key === 'Escape') { _ckClose(); }
+    else if (e.key === 'ArrowDown') { if (_ckHits.length) { _ckIndex = (_ckIndex + 1) % _ckHits.length; _ckHighlight(); } }
+    else if (e.key === 'ArrowUp') { if (_ckHits.length) { _ckIndex = (_ckIndex - 1 + _ckHits.length) % _ckHits.length; _ckHighlight(); } }
+    else if (e.key === 'Enter') { if (_ckHits.length) _ckGo(_ckIndex); }
+    else return;
+    e.preventDefault(); e.stopImmediatePropagation();
+  }, true);
+
+  // ── Paste-to-upload + drag-and-drop upload ───────────────────────
+  function _waspIngestImageFile(file) {
+    if (!file || !/^image\//.test(file.type)) { alert('Images only.'); return; }
+    if (file.size > 1000000) { alert('Image is too big (max 1 MB). Got ' + Math.round(file.size / 1024) + ' KB.'); return; }
+    var target = document.querySelector('input[name="imageData"]');
+    var preview = document.querySelector('[data-wasp-image-preview]');
+    var fr = new FileReader();
+    fr.onload = function () {
+      if (target) target.value = fr.result;
+      if (preview) {
+        var img = preview.querySelector('img') || preview.appendChild(document.createElement('img'));
+        img.src = fr.result; preview.classList.add('is-active');
+      }
+      var ta = document.querySelector('textarea[name="text"]'); if (ta) ta.focus();
+    };
+    fr.readAsDataURL(file);
+  }
+  document.addEventListener('paste', function (e) {
+    if (!document.getElementById('chat-scroll')) return;
+    var items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type && items[i].type.indexOf('image/') === 0) {
+        var file = items[i].getAsFile();
+        if (file) { _waspIngestImageFile(file); e.preventDefault(); }
+        return;
+      }
+    }
+  });
+  document.addEventListener('dragover', function (e) {
+    if (!document.getElementById('chat-scroll')) return;
+    var types = (e.dataTransfer && e.dataTransfer.types) || [];
+    if (Array.prototype.indexOf.call(types, 'Files') >= 0) { e.preventDefault(); document.body.classList.add('dc-dragging'); }
+  });
+  document.addEventListener('dragleave', function (e) { if (e.relatedTarget === null) document.body.classList.remove('dc-dragging'); });
+  document.addEventListener('drop', function (e) {
+    document.body.classList.remove('dc-dragging');
+    if (!document.getElementById('chat-scroll')) return;
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) {
+      for (var i = 0; i < files.length; i++) {
+        if (files[i].type && files[i].type.indexOf('image/') === 0) { _waspIngestImageFile(files[i]); break; }
+      }
+      e.preventDefault();
+    }
+  });
+
   function _waspHydrate() {
     _wireEvents();
     _waspPersistRestore();
     _waspScanBindings();
     _waspChatScrollWatch();
+    _waspChatDecorate();
     _reactivityPoll();
     _waspPollStores();
     _waspOnlineSetup();
+    _waspTypingPoll();
+    _waspUnreadPoll();
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _waspHydrate);

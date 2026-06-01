@@ -11,10 +11,28 @@ cd "$REPO"
 # docker image doesn't ship the Blazor WASM SDK targets). Each
 # project's publish output is picked up by BlazorWasp.csproj's
 # <EmbeddedResource> glob and embedded into the canister wasm.
+#
+# Clean the publish dir first: `dotnet publish` does NOT remove stale
+# output, so each build's fingerprinted assemblies (dotnet.native.<hash>,
+# System.Private.CoreLib.<hash>, …) pile up and the embed glob bakes ALL
+# of them into the wasm — ~8-9 MB of dead weight. Wipe so only the
+# current build's files are embedded.
 echo "[blazorwasp] publishing TetrisWasm (Blazor WebAssembly)..."
+rm -rf aot/samples/TetrisWasm/bin/Release/net10.0/publish
 dotnet publish aot/samples/TetrisWasm/TetrisWasm.csproj -c Release --nologo --verbosity quiet
 echo "[blazorwasp] publishing CrmWasm (Blazor WebAssembly + Fluent UI)..."
+rm -rf aot/samples/CrmWasm/bin/Release/net10.0/publish
 dotnet publish aot/samples/CrmWasm/CrmWasm.csproj -c Release --nologo --verbosity quiet
+
+# We embed ONLY the brotli (.br) copy of each sub-app asset (served with
+# Content-Encoding: br). The csproj glob would SILENTLY DROP any file that
+# lacks a .br sibling — assert none do, so a future publish change fails loud.
+echo "[blazorwasp] asserting every sub-app asset has a .br sibling..."
+for app in TetrisWasm:tetris CrmWasm:crm; do
+  d="aot/samples/${app%%:*}/bin/Release/net10.0/publish/wwwroot/${app##*:}"
+  miss=$(cd "$d" && find . -type f ! -name '*.br' ! -name '*.gz' | while read -r f; do [ -f "$f.br" ] || echo "$f"; done)
+  if [ -n "$miss" ]; then echo "FATAL: files without a .br sibling in $d (would be dropped from the wasm):"; echo "$miss"; exit 1; fi
+done
 
 echo "[blazorwasp] AOT-compiling for wasm32-wasi via docker..."
 docker run --rm --platform linux/amd64 -v "$REPO:/work" -v wasp-nuget:/nuget \

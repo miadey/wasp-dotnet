@@ -1,10 +1,272 @@
-@* Stock dotnet new blazor Home.razor *@
+@* WASP Bzzz — the public front door, rendered full-width inside the marketing
+   shell (sg-nav + sg-footer) defined in Program.WrapWithSidebar for path "/".
+   One integrated Blazor app: this page and /chat share the same canister.
+   Editorial-precision design + on-chain "proof" devices. Every feature shown is
+   genuinely shipped (Chat/Server/Mod/Dm/Role/Membership services). All product
+   visuals are CSS/SVG mockups — no <img>, no fabricated metrics/logos. The live
+   canister id comes from AdminService.CanisterIdText(), never hardcoded. *@
 
-<PageTitle>Home</PageTitle>
+<PageTitle>WASP Bzzz — chat that lives on-chain</PageTitle>
 
-<h1>Hello, world!</h1>
+@* ── Hero ───────────────────────────────────────────────── *@
+<section class="sg-hero" id="top">
+    <div class="sg-hero-glow" aria-hidden="true"></div>
+    <div class="sg-hero-grid">
+        <div class="sg-hero-copy">
+            <span class="sg-eyebrow"><span class="sg-dot"></span>Runs entirely on the Internet Computer</span>
+            <h1 class="sg-h1">Chat with no backend to trust.<br />One canister. Every message <span class="sg-grad">signed</span>.</h1>
+            <p class="sg-lead">WASP&nbsp;Bzzz is a Discord-style community platform that runs entirely inside one Internet Computer canister. No servers, no database, no passwords — every action is a signed transaction you can verify.</p>
+            <div class="sg-cta-row">
+                <button type="button" class="sg-btn sg-btn-primary ii-signin" data-ii-signin><span class="ii-mark">∞</span> Sign in with Internet Identity</button>
+                <a class="sg-btn sg-btn-ghost" href="/chat">Open the app →</a>
+            </div>
+            <p class="sg-hero-note">free · no email · no password · no wallet</p>
+        </div>
+        <div class="sg-hero-mock">
+            <div class="sg-dotgrid" aria-hidden="true"></div>
+            @MockWindow(false)
+        </div>
+    </div>
+</section>
 
-Welcome to your new <strong>Blazor on ICP</strong> app — vanilla
-<code>dotnet new blazor</code> markup, running entirely inside an
-Internet Computer canister via Wasp's render-as-query model. No
-SignalR. No polling. Each interaction is a single HTTP round trip.
+@* ── Proof strip (honest facts, no invented metrics) ────── *@
+<section class="sg-section" style="padding-top:0">
+    <div class="sg-proof-cells">
+        <div class="sg-fact"><span class="sg-fact-l">@Seal(13) Auth</span><div class="sg-fact-v">Internet Identity — no password</div></div>
+        <div class="sg-fact"><span class="sg-fact-l">@Seal(13) Writes</span><div class="sg-fact-v">Signed update calls</div></div>
+        <div class="sg-fact"><span class="sg-fact-l">@Seal(13) Caller</span><div class="sg-fact-v">Verified <code>msg_caller</code></div></div>
+        <div class="sg-fact"><span class="sg-fact-l">@Seal(13) Reads</span><div class="sg-fact-v">Certified responses</div></div>
+    </div>
+    <div class="sg-chip-wrap">
+        <span class="sg-chip" title="The live canister this site is served from">@Seal(14) <b>canister</b> @canisterId</span>
+    </div>
+</section>
+
+@* ── Big visual: the product, shown big ─────────────────── *@
+<section class="sg-section" id="features">
+    <div class="sg-shead sg-reveal">
+        <span class="sg-eyebrow plain">The product</span>
+        <h2 class="sg-h2">Servers, channels, threads.</h2>
+        <p class="sg-sintro">A real workspace, not a demo. Servers hold channels; channels hold threads; everything is a signed message living inside the canister.</p>
+    </div>
+    <div class="sg-bigvis sg-reveal">
+        @MockWindow(true)
+        <div class="sg-callrow">
+            <span class="sg-call"><i style="background:var(--sg-accent)"></i><b>Threads</b> keep replies linked</span>
+            <span class="sg-call"><i style="background:var(--sg-proof)"></i><b>Reactions</b> on any message</span>
+            <span class="sg-call"><i style="background:var(--sg-warn)"></i><b>Role badges</b> enforced on-chain</span>
+            <span class="sg-call"><i style="background:var(--sg-text-3)"></i><b>Pinned</b> &amp; lockable channels</span>
+        </div>
+    </div>
+</section>
+
+@* ── Deep-dive A: roles & moderation ────────────────────── *@
+<section class="sg-section sg-band" id="roles">
+    <div class="sg-deep">
+        <div class="sg-deep-copy sg-reveal">
+            <span class="sg-eyebrow plain">Roles &amp; moderation</span>
+            <h2 class="sg-h2">Enforced on-chain, not in the UI.</h2>
+            <p class="sg-sintro">Owners, admins and moderators get real powers — and the canister checks who you are before every privileged action. There is no API to go around.</p>
+            <ul class="sg-list">
+                <li class="sg-li">@Seal() <span><b>Four tiers.</b> Owner, admin, moderator, member — granted per server.</span></li>
+                <li class="sg-li">@Seal() <span><b>Pin, lock, time-out.</b> Moderation actions are signed update calls, authorised by your principal.</span></li>
+                <li class="sg-li">@Seal() <span><b>Tamper-proof.</b> A locked channel rejects posts at the canister, not just the button.</span></li>
+            </ul>
+        </div>
+        <div class="sg-deep-visual sg-reveal">
+            <div class="sg-panel">
+                <div class="sg-members">
+                    <div class="sg-member"><span class="sg-pres"></span><span class="sg-mname2">Ada</span><span class="role owner">Owner</span></div>
+                    <div class="sg-member"><span class="sg-pres"></span><span class="sg-mname2">Mira</span><span class="role admin">Admin</span></div>
+                    <div class="sg-member"><span class="sg-pres idle"></span><span class="sg-mname2">Kai</span><span class="role mod">Mod</span></div>
+                    <div class="sg-member"><span class="sg-pres off"></span><span class="sg-mname2">Jun</span></div>
+                </div>
+                <div class="sg-modmenu">
+                    <div class="mi">@Svg("<path d='M12 17v5'/><path d='M9 3h6l-1 6 3 3H7l3-3-1-6z'/>", 17) Pin message</div>
+                    <div class="mi warn">@Svg("<rect x='5' y='11' width='14' height='9' rx='2'/><path d='M8 11V8a4 4 0 0 1 8 0v3'/>", 17) Lock channel</div>
+                    <div class="mi">@Svg("<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>", 17) Time-out user</div>
+                </div>
+                <div class="sg-lockban">@Svg("<rect x='5' y='11' width='14' height='9' rx='2'/><path d='M8 11V8a4 4 0 0 1 8 0v3'/>", 15) #founders is locked — only moderators can post</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+@* ── Deep-dive B: rich messages ─────────────────────────── *@
+<section class="sg-section" id="richmsg">
+    <div class="sg-deep reverse">
+        <div class="sg-deep-copy sg-reveal">
+            <span class="sg-eyebrow plain">Rich messages</span>
+            <h2 class="sg-h2">Markdown, code, spoilers, media.</h2>
+            <p class="sg-sintro">Say it properly. Format with markdown, drop in fenced code, hide spoilers, react with emoji, and share images and video — all rendered inline, all stored on-chain.</p>
+            <ul class="sg-list">
+                <li class="sg-li">@Seal() <span><b>Markdown &amp; code.</b> Bold, italic, lists and syntax-tinted code blocks.</span></li>
+                <li class="sg-li">@Seal() <span><b>Spoilers.</b> Blur text until a reader chooses to look.</span></li>
+                <li class="sg-li">@Seal() <span><b>Media.</b> Image uploads and embedded video, no external host.</span></li>
+            </ul>
+        </div>
+        <div class="sg-deep-visual sg-reveal">
+            <div class="sg-panel sg-rich">
+                <p class="sg-mtext">Release notes for <b>v3</b> — <i>everything</i> ships today:</p>
+                <div class="sg-code"><span class="c">// every write is authorised on-chain</span><br /><span class="k">if</span> (msg.author == <span class="s">caller</span>) commit(msg);</div>
+                <p class="sg-mtext">Ending is: <span class="sg-spoiler">it was on-chain all along</span> — hover to reveal.</p>
+                <div class="sg-imgtile">image upload · stored in the canister</div>
+                <div class="sg-video"><span class="sg-play">@Svg("<path d='M8 5l11 7-11 7z' fill='currentColor' stroke='none'/>", 18)</span></div>
+                <div class="sg-react-row"><span class="sg-react on">✅ 4</span><span class="sg-react">🔥 7</span><span class="sg-react">🎉 2</span></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+@* ── Deep-dive C: private means private ─────────────────── *@
+<section class="sg-section sg-band" id="security">
+    <div class="sg-shead sg-reveal">
+        <span class="sg-eyebrow plain">Private means private</span>
+        <h2 class="sg-h2">A lock that isn't decorative.</h2>
+        <p class="sg-sintro">Private servers and DMs are returned <em>only</em> to their members, over signed reads — never rendered to the public, cacheable web. Not privacy by obscurity.</p>
+    </div>
+    <div class="sg-privacy sg-reveal">
+        <div class="sg-priv pub">
+            <span class="sg-priv-seal">@Svg("<rect x='5' y='11' width='14' height='9' rx='2'/><path d='M8 11V8a4 4 0 0 1 8 0v3'/>", 16)</span>
+            <div class="sg-priv-tag">@Svg("<path d='M3 3l18 18'/><path d='M10.6 10.6a3 3 0 0 0 4 4'/><path d='M9.9 4.2A9 9 0 0 1 21 12a9 9 0 0 1-2.2 2.9'/><path d='M6.6 6.6A9 9 0 0 0 3 12a9 9 0 0 0 9 6'/>", 14) Public web · SSR</div>
+            <div class="sg-priv-rows">
+                <div class="sg-priv-line w2"></div><div class="sg-priv-line w1"></div><div class="sg-priv-line w3"></div><div class="sg-priv-line w4"></div>
+            </div>
+            <div class="sg-priv-foot">Never served to the public web.</div>
+        </div>
+        <div class="sg-priv mem">
+            <span class="sg-priv-seal">@Seal(16)</span>
+            <div class="sg-priv-tag">@Seal(14) Members-only · signed read</div>
+            <div class="sg-priv-real">
+                <div class="sg-msg"><span class="sg-av a">A</span><div><span class="sg-mname">Ada</span><p class="sg-mtext">founders channel — visible to members</p></div></div>
+                <div class="sg-msg"><span class="sg-av c">M</span><div><span class="sg-mname">Mira</span><p class="sg-mtext">returned only over a signed read</p></div></div>
+            </div>
+            <div class="sg-priv-foot">Returned to verified members only.</div>
+        </div>
+    </div>
+</section>
+
+@* ── Why on-chain: the spec table ───────────────────────── *@
+<section class="sg-section" id="chain">
+    <div class="sg-shead sg-reveal">
+        <span class="sg-eyebrow plain">Why on-chain</span>
+        <h2 class="sg-h2">Trust math, not a company.</h2>
+        <p class="sg-sintro">The same chat features you expect — but the place they run changes what you have to trust.</p>
+    </div>
+    <table class="sg-table sg-reveal">
+        <thead><tr><th></th><th>Typical chat SaaS</th><th class="chain">WASP Bzzz on the IC</th></tr></thead>
+        <tbody>
+            <tr><th>Where it runs</th><td class="saas">A company's cloud servers</td><td class="chain">@Seal(15)One canister on the Internet Computer</td></tr>
+            <tr><th>Who can read your data</th><td class="saas">The operator and their database</td><td class="chain">@Seal(15)Only members, over signed reads</td></tr>
+            <tr><th>If the company disappears</th><td class="saas">Your community goes with it</td><td class="chain">@Seal(15)It runs on-chain, not on us</td></tr>
+            <tr><th>How sign-in works</th><td class="saas">Email + password to leak</td><td class="chain">@Seal(15)Internet Identity — no password exists</td></tr>
+            <tr><th>Can responses be tampered with</th><td class="saas">Trust the operator's word</td><td class="chain">@Seal(15)Certified by the Internet Computer</td></tr>
+        </tbody>
+    </table>
+</section>
+
+@* ── Verify it yourself (replaces testimonials) ─────────── *@
+<section class="sg-section sg-band" id="verify">
+    <div class="sg-shead center sg-reveal">
+        <span class="sg-eyebrow plain">Verify it yourself</span>
+        <h2 class="sg-h2">Don't trust us. Read the canister.</h2>
+        <p class="sg-sintro" style="margin-left:auto;margin-right:auto">The honest proof isn't a logo wall — it's that you can inspect the live state we run on.</p>
+    </div>
+    <div class="sg-term sg-reveal" style="margin:0 auto">
+        <div class="sg-term-bar"><span class="sg-tdot r"></span><span class="sg-tdot y"></span><span class="sg-tdot g"></span><span class="sg-term-title">verify — WASP Bzzz</span></div>
+        <div class="sg-term-body">
+            <div class="sg-term-num">1<br />2<br />3<br />4<br />5<br />6<br />7</div>
+            <div class="sg-term-code"><span class="c">$ inspect this canister</span><br />canister&nbsp;&nbsp;<b>@canisterId</b><br />state&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="p">certified by the Internet Computer</span><br />reads&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="p">certified</span> · writes <span class="p">signed update calls</span><br />auth&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Internet Identity · caller = <span class="a">msg_caller</span><br /><a class="sg-term-link" href="/stable">→ view certified stable state</a><br /><span class="sg-caret">▋</span></div>
+        </div>
+    </div>
+</section>
+
+@* ── Feature index ──────────────────────────────────────── *@
+<section class="sg-section" id="all-features">
+    <div class="sg-shead sg-reveal">
+        <span class="sg-eyebrow plain">Everything else</span>
+        <h2 class="sg-h2">What a community expects.</h2>
+    </div>
+    <div class="sg-features sg-reveal">
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<line x1='4' y1='9' x2='20' y2='9'/><line x1='4' y1='15' x2='20' y2='15'/><line x1='10' y1='3' x2='8' y2='21'/><line x1='16' y1='3' x2='14' y2='21'/>")</span><div class="sg-feat-name">Servers &amp; channels @Seal(13)</div><div class="sg-feat-desc">Organised the way members think.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<polyline points='9 14 4 9 9 4'/><path d='M20 20v-7a4 4 0 0 0-4-4H4'/>")</span><div class="sg-feat-name">Threads &amp; replies</div><div class="sg-feat-desc">Side conversations stay tidy and linked.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<circle cx='12' cy='12' r='9'/><path d='M8 14s1.5 2 4 2 4-2 4-2'/><line x1='9' y1='9.5' x2='9.01' y2='9.5'/><line x1='15' y1='9.5' x2='15.01' y2='9.5'/>")</span><div class="sg-feat-name">Reactions</div><div class="sg-feat-desc">React with emoji on any message.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<circle cx='12' cy='12' r='4'/><path d='M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1'/>")</span><div class="sg-feat-name">Mentions</div><div class="sg-feat-desc">Pull the right people into context.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<path d='M20 10H4'/><path d='M20 14H4'/><path d='M9 4L7 20'/><path d='M17 4l-2 16'/>")</span><div class="sg-feat-name">Hashtags</div><div class="sg-feat-desc">Filter a channel by topic instantly.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<rect x='3' y='5' width='18' height='14' rx='2'/><path d='M3 7l9 6 9-6'/>")</span><div class="sg-feat-name">Direct messages</div><div class="sg-feat-desc">Participant-gated DMs, returned only to you.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<path d='M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z'/>")</span><div class="sg-feat-name">Roles</div><div class="sg-feat-desc">Owner, admin, moderator, member tiers.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<path d='M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z'/><line x1='9' y1='11.5' x2='15' y2='11.5'/>")</span><div class="sg-feat-name">Moderation</div><div class="sg-feat-desc">Pin, lock channels, time-out users.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<circle cx='11' cy='11' r='7'/><line x1='21' y1='21' x2='16.5' y2='16.5'/>")</span><div class="sg-feat-name">Search <span class="sg-kbd">⌘</span><span class="sg-kbd">K</span></div><div class="sg-feat-desc">Jump to any message across channels.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<rect x='3' y='5' width='18' height='14' rx='2'/><path d='M7 16V9l2.5 3L12 9v7'/><path d='M16 9v4'/><path d='M14.5 13L16 15l1.5-2'/>")</span><div class="sg-feat-name">Markdown &amp; code</div><div class="sg-feat-desc">Bold, italic, lists, fenced code blocks.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<path d='M3 3l18 18'/><path d='M10.6 10.6a3 3 0 0 0 4 4'/><path d='M9.9 4.2A9 9 0 0 1 21 12a9 9 0 0 1-2.2 2.9'/><path d='M6.6 6.6A9 9 0 0 0 3 12a9 9 0 0 0 9 6'/>")</span><div class="sg-feat-name">Spoilers</div><div class="sg-feat-desc">Hide text until a reader clicks.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+        <div class="sg-feat"><span class="sg-feat-ico">@Svg("<rect x='3' y='3' width='18' height='18' rx='2'/><circle cx='8.5' cy='8.5' r='1.5'/><path d='M21 15l-5-5L5 21'/>")</span><div class="sg-feat-name">Image &amp; video</div><div class="sg-feat-desc">Upload images and embed video inline.</div><span class="sg-feat-seal">@Seal(15)</span></div>
+    </div>
+</section>
+
+@* ── Final CTA ──────────────────────────────────────────── *@
+<section class="sg-final">
+    <div class="sg-final-grid" aria-hidden="true"></div>
+    <div class="sg-final-glow" aria-hidden="true"></div>
+    <span class="sg-watermark" aria-hidden="true">@Seal(220)</span>
+    <div class="sg-final-in">
+        <span class="sg-eyebrow"><span class="sg-dot"></span>Free · No paid plan</span>
+        <h2 class="sg-h2">Your community. Your identity.<br />On a chain you can <span class="sg-grad">verify</span>.</h2>
+        <div class="sg-cta-row">
+            <button type="button" class="sg-btn sg-btn-primary ii-signin" data-ii-signin><span class="ii-mark">∞</span> Sign in with Internet Identity</button>
+            <a class="sg-btn sg-btn-ghost" href="/chat">Open the app →</a>
+        </div>
+        <p class="sg-final-note">free · no email · no password · no wallet</p>
+        <div class="sg-ghost-mock" aria-hidden="true">
+            <div class="sg-mock ghost">@MockWindow(false)</div>
+        </div>
+    </div>
+</section>
+
+@code {
+    // Live canister id — the page is served by this canister; never hardcoded.
+    private readonly string canisterId = WaspSample.BlazorWasp.AdminService.CanisterIdText();
+
+    // Monoline glyph + the reusable "certified" seal, currentColor, inline SVG.
+    private MarkupString Svg(string body, int s = 22) => (MarkupString)
+        $"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' width='{s}' height='{s}' aria-hidden='true'>{body}</svg>";
+
+    private MarkupString Seal(int s = 16) => (MarkupString)
+        $"<svg class='sg-seal' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round' width='{s}' height='{s}' aria-hidden='true'><path d='M12 2l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8V6z'/><path d='M9 12l2 2 4-4'/></svg>";
+
+    // The faux chat window — server rail, channel list, message canvas, composer.
+    // wide=true widens the rail/channel columns for the big-visual beat.
+    private MarkupString MockWindow(bool wide)
+    {
+        var cls = wide ? "sg-mock wide" : "sg-mock";
+        var lk = "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' width='12' height='12'><rect x='5' y='11' width='14' height='9' rx='2'/><path d='M8 11V8a4 4 0 0 1 8 0v3'/></svg>";
+        var threadIco = "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' width='13' height='13'><polyline points='9 14 4 9 9 4'/><path d='M20 20v-7a4 4 0 0 0-4-4H4'/></svg>";
+        var sealInline = "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' width='11' height='11'><path d='M12 2l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8V6z'/><path d='M9 12l2 2 4-4'/></svg>";
+        var pinBan = wide
+            ? "<div class='sg-pin'><span class='ic'><svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' width='13' height='13'><path d='M12 17v5'/><path d='M9 3h6l-1 6 3 3H7l3-3-1-6z'/></svg></span> Pinned: read the canister, don't trust us.</div>"
+            : "";
+        var reply = wide
+            ? "<div class='sg-reply'><div class='sg-msg'><span class='sg-av d'>J</span><div><span class='sg-mname'>Jun</span><span class='sg-mtime'>9:44</span><p class='sg-mtext'>verified — receipts are on-chain</p></div></div></div>"
+            : "";
+        return (MarkupString)(
+            $"<div class='{cls}'>" +
+              "<div class='sg-mr'><span class='sg-mr-i on'>B</span><span class='sg-mr-i'>◆</span><span class='sg-mr-i'>✦</span><span class='sg-mr-i'>+</span></div>" +
+              "<div class='sg-chan'>" +
+                "<div class='sg-chan-h'><span>WASP Bzzz</span></div>" +
+                "<div class='sg-ch on'><span class='h'>#</span>&nbsp;general</div>" +
+                "<div class='sg-ch'><span class='h'>#</span>&nbsp;design</div>" +
+                "<div class='sg-ch'><span class='h'>#</span>&nbsp;launch</div>" +
+                $"<div class='sg-ch lock'><span class='h'>#</span>&nbsp;founders <span class='lk'>{lk}</span></div>" +
+              "</div>" +
+              "<div class='sg-conv'>" +
+                $"<div class='sg-conv-h'><span class='h'>#</span>&nbsp;general <span class='sg-cert'>{sealInline} signed</span></div>" +
+                pinBan +
+                "<div class='sg-msgs'>" +
+                  "<div class='sg-msg'><span class='sg-av a'>A</span><div><span class='sg-mname'>Ada<span class='role owner'>Owner</span></span><span class='sg-mtime'>9:41</span><p class='sg-mtext'>shipping the on-chain build today <span class='sg-tag'>#launch</span></p></div></div>" +
+                  "<div class='sg-msg'><span class='sg-av b'>K</span><div><span class='sg-mname'>Kai<span class='role mod'>Mod</span></span><span class='sg-mtime'>9:42</span><p class='sg-mtext'>every post is a signed update call now?</p><div class='sg-react-row'><span class='sg-react on'>✅ 3</span><span class='sg-react'>🔥 5</span></div></div></div>" +
+                  $"<div class='sg-msg'><span class='sg-av c'>M</span><div><span class='sg-mname'>Mira<span class='role admin'>Admin</span></span><span class='sg-mtime'>9:43</span><p class='sg-mtext'>yep — <span class='sg-mention'>@Ada</span> verified by <code>msg_caller</code></p><span class='sg-thread'>{threadIco} 2 replies</span>{reply}</div></div>" +
+                "</div>" +
+                "<div class='sg-composer'><span>Message #general</span><span class='send'>↑</span></div>" +
+              "</div>" +
+            "</div>");
+    }
+}

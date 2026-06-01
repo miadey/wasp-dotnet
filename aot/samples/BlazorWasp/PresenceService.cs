@@ -33,10 +33,16 @@ public sealed class PresenceService
         dict[principal] = new Entry(principal, name, NowMs());
     }
 
-    public IReadOnlyList<Entry> Viewers(string recordId)
+    public IReadOnlyList<Entry> Viewers(string recordId) => Viewers(recordId, StaleAfterMs);
+
+    /// <summary>Viewers with a caller-chosen stale window. Typing
+    /// indicators pass a short window (~6 s) so "X is typing…" clears
+    /// promptly once the user stops, rather than lingering the full 30 s
+    /// presence window.</summary>
+    public IReadOnlyList<Entry> Viewers(string recordId, long staleAfterMs)
     {
         if (!_byRecord.TryGetValue(recordId, out var dict)) return Array.Empty<Entry>();
-        var cutoff = NowMs() - StaleAfterMs;
+        var cutoff = NowMs() - staleAfterMs;
         // Lazy prune stale entries on each read.
         var stale = dict.Where(kv => kv.Value.LastSeenMs < cutoff).Select(kv => kv.Key).ToList();
         foreach (var k in stale) dict.Remove(k);

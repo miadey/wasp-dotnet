@@ -1,0 +1,320 @@
+@* WASP Bzzz — FORUM kind (F1). A category = a forum-kind ServerService server;
+   a topic = a ChatService room in it; the OP = the room's first message; replies
+   = the rest (flat, Discourse-style). Title + accepted-answer live in ForumService;
+   everything else is derived from ChatService. Query: ?s=<categoryServerId>,
+   ?t=<topicRoomId>, ?sort=latest|top|new. Reads are anonymous SSR; mutations
+   (new topic / reply / mark-answer) go through the signed client (data-forum-*). *@
+
+@using System.Linq
+@inject ChatService Chat
+@inject ServerService Servers
+@inject ServerKindService Kinds
+@inject ForumService Forums
+@inject ModService Mod
+@inject MembershipService Membership
+@inject VoteService Votes
+
+@{
+    var q = Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery;
+    q.TryGetValue("s", out var sKey);
+    q.TryGetValue("t", out var tKey);
+    q.TryGetValue("sort", out var sortKey);
+    q.TryGetValue("n", out var nKey);
+    q.TryGetValue("tag", out var tagKey);
+    var sort = string.IsNullOrEmpty(sortKey) ? "latest" : sortKey;
+    var activeTag = string.IsNullOrWhiteSpace(tagKey) ? null : tagKey.Trim().TrimStart('#');
+    int.TryParse(sKey, out var catId);
+    long.TryParse(tKey, out var topicId);
+    int nShow; if (!int.TryParse(nKey, out nShow) || nShow <= 0) nShow = 30; if (nShow > 300) nShow = 300;
+
+    var servers = Servers.ListServers();
+    var category = servers.FirstOrDefault(x => x.Id == catId);
+    var isForum = category is not null && Kinds.KindOf(category.Id) == ServerKind.Forum;
+    var now = (long)(Wasp.IcCdk.Ic0.time() / 1_000_000UL);
+}
+
+<div class="fr">
+@if (category is null || !isForum)
+{
+    <div class="fr-empty">
+        <h1>Forum</h1>
+        <p>This space isn't a forum. <a href="/chat">Open the app →</a></p>
+    </div>
+}
+else if (Membership.IsPrivate(category.Id))
+{
+    @* PRIVATE forum: anonymous SSR emits NO content — just a gate + an empty pane the
+       signed client fills via /api/forum/read (members only). Privacy is preserved
+       because the topics/replies are never in this server-rendered, cacheable HTML. *@
+    <header class="fr-bar">
+        @if (topicId > 0) { <a class="fr-back" href="/forum?s=@category.Id">@category.Name</a><span class="fr-bar-sep">/</span><span class="fr-bar-kind">Forum</span> }
+        else { <span class="fr-bar-kind">Forum</span><span class="fr-bar-sep">/</span><span class="fr-cat-name">@category.Name</span> }
+    </header>
+    <article class="fr-topic" data-private-forum data-server="@category.Id" data-topic="@(topicId > 0 ? topicId : 0)">
+        <div class="fr-lock-tag" style="display:inline-flex;margin-bottom:1rem">🔒 Private forum — members only</div>
+        <div class="fr-private-msg" data-private-forum-msg>Sign in to view.</div>
+        <div data-private-forum-stream></div>
+    </article>
+}
+else if (topicId > 0 && Forums.IsTopic((int)topicId))
+{
+    @* ── Topic view: OP + flat replies ── *@
+    var msgs = Chat.AllMessages().Where(m => m.RoomId == (int)topicId && !m.IsDeleted).OrderBy(m => m.Id).ToList();
+    var op = msgs.FirstOrDefault();
+    var allReplies = msgs.Skip(1).ToList();
+    var replies = allReplies.Take(nShow).ToList();
+    var moreReplies = allReplies.Count - replies.Count;
+    var solvedId = Forums.SolvedOf((int)topicId);
+    var title = Forums.TitleOf((int)topicId);
+    var locked = Mod.IsLocked((int)topicId);
+
+    <header class="fr-bar">
+        <a class="fr-back" href="/forum?s=@category.Id">@category.Name</a>
+        <span class="fr-bar-sep">/</span>
+        <span class="fr-bar-kind">Forum</span>
+    </header>
+
+    <article class="fr-topic">
+        <h1 class="fr-title">@title @if (solvedId > 0) { <span class="fr-solved-tag">@SealSvg() Solved</span> } @if (locked) { <span class="fr-lock-tag">🔒 Locked</span> }</h1>
+        @if (op is not null)
+        {
+            <div class="fr-post fr-op">
+                <div class="fr-post-head"><span class="fr-av" style="background:@AvColor(Author(op))">@Initial(Author(op))</span><span class="fr-author">@Author(op)</span><span class="fr-op-badge">OP</span><span class="fr-time">@Ago(op.AtMs, now)</span></div>
+                <div class="fr-body">@Body(op.Text)</div>
+                @{ var opTags = ExtractTags(op.Text); }
+                @if (opTags.Length > 0)
+                {
+                    <div class="fr-row-tags">
+                        @foreach (var tag in opTags)
+                        {
+                            <a class="fr-tag" href="/forum?s=@category.Id&tag=@(Uri.EscapeDataString(tag))" style="@TagStyle(tag)" title="#@tag">#@tag</a>
+                        }
+                    </div>
+                }
+                <div class="fr-postfoot">@VoteBlock(op.Id)<span class="fr-react">@RenderReacts(op.Id)</span></div>
+            </div>
+        }
+
+        <div class="fr-replies-h">@allReplies.Count repl@(allReplies.Count == 1 ? "y" : "ies")</div>
+
+        @foreach (var r in replies)
+        {
+            var isAnswer = r.Id == solvedId;
+            <div class="fr-post @(isAnswer ? "fr-answer" : "")">
+                <div class="fr-post-head">
+                    <span class="fr-av" style="background:@AvColor(Author(r))">@Initial(Author(r))</span>
+                    <span class="fr-author">@Author(r)</span>
+                    @if (isAnswer) { <span class="fr-answer-tag">@SealSvg() Accepted answer</span> }
+                    <span class="fr-time">@Ago(r.AtMs, now)</span>
+                    <button type="button" class="fr-solve" data-forum-solve data-room="@topicId" data-msg="@r.Id" data-on="@(isAnswer ? "0" : "1")" title="Mark as the accepted answer">@(isAnswer ? "Unmark" : "✓ Mark answer")</button>
+                </div>
+                <div class="fr-body">@Body(r.Text)</div>
+                <div class="fr-postfoot">@VoteBlock(r.Id)<span class="fr-react">@RenderReacts(r.Id)</span></div>
+            </div>
+        }
+        @if (moreReplies > 0)
+        {
+            <a class="fr-loadmore" href="/forum?s=@category.Id&t=@topicId&n=@(nShow + 30)">Load @Math.Min(30, moreReplies) more repl@(moreReplies == 1 ? "y" : "ies")</a>
+        }
+
+        @if (locked)
+        {
+            <div class="fr-locked-note">🔒 This topic is locked — no new replies.</div>
+        }
+        else
+        {
+            <div class="fr-reply-box" data-ii-when="in">
+                <textarea class="fr-reply-input" data-forum-reply-text="@topicId" rows="3" placeholder="Write a reply…"></textarea>
+                <button type="button" class="fr-btn fr-btn-primary" data-forum-reply data-room="@topicId">Reply</button>
+            </div>
+            <div class="fr-signin-note" data-ii-when="out">Sign in to reply.</div>
+        }
+    </article>
+}
+else
+{
+    @* ── Category view: topic list ── *@
+    var topicRooms = Servers.ChannelsOf(category.Id).Where(rid => Forums.IsTopic(rid)).ToList();
+    var rows = topicRooms.Select(rid =>
+    {
+        var m = Chat.AllMessages().Where(x => x.RoomId == rid && !x.IsDeleted).OrderBy(x => x.Id).ToList();
+        var op = m.FirstOrDefault();
+        long last = m.Count > 0 ? m.Max(x => x.AtMs) : 0;
+        long created = op?.AtMs ?? 0;
+        int reacts = m.Sum(x => Chat.ReactionsOf(x.Id).Values.Sum());
+        return new {
+            RoomId = rid,
+            Title = Forums.TitleOf(rid),
+            OpAuthor = op is null ? "" : Author(op),
+            Replies = Math.Max(0, m.Count - 1),
+            Last = last,
+            Created = created,
+            Reacts = reacts,
+            Score = op is not null ? Votes.Score(op.Id) : 0,
+            Tags = op is not null ? ExtractTags(op.Text) : System.Array.Empty<string>(),
+            Solved = Forums.SolvedOf(rid) > 0,
+        };
+    }).ToList();
+
+    // filter (by #tag) → sort → page — order matters so counts/pagination stay correct.
+    if (activeTag is not null)
+        rows = rows.Where(r => r.Tags.Any(t => string.Equals(t, activeTag, StringComparison.OrdinalIgnoreCase))).ToList();
+    rows = sort switch
+    {
+        "top" => rows.OrderByDescending(r => r.Score).ThenByDescending(r => r.Replies + r.Reacts).ThenByDescending(r => r.Last).ToList(),
+        "new" => rows.OrderByDescending(r => r.Created).ToList(),
+        _     => rows.OrderByDescending(r => r.Last).ToList(),
+    };
+    var shownRows = rows.Take(nShow).ToList();
+    var moreTopics = rows.Count - shownRows.Count;
+    var tagQ = activeTag is not null ? "&tag=" + Uri.EscapeDataString(activeTag) : "";
+
+    <header class="fr-bar">
+        <span class="fr-bar-kind">Forum</span>
+        <span class="fr-bar-sep">/</span>
+        <span class="fr-cat-name">@category.Name</span>
+        <a class="fr-app-link" href="/chat">Open chat app →</a>
+    </header>
+
+    <div class="fr-cat-head">
+        <div>
+            <h1>@category.Name</h1>
+            <p class="fr-cat-sub">@rows.Count topic@(rows.Count == 1 ? "" : "s") · a forum that lives on-chain</p>
+        </div>
+        <button type="button" class="fr-btn fr-btn-primary fr-newtopic" data-forum-new data-server="@category.Id" data-ii-when="in">+ New topic</button>
+        <span class="fr-signin-note" data-ii-when="out">Sign in to start a topic.</span>
+    </div>
+
+    <div class="fr-sorts">
+        <a class="fr-sort @(sort == "latest" ? "on" : "")" href="/forum?s=@category.Id&sort=latest@(tagQ)">Latest</a>
+        <a class="fr-sort @(sort == "top" ? "on" : "")" href="/forum?s=@category.Id&sort=top@(tagQ)">Top</a>
+        <a class="fr-sort @(sort == "new" ? "on" : "")" href="/forum?s=@category.Id&sort=new@(tagQ)">New</a>
+    </div>
+
+    @if (activeTag is not null)
+    {
+        <div class="fr-tagfilter">
+            <span class="fr-tagfilter-label">Filtering by</span>
+            <span class="fr-tag" style="@TagStyle(activeTag)">#@activeTag</span>
+            <a class="fr-tagfilter-clear" href="/forum?s=@category.Id&sort=@sort" title="Clear filter">✕ clear</a>
+        </div>
+    }
+
+    @* New-topic inline form (revealed by the client on data-forum-new click). *@
+    <div class="fr-newform" data-forum-newform hidden>
+        <input class="fr-newform-title" data-forum-new-title placeholder="Topic title" maxlength="160" />
+        <textarea class="fr-newform-body" data-forum-new-body rows="4" placeholder="Write your post…"></textarea>
+        <div class="fr-newform-actions">
+            <button type="button" class="fr-btn fr-btn-primary" data-forum-new-submit data-server="@category.Id">Create topic</button>
+            <button type="button" class="fr-btn fr-btn-ghost" data-forum-new-cancel>Cancel</button>
+        </div>
+    </div>
+
+    @if (rows.Count == 0)
+    {
+        <div class="fr-empty"><p>No topics yet. Be the first to start one.</p></div>
+    }
+    else
+    {
+        <ul class="fr-list">
+            @foreach (var r in shownRows)
+            {
+                <li class="fr-row">
+                    <a class="fr-row-main" href="/forum?s=@category.Id&t=@r.RoomId">
+                        <span class="fr-row-title">@r.Title @if (r.Solved) { <span class="fr-solved-dot" title="Solved">@SealSvg()</span> }</span>
+                        <span class="fr-row-meta">by @r.OpAuthor</span>
+                    </a>
+                    @if (r.Tags.Length > 0)
+                    {
+                        <span class="fr-row-tags">
+                            @foreach (var tag in r.Tags)
+                            {
+                                <a class="fr-tag" href="/forum?s=@category.Id&tag=@(Uri.EscapeDataString(tag))" style="@TagStyle(tag)" title="#@tag">#@tag</a>
+                            }
+                        </span>
+                    }
+                    <span class="fr-row-stat"><b>@r.Score</b><small>score</small></span>
+                    <span class="fr-row-stat"><b>@r.Replies</b><small>replies</small></span>
+                    <span class="fr-row-when">@Ago(r.Last, now)</span>
+                </li>
+            }
+        </ul>
+        @if (moreTopics > 0)
+        {
+            <a class="fr-loadmore" href="/forum?s=@category.Id&sort=@(sort + tagQ)&n=@(nShow + 30)">Load @Math.Min(30, moreTopics) more topic@(moreTopics == 1 ? "" : "s")</a>
+        }
+    }
+}
+</div>
+
+@code {
+    // Tags are DERIVED from the OP's #hashtags (no new state) via the shared hand-written
+    // parser (AOT-safe). Same hue formula as the chat #tag pills for visual consistency.
+    private static string[] ExtractTags(string text)
+    {
+        var set = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var seg in ChatService.ParseSegments(text ?? "")) if (seg.IsHashtag) set.Add(seg.Value);
+        var arr = new string[set.Count]; set.CopyTo(arr); return arr;
+    }
+    private static int HueForTag(string s) { int h = 0; foreach (var c in s ?? "") h = (h * 131 + c) & 0xFFFFFF; return h % 360; }
+    private static string TagStyle(string tag) { var h = HueForTag(tag); return $"color: hsl({h}, 70%, 78%); background: hsla({h}, 55%, 50%, 0.16);"; }
+
+    private MarkupString VoteBlock(long msgId)
+    {
+        // SSR is anonymous → the score is public and rendered here; the buttons toggle
+        // via the signed client (data-forum-vote) and the reactivity re-render reflects it.
+        var score = Votes.Score(msgId);
+        var cls = score > 0 ? "fr-vote-score pos" : (score < 0 ? "fr-vote-score neg" : "fr-vote-score");
+        return (MarkupString)(
+            "<span class='fr-votes'>" +
+            "<button type='button' class='fr-vote' data-forum-vote data-msg='" + msgId + "' data-dir='up' title='Upvote' aria-label='upvote'>▲</button>" +
+            "<span class='" + cls + "'>" + score + "</span>" +
+            "<button type='button' class='fr-vote' data-forum-vote data-msg='" + msgId + "' data-dir='down' title='Downvote' aria-label='downvote'>▼</button>" +
+            "</span>");
+    }
+
+    private static string Author(ChatService.Message m)
+        => !string.IsNullOrWhiteSpace(m.Username) ? m.Username
+           : (m.AuthorPrincipal.Length >= 5 ? m.AuthorPrincipal.Substring(0, 5) : (m.AuthorPrincipal.Length > 0 ? m.AuthorPrincipal : "anon"));
+
+    private static string Initial(string name) => string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpperInvariant();
+
+    private static string AvColor(string name)
+    {
+        // deterministic hue from the name
+        int h = 0; foreach (var c in name) h = (h * 31 + c) & 0xffff;
+        var hue = h % 360;
+        return $"hsl({hue},55%,45%)";
+    }
+
+    private MarkupString RenderReacts(long msgId)
+    {
+        var rx = Chat.ReactionsOf(msgId);
+        if (rx is null || rx.Count == 0) return (MarkupString)"";
+        var sb = new System.Text.StringBuilder();
+        foreach (var kv in rx)
+            if (kv.Value > 0) sb.Append("<span class='fr-react-pill'>").Append(System.Net.WebUtility.HtmlEncode(kv.Key)).Append(' ').Append(kv.Value).Append("</span>");
+        return (MarkupString)sb.ToString();
+    }
+
+    // Full markdown parity via the shared renderer — the same hand-written parser
+    // + dc-* markup the chat uses (code/quote/spoiler/mention/hashtag/link/video +
+    // bold/italic/strike/underline), AOT-safe, no Regex.
+    private MarkupString Body(string raw) => (MarkupString)MessageHtml.Render(raw);
+
+    private static MarkupString SealSvg() => (MarkupString)
+        "<svg class='fr-seal' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' width='14' height='14' aria-hidden='true'><path d='M12 2l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8V6z'/><path d='M9 12l2 2 4-4'/></svg>";
+
+    private static string Ago(long ms, long now)
+    {
+        if (ms <= 0) return "";
+        var d = now - ms; if (d < 0) d = 0;
+        var sec = d / 1000;
+        if (sec < 60) return "just now";
+        var min = sec / 60; if (min < 60) return min + "m ago";
+        var hr = min / 60; if (hr < 24) return hr + "h ago";
+        var day = hr / 24; if (day < 30) return day + "d ago";
+        var mo = day / 30; if (mo < 12) return mo + "mo ago";
+        return (day / 365) + "y ago";
+    }
+}

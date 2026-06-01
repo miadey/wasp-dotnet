@@ -30,6 +30,14 @@ public sealed unsafe class CounterService
         Ic0.stable64_write(StableOffset, (ulong)(nint)(&value), sizeof(int));
     }
 
+    /// <summary>Admin override via the /stable explorer. Skips the +1
+    /// step and writes the chosen int32 directly.</summary>
+    public void SetExact(int value)
+    {
+        if (Ic0.stable64_size() == 0) Ic0.stable64_grow(1);
+        Ic0.stable64_write(StableOffset, (ulong)(nint)(&value), sizeof(int));
+    }
+
     /// <summary>
     /// Realtime delta: the count itself doubles as the monotonic cursor.
     /// Clients poll with their last-seen cursor; we either reply

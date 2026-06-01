@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using Wasp.IcCdk;
 
@@ -45,7 +46,24 @@ public sealed unsafe class ImageStore
     private long  _nextId;
     private bool  _loaded;
 
-    public int Count => _index.Count;
+    public int Count { get { EnsureLoaded(); return _index.Count; } }
+
+    /// <summary>Image ids in upload order. Used by the /stable explorer.</summary>
+    public IReadOnlyList<long> Ids
+    {
+        get { EnsureLoaded(); return _index.Keys.OrderBy(k => k).ToArray(); }
+    }
+
+    /// <summary>Metadata only — no stable-memory read of the blob body.
+    /// Returns null if the id is unknown.</summary>
+    public (string contentType, int dataLen, ulong offset)? MetaOf(long id)
+    {
+        EnsureLoaded();
+        if (!_index.TryGetValue(id, out var e)) return null;
+        var ct = new byte[e.ContentTypeLen];
+        ReadBytes(e.Offset + 8 + 4, ct);
+        return (Encoding.UTF8.GetString(ct), e.DataLen, e.Offset);
+    }
 
     public long Add(string contentType, byte[] data)
     {

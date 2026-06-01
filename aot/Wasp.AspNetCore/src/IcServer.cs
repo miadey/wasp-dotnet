@@ -49,18 +49,21 @@ public sealed class IcServer : IServer
     /// (e.g. http://&lt;canister-id&gt;.raw.localhost:4944/) which skips
     /// response verification.
     /// </summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Body, string ContentType)> _staticAssets =
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (byte[] Body, string ContentType, IReadOnlyList<KeyValuePair<string, string>>? ExtraHeaders)> _staticAssets =
         new(StringComparer.Ordinal);
 
-    public static void RegisterStaticAsset(string path, byte[] body, string contentType = "application/octet-stream")
+    public static void RegisterStaticAsset(string path, byte[] body, string contentType = "application/octet-stream", IReadOnlyList<KeyValuePair<string, string>>? extraHeaders = null)
     {
         if (path is null) throw new ArgumentNullException(nameof(path));
         if (body is null) throw new ArgumentNullException(nameof(body));
-        _staticAssets[path] = (body, contentType);
+        _staticAssets[path] = (body, contentType, extraHeaders);
         // Push sha256(body) into the asset cert tree so the boundary
         // can verify subsequent query responses on the non-raw subdomain.
         // Insert is a no-op outside an update context, so calling from
         // canister_init / post_upgrade / any update handler is safe.
+        // NOTE: we certify the SAME bytes we serve (body). extraHeaders
+        // (e.g. Content-Encoding: br) ride uncertified — v1 certifies the
+        // body only, exactly like content-type/content-length already do.
         IcCertifiedAssets.Insert(path, body);
     }
 
@@ -201,7 +204,7 @@ public sealed class IcServer : IServer
             }
         }
 
-        _staticAssets[path] = (icResp.Body, contentType);
+        _staticAssets[path] = (icResp.Body, contentType, null);
         IcCertifiedAssets.Insert(path, icResp.Body);
         Reply.Print($"[icserver] RegisterRenderedPath({path}) OK — {icResp.Body.Length} bytes registered as static");
     }
@@ -440,12 +443,16 @@ public sealed class IcServer : IServer
                         // boundary skips this check; in either case it's
                         // safe to include the header (the .raw. path just
                         // ignores it).
-                        var headers = new List<KeyValuePair<string, string>>(5)
+                        var headers = new List<KeyValuePair<string, string>>(6)
                         {
                             new("content-type", asset.ContentType),
                             new("content-length", asset.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                             new("access-control-allow-origin", "*"),
                         };
+                        // Per-asset extra headers (e.g. content-encoding: br for
+                        // brotli-precompressed assets). Uncertified pass-through —
+                        // the boundary verifies only the body hash (v1).
+                        if (asset.ExtraHeaders is not null) headers.AddRange(asset.ExtraHeaders);
                         var certHeader = IcCertifiedAssets.BuildHeaderValue(lookupPath);
                         if (certHeader is not null)
                         {

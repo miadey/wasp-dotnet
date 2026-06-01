@@ -1,0 +1,642 @@
+@* /stable — phpMyAdmin-style explorer for stable memory.
+   Left: tree (Server → Collections → Keys). Right: value detail.
+   State is encoded in the URL:
+     ?c=<collection-name>          highlight collection, list keys
+     ?c=<collection-name>&k=<id>   load + show one value
+   Pure render-as-query: every click is an <a> the bridge picks up,
+   no JS, no SignalR. *@
+
+@page "/stable"
+
+@{
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("c", out var activeC);
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("k", out var activeK);
+
+    var collections = WaspSample.BlazorWasp.StableExplorer.All;
+    var activeCol = string.IsNullOrEmpty(activeC)
+        ? null
+        : WaspSample.BlazorWasp.StableExplorer.Find(activeC);
+    var pages = WaspSample.BlazorWasp.StableExplorer.StablePages;
+    var bytes = WaspSample.BlazorWasp.StableExplorer.StableBytes;
+
+    // Pagination: 100 keys/page, ?p=<page>.
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("p", out var pStr);
+    int page = 0;
+    if (!string.IsNullOrEmpty(pStr)) int.TryParse(pStr, out page);
+    if (page < 0) page = 0;
+    const int PageSize = 100;
+
+    IReadOnlyList<WaspSample.BlazorWasp.StableKey> keys = Array.Empty<WaspSample.BlazorWasp.StableKey>();
+    int totalKeys = 0;
+    WaspSample.BlazorWasp.StableValue? value = null;
+    var editableFields = new HashSet<string>(StringComparer.Ordinal);
+    if (activeCol is not null)
+    {
+        totalKeys = activeCol.Count;
+        keys = activeCol.ListKeys(page * PageSize, PageSize);
+        if (!string.IsNullOrEmpty(activeK)) value = activeCol.GetValue(activeK);
+        foreach (var f in activeCol.EditableFields) editableFields.Add(f);
+    }
+    var canisterIdText = WaspSample.BlazorWasp.AdminService.CanisterIdText();
+}
+
+<PageTitle>Stable memory · explorer</PageTitle>
+
+<div class="sx-shell">
+    <aside class="sx-tree">
+        <div class="sx-server">
+            <div class="sx-server-row">
+                <span class="sx-server-icon">⛁</span>
+                <span class="sx-server-name">canister stable memory</span>
+            </div>
+            <div class="sx-server-meta">
+                <span><b>@pages</b> pages</span>
+                <span><b>@FormatBytes(bytes)</b></span>
+                <span><b>@collections.Count</b> collections</span>
+            </div>
+        </div>
+
+        <ul class="sx-tree-list">
+            @foreach (var c in collections)
+            {
+                var isActive = activeCol is not null && c.Name == activeCol.Name;
+                <li class="@(isActive ? "sx-col active" : "sx-col")">
+                    <a class="sx-col-row" href="/stable?c=@c.Name">
+                        <span class="sx-twisty">@(isActive ? "▾" : "▸")</span>
+                        <span class="sx-col-name">@c.DisplayName</span>
+                        <span class="sx-col-count">@c.Count</span>
+                    </a>
+                    <div class="sx-col-desc">@c.Description</div>
+                    @if (isActive)
+                    {
+                        <ul class="sx-keys">
+                            @if (keys.Count == 0)
+                            {
+                                <li class="sx-empty">empty</li>
+                            }
+                            @foreach (var k in keys)
+                            {
+                                var keyActive = k.Id == activeK ? "sx-key active" : "sx-key";
+                                <li>
+                                    <a class="@keyActive" href="/stable?c=@c.Name&k=@k.Id">
+                                        <span class="sx-key-name">@k.Display</span>
+                                        @if (k.Summary is not null)
+                                        {
+                                            <span class="sx-key-sum">@k.Summary</span>
+                                        }
+                                    </a>
+                                </li>
+                            }
+                        </ul>
+                        @if (totalKeys > PageSize)
+                        {
+                            var lastPage = (totalKeys - 1) / PageSize;
+                            <div class="sx-pager">
+                                @if (page > 0)
+                                {
+                                    <a class="sx-page-btn" href="/stable?c=@c.Name&p=@(page - 1)">‹ prev</a>
+                                }
+                                <span class="sx-page-info">@(page + 1) / @(lastPage + 1)</span>
+                                @if (page < lastPage)
+                                {
+                                    <a class="sx-page-btn" href="/stable?c=@c.Name&p=@(page + 1)">next ›</a>
+                                }
+                            </div>
+                        }
+                    }
+                </li>
+            }
+        </ul>
+    </aside>
+
+    <section class="sx-detail">
+        <div class="sx-auth" data-sx-canister="@canisterIdText">
+            <div class="sx-auth-status" data-sx-status>
+                <span class="sx-auth-dot" data-sx-dot></span>
+                <span data-sx-label>anonymous · read-only</span>
+            </div>
+            <button type="button" class="sx-auth-btn" data-sx-login>Login with Internet Identity</button>
+            <button type="button" class="sx-auth-btn sx-auth-btn-ghost" data-sx-logout style="display:none;">Logout</button>
+        </div>
+        @if (activeCol is null)
+        {
+            <div class="sx-blank">
+                <div class="sx-blank-mark">⛁</div>
+                <h2>Pick a collection on the left.</h2>
+                <p>This canister has <b>@pages</b> pages
+                   (<b>@FormatBytes(bytes)</b>) of stable memory
+                   across <b>@collections.Count</b> registered collections.
+                   Stable memory is the only canister state that survives
+                   a Wasm upgrade — everything else is reset.</p>
+            </div>
+        }
+        else if (value is null)
+        {
+            <div class="sx-blank">
+                <div class="sx-meta">
+                    <h2>@activeCol.DisplayName</h2>
+                    <p class="sx-meta-line">@activeCol.Description</p>
+                    <dl class="sx-kv">
+                        <dt>Name</dt><dd><code>@activeCol.Name</code></dd>
+                        <dt>Items</dt><dd>@activeCol.Count</dd>
+                        <dt>Stable offset</dt><dd><code>@activeCol.StableOffset</code></dd>
+                    </dl>
+                </div>
+                <p class="sx-hint">← pick a row to see its fields.</p>
+            </div>
+        }
+        else
+        {
+            <header class="sx-detail-head">
+                <div class="sx-crumb">
+                    <a href="/stable">stable</a>
+                    <span>/</span>
+                    <a href="/stable?c=@activeCol.Name">@activeCol.DisplayName</a>
+                    <span>/</span>
+                    <span class="sx-crumb-leaf">@value.KeyId</span>
+                </div>
+            </header>
+            <div class="sx-card">
+                <table class="sx-fields">
+                    <thead>
+                        <tr><th>Field</th><th>Value</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var f in value.Fields)
+                        {
+                            var canEdit = editableFields.Contains(f.Name);
+                            <tr data-sx-field="@f.Name" data-sx-editable="@(canEdit ? "1" : "0")">
+                                <td class="sx-fname">@f.Name</td>
+                                <td class="sx-fval" data-sx-fval data-sx-raw="@f.Value">@((MarkupString)RenderValue(f.Value))</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+                @if (editableFields.Count > 0)
+                {
+                    <div class="sx-edit-bar" data-sx-edit-bar style="display:none;">
+                        <button type="button" class="sx-edit-save"
+                                data-sx-save
+                                data-sx-collection="@activeCol!.Name"
+                                data-sx-key="@value.KeyId">Save changes</button>
+                        <span class="sx-edit-msg" data-sx-msg></span>
+                    </div>
+                }
+            </div>
+        }
+    </section>
+</div>
+
+<style>
+    .sx-shell {
+        display: flex; height: calc(100vh - 0px);
+        background: var(--bg);
+    }
+    .sx-tree {
+        flex: 0 0 340px;
+        max-width: 340px;
+        overflow-y: auto;
+        border-right: 1px solid var(--border);
+        background: #12151c;
+        padding: 0.75rem 0;
+    }
+    .sx-server {
+        padding: 0.6rem 1rem 0.85rem;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 0.5rem;
+    }
+    .sx-server-row {
+        display: flex; align-items: center; gap: 0.5rem;
+        color: #fff; font-weight: 600; font-size: 0.95rem;
+    }
+    .sx-server-icon {
+        display: inline-grid; place-items: center;
+        width: 22px; height: 22px; border-radius: 6px;
+        background: linear-gradient(135deg, #5b8def 0%, #b16cf2 100%);
+        font-size: 0.85rem;
+    }
+    .sx-server-meta {
+        display: flex; gap: 0.85rem;
+        margin-top: 0.45rem;
+        font-size: 0.78rem; color: var(--text-dim);
+    }
+    .sx-server-meta b { color: var(--text); font-weight: 600; }
+
+    .sx-tree-list { list-style: none; margin: 0; padding: 0; }
+    .sx-col { padding: 0.1rem 0.35rem; }
+    .sx-col-row {
+        display: flex; align-items: center; gap: 0.45rem;
+        padding: 0.35rem 0.55rem; border-radius: 6px;
+        color: var(--text); text-decoration: none;
+        font-size: 0.88rem; font-weight: 500;
+    }
+    .sx-col-row:hover { background: rgba(255,255,255,0.04); }
+    .sx-col.active > .sx-col-row {
+        background: rgba(91,141,239,0.14);
+        color: #fff;
+    }
+    .sx-twisty {
+        display: inline-block; width: 12px; color: var(--text-dim);
+        font-size: 0.75rem;
+    }
+    .sx-col-name { flex: 1; }
+    .sx-col-count {
+        font-size: 0.7rem; color: var(--text-dim);
+        background: rgba(255,255,255,0.05);
+        padding: 0.05rem 0.4rem; border-radius: 4px;
+    }
+    .sx-col-desc {
+        padding: 0 0.55rem 0.25rem 1.5rem;
+        font-size: 0.7rem; color: var(--text-dim);
+    }
+    .sx-keys {
+        list-style: none; margin: 0.1rem 0 0.35rem;
+        padding: 0 0 0 1.4rem;
+        border-left: 1px solid rgba(255,255,255,0.06);
+        margin-left: 0.95rem;
+    }
+    .sx-key {
+        display: block; padding: 0.25rem 0.5rem;
+        border-radius: 5px; text-decoration: none;
+        color: var(--text); font-size: 0.82rem;
+    }
+    .sx-key:hover { background: rgba(255,255,255,0.04); }
+    .sx-key.active { background: rgba(177,108,242,0.18); color: #fff; }
+    .sx-key-name { display: block; }
+    .sx-key-sum {
+        display: block;
+        font-size: 0.7rem; color: var(--text-dim);
+        margin-top: 0.1rem;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sx-empty {
+        font-size: 0.75rem; color: var(--text-dim);
+        padding: 0.25rem 0.5rem; font-style: italic;
+    }
+
+    .sx-pager {
+        display: flex; align-items: center; gap: 0.5rem;
+        padding: 0.3rem 0.5rem 0.5rem 1.4rem;
+        font-size: 0.75rem;
+    }
+    .sx-page-btn {
+        color: var(--accent); text-decoration: none;
+        padding: 0.15rem 0.4rem; border-radius: 4px;
+        background: rgba(91,141,239,0.1);
+    }
+    .sx-page-btn:hover { background: rgba(91,141,239,0.2); }
+    .sx-page-info { color: var(--text-dim); }
+
+    .sx-detail {
+        flex: 1; overflow-y: auto;
+        padding: 1.5rem 2rem;
+    }
+    .sx-blank {
+        max-width: 540px; margin: 4rem auto;
+        text-align: center; color: var(--text-dim);
+    }
+    .sx-blank-mark {
+        display: inline-grid; place-items: center;
+        width: 56px; height: 56px; border-radius: 14px;
+        background: linear-gradient(135deg, #5b8def 0%, #b16cf2 100%);
+        font-size: 1.6rem; color: #fff;
+        margin-bottom: 1rem;
+    }
+    .sx-blank h2 { color: var(--text); font-weight: 600; margin: 0 0 0.5rem; }
+    .sx-meta { text-align: left; }
+    .sx-meta h2 { margin-top: 0; }
+    .sx-meta-line { color: var(--text-dim); font-size: 0.88rem; }
+    .sx-kv {
+        display: grid; grid-template-columns: 140px 1fr;
+        gap: 0.3rem 1rem;
+        margin: 1rem 0 0;
+    }
+    .sx-kv dt { color: var(--text-dim); font-size: 0.82rem; }
+    .sx-kv dd { margin: 0; font-size: 0.88rem; }
+    .sx-kv code {
+        background: rgba(255,255,255,0.05);
+        padding: 0.05rem 0.35rem; border-radius: 4px;
+        font-size: 0.82rem;
+    }
+    .sx-hint { margin-top: 1rem; color: var(--text-dim); font-size: 0.82rem; }
+
+    .sx-detail-head { margin-bottom: 1rem; }
+    .sx-crumb {
+        display: flex; align-items: center; gap: 0.4rem;
+        font-size: 0.82rem; color: var(--text-dim);
+    }
+    .sx-crumb a { color: var(--accent); text-decoration: none; }
+    .sx-crumb a:hover { text-decoration: underline; }
+    .sx-crumb-leaf { color: var(--text); font-weight: 500; }
+
+    .sx-card {
+        background: var(--bg-elev);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+    }
+    .sx-fields {
+        width: 100%; border-collapse: collapse;
+        font-size: 0.88rem;
+    }
+    .sx-fields thead th {
+        text-align: left; padding: 0.55rem 0.85rem;
+        color: var(--text-dim); font-weight: 500;
+        font-size: 0.75rem; text-transform: uppercase;
+        letter-spacing: 0.04em;
+        background: rgba(255,255,255,0.025);
+        border-bottom: 1px solid var(--border);
+    }
+    .sx-fields td {
+        padding: 0.55rem 0.85rem;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+    }
+    .sx-fields tr:last-child td { border-bottom: none; }
+    .sx-fname { width: 180px; color: var(--text-dim); }
+    .sx-fval { color: var(--text); word-break: break-word; }
+    .sx-fval img {
+        max-width: 240px; max-height: 240px;
+        border-radius: 6px; display: block;
+        background: rgba(255,255,255,0.03);
+    }
+
+    /* Auth pill (top-right of detail pane) */
+    .sx-auth {
+        position: absolute; top: 0.85rem; right: 1.5rem;
+        display: flex; align-items: center; gap: 0.55rem;
+        font-size: 0.78rem;
+    }
+    .sx-detail { position: relative; }
+    .sx-auth-status {
+        display: flex; align-items: center; gap: 0.4rem;
+        color: var(--text-dim);
+        padding: 0.25rem 0.6rem;
+        background: rgba(255,255,255,0.04);
+        border-radius: 999px;
+    }
+    .sx-auth-dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #6b7180;
+    }
+    .sx-auth-dot.sx-ok { background: #6ee7b7; }
+    .sx-auth-dot.sx-warn { background: #fbbf24; }
+    .sx-auth-btn {
+        background: linear-gradient(135deg, #5b8def 0%, #b16cf2 100%);
+        color: #fff; border: none; cursor: pointer;
+        padding: 0.35rem 0.85rem; border-radius: 999px;
+        font-size: 0.78rem; font-weight: 500;
+        font-family: inherit;
+    }
+    .sx-auth-btn:hover { filter: brightness(1.1); }
+    .sx-auth-btn-ghost {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-dim);
+    }
+
+    /* Edit inputs (rendered in place by JS for admin users) */
+    .sx-fval input.sx-edit-input {
+        background: #0f1115; color: var(--text);
+        border: 1px solid rgba(91,141,239,0.4);
+        border-radius: 6px;
+        padding: 0.4rem 0.6rem;
+        font-family: inherit; font-size: 0.88rem;
+        width: 100%; max-width: 360px;
+    }
+    .sx-fval input.sx-edit-input:focus {
+        outline: none;
+        border-color: #5b8def;
+        box-shadow: 0 0 0 2px rgba(91,141,239,0.2);
+    }
+    .sx-edit-bar {
+        display: flex; align-items: center; gap: 0.85rem;
+        padding: 0.65rem 0.85rem;
+        border-top: 1px solid var(--border);
+        background: rgba(255,255,255,0.02);
+    }
+    .sx-edit-save {
+        background: linear-gradient(135deg, #5b8def 0%, #b16cf2 100%);
+        color: #fff; border: none; cursor: pointer;
+        padding: 0.4rem 0.95rem; border-radius: 6px;
+        font-size: 0.82rem; font-weight: 500;
+        font-family: inherit;
+    }
+    .sx-edit-save:hover { filter: brightness(1.1); }
+    .sx-edit-save:disabled { opacity: 0.5; cursor: not-allowed; }
+    .sx-edit-msg { font-size: 0.78rem; }
+    .sx-edit-msg.sx-ok { color: #6ee7b7; }
+    .sx-edit-msg.sx-err { color: #fca5a5; }
+</style>
+
+<script type="module">
+    // Browser-side helper for /stable.
+    //
+    // Wires II login + signed update calls so that admin-gated edits
+    // arrive at the canister with msg_caller == the user's II principal.
+    // Plain fetch() POSTs to the canister land as anonymous, so they
+    // can't be authorised — every edit MUST go through agent-js's
+    // signed call path.
+    //
+    // Dependencies loaded from esm.sh CDN (no bundle in the canister).
+
+    // esm.sh resolves transitive deps independently, which lands on a
+    // candid version that's missing `bufFromBufLike` (renamed in 2.x).
+    // ?deps= forces the whole dfinity tree onto a single version so
+    // identity, agent and candid all agree on each other's exports.
+    import { Actor, HttpAgent } from "https://esm.sh/@@dfinity/agent@@2.4.1?deps=@@dfinity/candid@@2.4.1,@@dfinity/principal@@2.4.1,@@dfinity/identity@@2.4.1,@@dfinity/agent@@2.4.1";
+    import { AuthClient } from "https://esm.sh/@@dfinity/auth-client@@2.4.1?deps=@@dfinity/candid@@2.4.1,@@dfinity/principal@@2.4.1,@@dfinity/identity@@2.4.1,@@dfinity/agent@@2.4.1";
+    import { IDL } from "https://esm.sh/@@dfinity/candid@@2.4.1?deps=@@dfinity/principal@@2.4.1";
+
+    const root = document.querySelector(".sx-auth");
+    if (!root) { /* page didn't render — bail */ } else {
+
+    const canisterId = root.dataset.sxCanister;
+    const dotEl   = root.querySelector("[data-sx-dot]");
+    const labelEl = root.querySelector("[data-sx-label]");
+    const loginBtn  = root.querySelector("[data-sx-login]");
+    const logoutBtn = root.querySelector("[data-sx-logout]");
+
+    const httpRequestIDL = IDL.Record({
+        method:  IDL.Text,
+        url:     IDL.Text,
+        headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+        body:    IDL.Vec(IDL.Nat8),
+    });
+    const httpResponseIDL = IDL.Record({
+        status_code: IDL.Nat16,
+        headers:     IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)),
+        body:        IDL.Vec(IDL.Nat8),
+        upgrade:     IDL.Opt(IDL.Bool),
+    });
+    const idlFactory = ({ IDL }) => IDL.Service({
+        http_request:        IDL.Func([httpRequestIDL], [httpResponseIDL], ["query"]),
+        http_request_update: IDL.Func([httpRequestIDL], [httpResponseIDL], []),
+    });
+
+    let authClient, identity, agent, actor;
+    let whoami = { principal: "2vxsx-fae", isAdmin: false, isController: false };
+
+    async function ensureAgent() {
+        authClient = await AuthClient.create();
+        identity = authClient.getIdentity();
+        agent = new HttpAgent({ identity, host: "https://icp0.io" });
+        actor = Actor.createActor(idlFactory, { agent, canisterId });
+    }
+
+    async function callCanisterHttp(method, url, jsonBody) {
+        const bodyBytes = jsonBody
+            ? Array.from(new TextEncoder().encode(jsonBody))
+            : [];
+        const req = {
+            method, url,
+            headers: jsonBody ? [["content-type", "application/json"]] : [],
+            body: bodyBytes,
+        };
+        // Always use update calls — query calls go through a different
+        // dispatcher that doesn't return MapGet bodies, so whoami via
+        // query lands empty. Update calls are signed + replicated
+        // (~1.5 s) but match what the user expects for both reads of
+        // their own auth state and admin-gated writes.
+        const fn = actor.http_request_update;
+        const resp = await fn(req);
+        const text = new TextDecoder().decode(new Uint8Array(resp.body));
+        return { status: Number(resp.status_code), text };
+    }
+
+    async function refreshWhoami() {
+        try {
+            const r = await callCanisterHttp("GET", "/api/admin/whoami");
+            whoami = JSON.parse(r.text);
+        } catch (e) {
+            whoami = { principal: "2vxsx-fae", isAdmin: false, isController: false };
+        }
+        renderAuth();
+        renderEditUi();
+    }
+
+    function renderAuth() {
+        const isLoggedIn = whoami.principal !== "2vxsx-fae";
+        const tier = whoami.isAdmin ? "admin"
+            : whoami.isController ? "controller"
+            : isLoggedIn ? "logged in · not admin"
+            : "anonymous · read-only";
+        dotEl.classList.remove("sx-ok", "sx-warn");
+        if (whoami.isAdmin || whoami.isController) dotEl.classList.add("sx-ok");
+        else if (isLoggedIn) dotEl.classList.add("sx-warn");
+        const short = whoami.principal.length > 14
+            ? whoami.principal.slice(0, 5) + "…" + whoami.principal.slice(-3)
+            : whoami.principal;
+        labelEl.textContent = isLoggedIn ? `${short} · ${tier}` : tier;
+        labelEl.title = whoami.principal;
+        loginBtn.style.display  = isLoggedIn ? "none" : "";
+        logoutBtn.style.display = isLoggedIn ? "" : "none";
+    }
+
+    function renderEditUi() {
+        const editBar = document.querySelector("[data-sx-edit-bar]");
+        if (!editBar) return;
+        const rows = document.querySelectorAll("tr[data-sx-editable='1']");
+        if (!whoami.isAdmin) {
+            // Read-only: leave the table alone, hide save bar.
+            editBar.style.display = "none";
+            return;
+        }
+        editBar.style.display = "";
+        rows.forEach(tr => {
+            const fval = tr.querySelector("[data-sx-fval]");
+            if (!fval || fval.querySelector(".sx-edit-input")) return;
+            const raw = fval.dataset.sxRaw || "";
+            fval.innerHTML = "";
+            const input = document.createElement("input");
+            input.type = "text";
+            input.className = "sx-edit-input";
+            input.value = raw;
+            input.dataset.sxFieldInput = tr.dataset.sxField;
+            fval.appendChild(input);
+        });
+    }
+
+    loginBtn.addEventListener("click", async () => {
+        loginBtn.disabled = true;
+        await ensureAgent();
+        await new Promise((resolve, reject) => authClient.login({
+            identityProvider: "https://identity.ic0.app",
+            maxTimeToLive: 8n * 60n * 60n * 1_000_000_000n,  // 8h in nanos
+            onSuccess: resolve,
+            onError: reject,
+        }));
+        await ensureAgent();   // rebuild agent with the freshly-stored identity
+        loginBtn.disabled = false;
+        await refreshWhoami();
+    });
+
+    logoutBtn.addEventListener("click", async () => {
+        if (!authClient) return;
+        await authClient.logout();
+        await ensureAgent();
+        await refreshWhoami();
+    });
+
+    document.addEventListener("click", async (ev) => {
+        const btn = ev.target.closest("[data-sx-save]");
+        if (!btn) return;
+        if (!whoami.isAdmin) return;
+        const msg = document.querySelector("[data-sx-msg]");
+        const collection = btn.dataset.sxCollection;
+        const key = btn.dataset.sxKey;
+        const patch = {};
+        document.querySelectorAll("input[data-sx-field-input]")
+            .forEach(i => { patch[i.dataset.sxFieldInput] = i.value; });
+        btn.disabled = true;
+        msg.textContent = "saving…";
+        msg.className = "sx-edit-msg";
+        try {
+            const body = JSON.stringify({ collection, key, patch });
+            const r = await callCanisterHttp("POST", "/api/admin/stable_edit", body);
+            const parsed = (() => { try { return JSON.parse(r.text); } catch { return {}; } })();
+            if (r.status === 200 && parsed.ok) {
+                msg.textContent = "saved · reloading…";
+                msg.className = "sx-edit-msg sx-ok";
+                setTimeout(() => location.reload(), 600);
+            } else {
+                msg.textContent = "error: " + (parsed.error || r.status);
+                msg.className = "sx-edit-msg sx-err";
+            }
+        } catch (e) {
+            msg.textContent = "error: " + (e.message || e);
+            msg.className = "sx-edit-msg sx-err";
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
+    // Boot: build the agent with the (possibly-cached) identity, then
+    // read /api/admin/whoami via a signed call so the principal we
+    // display matches what the canister will see on an edit.
+    (async () => {
+        await ensureAgent();
+        await refreshWhoami();
+    })();
+
+    }
+</script>
+
+@code {
+    private static string FormatBytes(ulong b)
+    {
+        if (b < 1024UL) return b + " B";
+        if (b < 1024UL * 1024UL) return (b / 1024.0).ToString("0.0") + " KiB";
+        if (b < 1024UL * 1024UL * 1024UL) return (b / (1024.0 * 1024.0)).ToString("0.0") + " MiB";
+        return (b / (1024.0 * 1024.0 * 1024.0)).ToString("0.00") + " GiB";
+    }
+
+    // The ImageStoreCollection.Preview field smuggles an <img> tag through
+    // as the field value so the explorer can show it inline. Every other
+    // field is HTML-escaped.
+    private static string RenderValue(string raw)
+    {
+        if (raw.StartsWith("<img ", StringComparison.Ordinal)) return raw;
+        return System.Net.WebUtility.HtmlEncode(raw);
+    }
+}

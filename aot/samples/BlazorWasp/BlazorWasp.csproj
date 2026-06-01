@@ -48,21 +48,21 @@
     <UnmanagedEntryPointsAssembly Include="Wasp.AspNetCore" />
   </ItemGroup>
 
-  <!-- TetrisWasm Blazor WebAssembly publish output, embedded as
-       managed resources. Each file becomes available via
-       Assembly.GetManifestResourceStream("tetris/<path>") at runtime;
-       TetrisAssets registers them as static assets under /tetris/.
-       Build order: publish TetrisWasm first (build-and-deploy.sh
-       handles this), then this project picks up the publish dir.
-       Only embed the uncompressed versions — boundary nodes won't
-       transparently encode/decode brotli for us. -->
+  <!-- TetrisWasm / CrmWasm Blazor WebAssembly publish output, embedded as
+       managed resources. Embed ONLY the brotli-precompressed (.br) copy of
+       each asset: TetrisAssets/CrmAssets serve the .br bytes at the original
+       path (".br" stripped) with Content-Encoding: br; the browser decodes
+       transparently. The IC boundary forwards Content-Encoding verbatim and we
+       certify the compressed body (v1 body-hash), so it verifies on icp0.io —
+       and the embedded payload is ~3x smaller than the uncompressed copy.
+       LogicalName keeps the trailing .br (e.g. tetris/_framework/foo.wasm.br);
+       the registrar strips it. build-and-deploy.sh asserts every file has a
+       .br sibling before embedding, so nothing is silently dropped. -->
   <ItemGroup>
-    <EmbeddedResource Include="..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*"
-                      Exclude="..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*.br;..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*.gz">
+    <EmbeddedResource Include="..\TetrisWasm\bin\Release\net10.0\publish\wwwroot\tetris\**\*.br">
       <LogicalName>tetris/%(RecursiveDir)%(FileName)%(Extension)</LogicalName>
     </EmbeddedResource>
-    <EmbeddedResource Include="..\CrmWasm\bin\Release\net10.0\publish\wwwroot\crm\**\*"
-                      Exclude="..\CrmWasm\bin\Release\net10.0\publish\wwwroot\crm\**\*.br;..\CrmWasm\bin\Release\net10.0\publish\wwwroot\crm\**\*.gz">
+    <EmbeddedResource Include="..\CrmWasm\bin\Release\net10.0\publish\wwwroot\crm\**\*.br">
       <LogicalName>crm/%(RecursiveDir)%(FileName)%(Extension)</LogicalName>
     </EmbeddedResource>
   </ItemGroup>

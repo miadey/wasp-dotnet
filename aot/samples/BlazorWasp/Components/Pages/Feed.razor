@@ -1,0 +1,192 @@
+@* WASP Bzzz — FEED kind (F2). A feed = a Feed-kind ServerService server with a
+   single "timeline" room; a POST = a root message (ReplyToId==0) in it; replies/
+   quotes = messages with ReplyToId set; likes = reactions; reposts = RepostService;
+   follows = FollowService. Query: ?s=<feedServerId> (a feed), ?p=<postId> (detail),
+   none = global home (all feed servers, reverse-chron). Reads are anonymous SSR;
+   post/reply/like/repost/follow go through the signed client (data-feed-*). *@
+
+@using System.Linq
+@inject ChatService Chat
+@inject ServerService Servers
+@inject ServerKindService Kinds
+@inject FollowService Follows
+@inject RepostService Reposts
+@inject MembershipService Membership
+
+@{
+    var q = Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery;
+    q.TryGetValue("s", out var sKey);
+    q.TryGetValue("p", out var pKey);
+    q.TryGetValue("n", out var nKey);
+    int.TryParse(sKey, out var feedId);
+    long.TryParse(pKey, out var postId);
+    int nShow; if (!int.TryParse(nKey, out nShow) || nShow <= 0) nShow = 30; if (nShow > 300) nShow = 300;
+    var servers = Servers.ListServers();
+    var feed = servers.FirstOrDefault(x => x.Id == feedId);
+    var isFeed = feed is not null && Kinds.KindOf(feed.Id) == ServerKind.Feed;
+    var now = (long)(Wasp.IcCdk.Ic0.time() / 1_000_000UL);
+    int Timeline(int sid) { var ch = Servers.ChannelsOf(sid); return ch.Count > 0 ? ch[0] : 0; }
+}
+
+<div class="fd">
+@if (feedId > 0 && !isFeed)
+{
+    <div class="fd-empty"><h1>Feed</h1><p>This space isn't a feed. <a href="/chat">Open the app →</a></p></div>
+}
+else if (isFeed && Membership.IsPrivate(feed.Id))
+{
+    @* PRIVATE feed: anonymous SSR emits NO posts — a gate + an empty pane the signed
+       client fills via /api/feed/read (members only). *@
+    <header class="fd-bar"><span class="fd-bar-kind">Feed</span><span class="fd-bar-sep">/</span><span class="fd-cat-name">@feed.Name</span></header>
+    <div class="fd-stream" data-private-feed data-server="@feed.Id">
+        <div class="fr-lock-tag" style="display:inline-flex;margin:0.6rem 1rem">🔒 Private feed — members only</div>
+        <div class="fd-private-msg" data-private-feed-msg style="padding:0 1rem">Sign in to view.</div>
+        <div data-private-feed-stream></div>
+    </div>
+}
+else if (isFeed && postId > 0)
+{
+    @* ── Post detail: the post + its replies/quotes ── *@
+    var tl = Timeline(feed.Id);
+    var post = Chat.AllMessages().FirstOrDefault(m => m.Id == postId && m.RoomId == tl && !m.IsDeleted);
+    var replies = Chat.AllMessages().Where(m => m.RoomId == tl && m.ReplyToId == postId && !m.IsDeleted).OrderBy(m => m.Id).ToList();
+
+    <header class="fd-bar"><a class="fd-back" href="/feed?s=@feed.Id">@feed.Name</a><span class="fd-bar-sep">/</span><span class="fd-bar-kind">Feed</span></header>
+    <div class="fd-stream">
+        @if (post is null)
+        {
+            <div class="fd-empty"><p>This post is gone.</p></div>
+        }
+        else
+        {
+            @PostCard(post, true)
+            <div class="fd-replies-h">@replies.Count repl@(replies.Count == 1 ? "y" : "ies")</div>
+            <div class="fd-reply-box" data-ii-when="in">
+                <textarea class="fd-input" data-feed-reply-text="@postId" rows="2" placeholder="Post your reply…"></textarea>
+                <button type="button" class="fd-btn fd-btn-primary" data-feed-reply data-room="@tl" data-replyto="@postId">Reply</button>
+            </div>
+            <div class="fd-signin-note" data-ii-when="out">Sign in to reply.</div>
+            @foreach (var r in replies) { @PostCard(r, false) }
+        }
+    </div>
+}
+else if (isFeed)
+{
+    @* ── A feed's timeline ── *@
+    var tl = Timeline(feed.Id);
+    var allPosts = Chat.AllMessages().Where(m => m.RoomId == tl && m.ReplyToId == 0 && !m.IsDeleted).OrderByDescending(m => m.AtMs).ToList();
+    var posts = allPosts.Take(nShow).ToList();
+    var morePosts = allPosts.Count - posts.Count;
+
+    <header class="fd-bar"><span class="fd-bar-kind">Feed</span><span class="fd-bar-sep">/</span><span class="fd-cat-name">@feed.Name</span><a class="fd-app-link" href="/feed">All feeds</a></header>
+    <div class="fd-stream">
+        <div class="fd-head">
+            <div><h1>@feed.Name</h1><p class="fd-sub">@Follows.FollowerCount(feed.Id) follower@(Follows.FollowerCount(feed.Id) == 1 ? "" : "s") · @allPosts.Count post@(allPosts.Count == 1 ? "" : "s")</p></div>
+            <button type="button" class="fd-btn fd-btn-ghost fd-follow" data-feed-follow data-server="@feed.Id" data-on="1" data-ii-when="in">+ Follow</button>
+        </div>
+        <div class="fd-compose" data-ii-when="in">
+            <textarea class="fd-input" data-feed-post-text="@tl" rows="2" placeholder="What's happening on-chain?"></textarea>
+            <button type="button" class="fd-btn fd-btn-primary" data-feed-post data-room="@tl">Post</button>
+        </div>
+        <div class="fd-signin-note" data-ii-when="out">Sign in to post to this feed.</div>
+        @if (allPosts.Count == 0) { <div class="fd-empty"><p>No posts yet. Be the first.</p></div> }
+        else { @foreach (var p in posts) { @PostCard(p, false) } }
+        @if (morePosts > 0)
+        {
+            <a class="fd-loadmore" href="/feed?s=@feed.Id&n=@(nShow + 30)">Load @Math.Min(30, morePosts) more</a>
+        }
+    </div>
+}
+else
+{
+    @* ── Global home: every feed-kind server's recent posts, reverse-chron ── *@
+    var feedServers = servers.Where(s => Kinds.KindOf(s.Id) == ServerKind.Feed && !Membership.IsPrivate(s.Id)).ToList();
+    var all = new List<(ChatService.Message m, string src, int srcId)>();
+    foreach (var fs in feedServers)
+    {
+        var tl = Timeline(fs.Id);
+        foreach (var m in Chat.AllMessages())
+            if (m.RoomId == tl && m.ReplyToId == 0 && !m.IsDeleted) all.Add((m, fs.Name, fs.Id));
+    }
+    var home = all.OrderByDescending(x => x.m.AtMs).Take(nShow).ToList();
+    var moreHome = all.Count - home.Count;
+
+    <header class="fd-bar"><span class="fd-bar-kind">Feed</span><span class="fd-bar-sep">/</span><span class="fd-cat-name">The feed</span></header>
+    <div class="fd-stream">
+        @* Following / All feeds tabs. "All feeds" renders server-side (anonymous-safe);
+           "Following" is personalized → the signed client fills [data-feed-following-stream]
+           via /api/feed/home, since the anonymous SSR can't know who is viewing. *@
+        <div class="fd-tabs">
+            <button type="button" class="fd-tab" data-feed-tab="following">Following</button>
+            <button type="button" class="fd-tab on" data-feed-tab="all">All feeds</button>
+        </div>
+        <div class="fd-following" data-feed-following hidden>
+            <div class="fd-following-stream" data-feed-following-stream></div>
+        </div>
+        <div data-feed-all>
+            <div class="fd-head"><div><h1>The feed</h1><p class="fd-sub">Posts from @feedServers.Count feed@(feedServers.Count == 1 ? "" : "s"), newest first</p></div></div>
+            @if (home.Count == 0)
+            {
+                <div class="fd-empty"><p>No feeds yet. Create one: the <strong>+</strong> in the app rail → pick <strong>Feed</strong>.</p></div>
+            }
+            else
+            {
+                @foreach (var x in home)
+                {
+                    <div class="fd-srctag"><a href="/feed?s=@x.srcId">@x.src</a></div>
+                    @PostCard(x.m, false, x.srcId)
+                }
+                @if (moreHome > 0)
+                {
+                    <a class="fd-loadmore" href="/feed?n=@(nShow + 30)">Load @Math.Min(30, moreHome) more</a>
+                }
+            }
+        </div>
+    </div>
+}
+</div>
+
+@code {
+    private int SrcServerId(ChatService.Message m) => Servers.ServerOfChannel(m.RoomId);
+
+    private RenderFragment PostCard(ChatService.Message m, bool big, int srcId = -1) => __builder =>
+    {
+        var now = (long)(Wasp.IcCdk.Ic0.time() / 1_000_000UL);
+        var sid = srcId >= 0 ? srcId : Servers.ServerOfChannel(m.RoomId);
+        var author = Author(m);
+        var likes = Chat.ReactionsOf(m.Id).Values.Sum();
+        var replyCount = Chat.AllMessages().Count(x => x.ReplyToId == m.Id && !x.IsDeleted);
+        var rcount = Reposts.RepostCount(m.Id);
+        <div class="@(big ? "fd-post fd-post-big" : "fd-post")">
+            <span class="fd-av" style="background:@AvColor(author)">@Initial(author)</span>
+            <div class="fd-post-main">
+                <div class="fd-post-head"><span class="fd-author">@author</span><span class="fd-time">@Ago(m.AtMs, now)</span>@if (m.AuthorPrincipal.Length > 0){<button type="button" class="fd-followbtn" data-user-follow data-principal="@m.AuthorPrincipal" data-on="1" data-ii-when="in">Follow</button>}</div>
+                <div class="fd-body">@Body(m.Text)</div>
+                <div class="fd-actions">
+                    <a class="fd-act" href="/feed?s=@sid&p=@m.Id" title="Replies">💬 @replyCount</a>
+                    <button type="button" class="fd-act" data-feed-repost data-msg="@m.Id" data-on="1" title="Repost">🔁 @rcount</button>
+                    <button type="button" class="fd-act" data-feed-like data-msg="@m.Id" title="Like">❤ @likes</button>
+                </div>
+            </div>
+        </div>
+    };
+
+    private static string Author(ChatService.Message m)
+        => !string.IsNullOrWhiteSpace(m.Username) ? m.Username
+           : (m.AuthorPrincipal.Length >= 5 ? m.AuthorPrincipal.Substring(0, 5) : (m.AuthorPrincipal.Length > 0 ? m.AuthorPrincipal : "anon"));
+    private static string Initial(string name) => string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpperInvariant();
+    private static string AvColor(string name) { int h = 0; foreach (var c in name) h = (h * 31 + c) & 0xffff; return $"hsl({h % 360},55%,45%)"; }
+
+    private MarkupString Body(string raw) => (MarkupString)MessageHtml.Render(raw);
+    private static string Ago(long ms, long now)
+    {
+        if (ms <= 0) return "";
+        var d = now - ms; if (d < 0) d = 0; var sec = d / 1000;
+        if (sec < 60) return "now";
+        var min = sec / 60; if (min < 60) return min + "m";
+        var hr = min / 60; if (hr < 24) return hr + "h";
+        var day = hr / 24; if (day < 30) return day + "d";
+        var mo = day / 30; if (mo < 12) return mo + "mo";
+        return (day / 365) + "y";
+    }
+}

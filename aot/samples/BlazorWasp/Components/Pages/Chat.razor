@@ -4,67 +4,309 @@
    re-renders via data-wasp-persist. No JavaScript in this view. *@
 
 @inject WaspSample.BlazorWasp.ChatService ChatState
-@inject WaspSample.BlazorWasp.ImageStore Images
+@inject WaspSample.BlazorWasp.PresenceService Presence
+@inject WaspSample.BlazorWasp.ServerService Servers
+@inject WaspSample.BlazorWasp.ThreadService Threads
+@inject WaspSample.BlazorWasp.ModService Mod
+@inject WaspSample.BlazorWasp.MembershipService Membership
+@inject WaspSample.BlazorWasp.ServerKindService Kinds
 
 @{
     Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("r", out var roomKey);
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("older", out var olderKey);
     var activeRoom = ResolveActiveRoom(roomKey);
-    var messages = ChatState.MessagesIn(activeRoom.Id);
+    // ?older=N widens the window from the last 50 to last (50+N) — survives the
+    // reactivity poll because it rides the URL (the poll re-fetches location.search).
+    int olderN; if (!int.TryParse(olderKey, out olderN) || olderN < 0) olderN = 0; if (olderN > 450) olderN = 450;
+    var messages = ChatState.MessagesIn(activeRoom.Id, 50 + olderN);
     var rooms = ChatState.Rooms;
+    // Pull live-viewer names from the global online-presence bucket
+    // ("__online__"). wasp.js heartbeats every 10 s with the user's
+    // II display name (or "Visitor" for anons), so anyone currently
+    // browsing the site shows as online in the chat rail even if
+    // they haven't posted recently.
+    var activeNames = Presence.Viewers("__online__").Select(v => v.Name).ToList();
+    var members = ChatState.ListMembers(activeNames);
+    var onlineCount = members.Count(m => m.Online);
+
+    // Servers (guilds) + DM surface resolution. The default server (id 0,
+    // "Wasp") is always present and wraps the existing rooms; ?s=<id>
+    // selects a server, ?dm=1 switches to the private DM surface.
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("s", out var serverKey);
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("dm", out var dmKey);
+    var dmMode = dmKey == "1";
+    var serverList = Servers.ListServers();
+    var activeServerId = (!dmMode && int.TryParse(serverKey, out var sid)) ? sid : 0;
+    var activeServer = serverList.FirstOrDefault(x => x.Id == activeServerId) ?? serverList[0];
+    // Channel ids of the active server -> filter the room rail to them.
+    var serverChannelIds = new HashSet<int>(activeServer.ChannelIds);
+    var serverRooms = rooms.Where(r => serverChannelIds.Contains(r.Id)).ToList();
+
+    // Public message threads. ?thread=<parentMsgId> opens the side panel
+    // (replacing the members list). Reply ↩ and the 💬 badge both link here.
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("thread", out var threadKey);
+    long activeThreadId = (long.TryParse(threadKey, out var tid) && tid > 0) ? tid : 0;
+    var threadCounts = Threads.Counts();
+    // Base query (server + room) for building thread / close links.
+    var roomQuery = $"s={activeServer.Id}&r={Uri.EscapeDataString(activeRoom.Name)}";
+
+    // #hashtag filtered view. ?tag=<bare> narrows the channel to messages that
+    // contain that hashtag (case-insensitive; a '#word' inside a code fence
+    // doesn't count). The #pill links here and the banner ✕ clears it — both
+    // are plain <a>s the bridge SPA-navs, and the 5 s reactivity poll re-fetches
+    // the current URL (incl. ?tag=) so the filter survives refreshes with no
+    // wasp.js involvement. Filtering `messages` itself keeps the header count,
+    // empty state and list all in sync.
+    Wasp.AspNetCore.Blazor.Wasp.WaspContext.RouteQuery.TryGetValue("tag", out var tagKey);
+    var activeTag = string.IsNullOrWhiteSpace(tagKey) ? null : tagKey.Trim().TrimStart('#');
+    if (activeTag is not null)
+        messages = messages.Where(m => !m.IsDeleted && ChatService.MessageHasTag(m.Text, activeTag)).ToList();
+
+    // B4 PRIVACY CORE: the SSR/render-as-query path is ANONYMOUS, so it must NEVER
+    // emit a private server's message bodies (they'd be world-readable + cached).
+    // Zero out the list for a private channel — members fetch the real content via
+    // the signed /api/chat/private-read endpoint (filled client-side into the gate).
+    var channelIsPrivate = !dmMode && Membership.IsPrivate(activeServer.Id);
+    if (channelIsPrivate)
+        messages = System.Array.Empty<ChatService.Message>();
+    // "Load older" is offered only on a public, unfiltered channel that actually has
+    // more history than the current window.
+    var hasOlder = !channelIsPrivate && activeTag is null && ChatState.MessageCountIn(activeRoom.Id) > (50 + olderN);
+
+    // Inline-segment renderer: markdown subset (bold/italic/strike/
+    // underline/code), http(s) links and @mentions. Used for both the
+    // message body and the reply-quote preview. Blazor auto-escapes
+    // @seg.Value so all rendered content is XSS-safe; links are forced
+    // to http(s) by the tokenizer and carry rel=noopener nofollow.
+    RenderFragment<IReadOnlyList<ChatService.Segment>> renderSegs = segs =>
+    @<text>@foreach (var seg in segs)
+    {
+        if (seg.IsSpoiler)
+        {
+            <span class="dc-spoiler@(StyleSuffix(seg))" data-wasp-spoiler tabindex="0" role="button" aria-label="spoiler, click to reveal">@seg.Value</span>
+        }
+        else if (seg.IsCode)
+        {
+            <code class="dc-code">@seg.Value</code>
+        }
+        else if (seg.IsLink)
+        {
+            var ve = ChatService.TryVideoEmbed(seg.Value);
+            if (ve is not null)
+            {
+                <button type="button" class="dc-video-card" data-wasp-video="@ve.Src" data-wasp-video-kind="@ve.Kind"
+                        aria-label="Play @ve.Provider video">
+                    <span class="dc-video-play" aria-hidden="true">▶</span>
+                    <span class="dc-video-meta">
+                        <span class="dc-video-label">@ve.Provider</span>
+                        <span class="dc-video-url">@seg.Value</span>
+                    </span>
+                </button>
+            }
+            else
+            {
+                <a class="dc-link@(StyleSuffix(seg))" href="@seg.Value" target="_blank" rel="noopener nofollow">@seg.Value</a>
+            }
+        }
+        else if (seg.IsMention)
+        {
+            <span class="dc-mention@(StyleSuffix(seg))" style="@MentionStyle(seg.Value)">@("@" + seg.Value)</span>
+        }
+        else if (seg.IsHashtag)
+        {
+            <a class="dc-tag@(StyleSuffix(seg))" style="@TagStyle(seg.Value)" href="/chat?s=@activeServer.Id&r=@(Uri.EscapeDataString(activeRoom.Name))&tag=@(Uri.EscapeDataString(seg.Value))" data-wasp-tag="@seg.Value">@("#" + seg.Value)</a>
+        }
+        else if (seg.HasStyle)
+        {
+            <span class="@StyleClass(seg)">@seg.Value</span>
+        }
+        else
+        {
+            @seg.Value
+        }
+    }</text>;
+
+    // Block-level renderer: code fences + blockquotes wrap inline runs.
+    RenderFragment<IReadOnlyList<ChatService.Block>> renderBlocks = blocks =>
+    @<text>@foreach (var b in blocks)
+    {
+        if (b.Kind == ChatService.BlockKind.Code)
+        {
+            <div class="dc-codeblock">
+                @if (!string.IsNullOrEmpty(b.Lang))
+                {
+                    <span class="dc-codeblock-lang" aria-hidden="true">@b.Lang</span>
+                }
+                <pre class="dc-codeblock-pre"><code>@b.Text</code></pre>
+            </div>
+        }
+        else if (b.Kind == ChatService.BlockKind.Quote)
+        {
+            <blockquote class="dc-quote">@renderSegs(b.Segments)</blockquote>
+        }
+        else
+        {
+            <div class="dc-para">@renderSegs(b.Segments)</div>
+        }
+    }</text>;
 }
 
 <PageTitle>#@activeRoom.Name · chat</PageTitle>
 
-<div class="dc-shell">
-    <aside class="dc-rooms">
-        <div class="dc-server">
-            <div class="dc-server-name">Wasp Chat</div>
-            <div class="dc-server-sub">on the Internet Computer</div>
-        </div>
-
-        <div class="dc-rooms-header">Text channels</div>
-        <ul class="dc-rooms-list">
-            @foreach (var r in rooms)
-            {
-                var cls = r.Id == activeRoom.Id ? "dc-room active" : "dc-room";
-                <li>
-                    <a class="@cls" href="/chat?r=@r.Name">
-                        <span class="dc-hash">#</span><span class="dc-room-name">@r.Name</span>
-                    </a>
-                </li>
-            }
-        </ul>
-
-        <form class="dc-room-add" autocomplete="off">
-            <input name="newRoom" type="text" class="dc-input"
-                   placeholder="new-channel" maxlength="20" />
-            <button type="button" class="dc-btn-add" @onclick="HandleCreateRoom"
-                    aria-label="Create channel">+</button>
+<div class="dc-shell @(activeThreadId > 0 ? "dc-shell-thread" : null)">
+    <nav class="dc-rail" aria-label="Servers">
+        @foreach (var srv in serverList)
+        {
+            var railCls = (!dmMode && srv.Id == activeServerId) ? "dc-rail-server active" : "dc-rail-server";
+            var srvKind = Kinds.KindOf(srv.Id);
+            var railHref = srvKind == ServerKind.Forum ? $"/forum?s={srv.Id}" : srvKind == ServerKind.Feed ? $"/feed?s={srv.Id}" : $"/chat?s={srv.Id}";
+            <a class="@railCls" href="@railHref" data-server-id="@srv.Id" title="@(srv.Name + (srvKind == ServerKind.Forum ? " (forum)" : srvKind == ServerKind.Feed ? " (feed)" : "") + (Membership.IsPrivate(srv.Id) ? " · private" : ""))" aria-label="@srv.Name">
+                <span class="dc-rail-pill" aria-hidden="true"></span>
+                <span class="dc-rail-icon" style="@RailIconStyle(srv)">@RailGlyph(srv)</span>
+                @if (Membership.IsPrivate(srv.Id))
+                {
+                    <span class="dc-rail-lock" aria-hidden="true">🔒</span>
+                }
+            </a>
+        }
+        <span class="dc-rail-sep" aria-hidden="true"></span>
+        <a class="dc-rail-server dc-rail-dm @(dmMode ? "active" : null)" href="/chat?dm=1" data-dm-rail title="Direct Messages" aria-label="Direct Messages">
+            <span class="dc-rail-pill" aria-hidden="true"></span>
+            <span class="dc-rail-icon dc-rail-dm-icon" aria-hidden="true">✉</span>
+            <span class="dc-rail-dm-lock" aria-hidden="true">🔒</span>
+        </a>
+        @* Create-server: super-admin only. Hidden by default; the signed
+           server-actions client unhides it after /api/server/myrole confirms
+           super-admin, and routes the click through a signed update call. *@
+        <form class="dc-rail-add" autocomplete="off" data-create-server-ui hidden>
+            <input name="newServer" type="text" class="dc-rail-add-input" placeholder="name" maxlength="20" data-wasp-keep />
+            <input type="hidden" name="newServerKind" value="discussion" data-wasp-keep />
+            <div class="dc-kind-pick" role="group" aria-label="Server kind">
+                <button type="button" class="dc-kindbtn on" data-kind-pick="discussion" title="Discussion — live channels (chat)">💬</button>
+                <button type="button" class="dc-kindbtn" data-kind-pick="forum" title="Forum — topics, replies &amp; accepted answers">▤</button>
+                <button type="button" class="dc-kindbtn" data-kind-pick="feed" title="Feed — a timeline of posts">📰</button>
+            </div>
+            <label class="dc-rail-private" title="Private: members only (signed reads)">
+                <input name="newServerPrivate" type="checkbox" data-wasp-keep /> 🔒
+            </label>
+            <button type="button" class="dc-rail-server dc-rail-plus" data-create-server aria-label="Create server">+</button>
         </form>
+    </nav>
 
+    <aside class="dc-rooms">
+        @if (dmMode)
+        {
+            <div class="dc-server"><div class="dc-server-name">Direct Messages</div><div class="dc-server-sub">signed, participants-only</div></div>
+            <div class="dc-dm-gate" data-dm-gate>
+                <p class="dc-dm-gate-text">Direct messages are private. Sign in with Internet Identity to read and send DMs — the canister only returns threads where you are a participant.</p>
+                <button type="button" class="dc-dm-signin" data-ii-signin><span class="ii-mark">∞</span> Sign in to DM</button>
+            </div>
+            <div class="dc-dm-threads" data-dm-threads hidden>
+                <div class="dc-dm-threads-empty" data-dm-threads-empty>No conversations yet.</div>
+            </div>
+        }
+        else
+        {
+            <div class="dc-server"><div class="dc-server-name">@activeServer.Name</div><div class="dc-server-sub">@(activeServer.Id == 0 ? "on the Internet Computer" : "community server")</div></div>
+            <div class="dc-rooms-header">Text channels</div>
+            <ul class="dc-rooms-list">
+                @foreach (var r in serverRooms)
+                {
+                    var cls = r.Id == activeRoom.Id ? "dc-room active" : "dc-room";
+                    <li><a class="@cls" href="/chat?s=@activeServer.Id&r=@r.Name" data-room-id="@r.Id"><span class="dc-hash">#</span><span class="dc-room-name">@r.Name</span><span class="dc-unread-badge" data-room-unread="@r.Id" hidden></span></a></li>
+                }
+            </ul>
+            @* Create-channel: server-admin/owner (or super-admin) only. Hidden by
+               default; the signed client unhides it for the active server and
+               routes the click through a signed /api/server-channels call. *@
+            <form class="dc-room-add" autocomplete="off" data-create-channel-ui hidden>
+                <input name="newRoom" type="text" class="dc-input" placeholder="new-channel" maxlength="20" />
+                <button type="button" class="dc-btn-add" data-create-channel aria-label="Create channel">+</button>
+            </form>
+            @* Server settings — owner/admin only. Hidden until the signed client's
+               /api/server/myrole confirms canManageMembers; the roster + current
+               visibility are filled by renderSettings() over a signed call. *@
+            <div class="dc-server-settings" data-manage-ui data-server-settings hidden>
+                <div class="dc-settings-title">Server settings</div>
+                <div class="dc-settings-row">
+                    <span class="dc-settings-vis">Visibility: <strong data-visibility-state>—</strong></span>
+                    <button type="button" class="dc-settings-btn" data-visibility-toggle data-private="false">Make private</button>
+                </div>
+                <div class="dc-settings-row dc-member-add">
+                    <input name="memberPrincipal" type="text" class="dc-input dc-member-input" placeholder="member principal" maxlength="80" autocomplete="off" />
+                    <button type="button" class="dc-settings-btn" data-add-member-btn>Add member</button>
+                </div>
+                <ul class="dc-member-list" data-member-list></ul>
+                <div class="dc-settings-danger">
+                    <button type="button" class="dc-settings-btn dc-settings-del" data-delete-server data-armed="0">Delete this server</button>
+                </div>
+            </div>
+        }
         <div class="dc-user-card">
-            <input name="username" type="text" class="dc-input dc-username-card"
-                   placeholder="set your name" maxlength="24" data-wasp-persist />
+            <input name="username" type="text" class="dc-input dc-username-card" placeholder="set your name" maxlength="24" data-wasp-persist />
+            <span class="dc-username-locked" data-ii-name aria-live="polite">—</span>
             <span class="dc-user-dot"></span>
         </div>
     </aside>
 
+    @if (!dmMode)
+    {
     <section class="dc-channel">
         <header class="dc-channel-header">
             <div class="dc-channel-title">
                 <span class="dc-hash">#</span><span>@activeRoom.Name</span>
             </div>
             <div class="dc-channel-tag">@messages.Count message@(messages.Count == 1 ? "" : "s")</div>
+            @* Moderator-only channel lock toggle — hidden until ServerAdminScript
+               confirms mod/super for this server. data-locked drives the toggle. *@
+            <button type="button" class="dc-lock-toggle" data-mod-controls hidden
+                    data-mod-lock="@activeRoom.Id"
+                    data-locked="@(Mod.IsLocked(activeRoom.Id) ? "true" : "false")"
+                    title="@(Mod.IsLocked(activeRoom.Id) ? "Channel locked — unlock" : "Lock channel")">
+                @(Mod.IsLocked(activeRoom.Id) ? "🔒" : "🔓")
+            </button>
         </header>
 
-        <div class="dc-messages" id="chat-scroll" @onclick="HandleReact">
-            @if (messages.Count == 0)
+        @if (activeTag is not null)
+        {
+            <div class="dc-tagfilter">
+                <span class="dc-tagfilter-label">Filtering by</span>
+                <span class="dc-tag" style="@TagStyle(activeTag)">#@activeTag</span>
+                <a class="dc-tagfilter-clear" href="/chat?@roomQuery" title="Clear filter">✕ clear</a>
+            </div>
+        }
+
+        <div class="dc-messages" id="chat-scroll" data-room-id="@activeRoom.Id">
+            @if (channelIsPrivate)
+            {
+                @* Private channel: SSR emits NO messages. The signed client fills
+                   [data-private-stream] for members; non-members keep the gate. *@
+                <div class="dc-private-gate" data-private-pane data-room-id="@activeRoom.Id">
+                    <div class="dc-empty-mark">🔒</div>
+                    <h2>Private channel</h2>
+                    <p data-private-gate-msg>Members only — sign in with Internet Identity. Content loads only if you’re a member of this server.</p>
+                </div>
+                <div class="dc-private-stream" data-private-stream></div>
+            }
+            else if (messages.Count == 0)
             {
                 <div class="dc-empty">
                     <div class="dc-empty-mark">#</div>
-                    <h2>Welcome to <span class="dc-hash">#</span>@activeRoom.Name!</h2>
-                    <p>This is the start of the channel. Drop the first message.</p>
+                    @if (activeTag is not null)
+                    {
+                        <h2>No messages tagged <span class="dc-hash">#</span>@activeTag</h2>
+                        <p>Nothing in <span class="dc-hash">#</span>@activeRoom.Name matches this hashtag yet. <a href="/chat?@roomQuery">Clear filter</a></p>
+                    }
+                    else
+                    {
+                        <h2>Welcome to <span class="dc-hash">#</span>@activeRoom.Name!</h2>
+                        <p>This is the start of the channel. Drop the first message.</p>
+                    }
                 </div>
+            }
+            @if (hasOlder)
+            {
+                <a class="dc-loadolder" href="/chat?@roomQuery&older=@(olderN + 50)">↑ Load older messages</a>
             }
             @{
                 string? prevUser = null;
@@ -74,8 +316,10 @@
             @foreach (var msg in messages)
             {
                 var date = DateOnly(msg.AtMs);
-                var rawReactions = ChatState.ReactionsOf(msg.Id);
-                var liveReactions = rawReactions.Where(kv => kv.Value > 0).ToList();
+                var rawReactions = msg.IsDeleted
+                    ? (IReadOnlyList<KeyValuePair<string, int>>)System.Array.Empty<KeyValuePair<string, int>>()
+                    : ChatState.ReactionsOf(msg.Id).Where(kv => kv.Value > 0).ToList();
+                var liveReactions = rawReactions;
                 // A message with reactions always gets its own head row
                 // so the badges have somewhere to live — break grouping.
                 var grouped = prevUser == msg.Username
@@ -87,7 +331,8 @@
                     <div class="dc-divider"><span>@date</span></div>
                 }
                 ChatService.Message? parent = msg.ReplyToId > 0 ? ChatState.FindMessage(msg.ReplyToId) : null;
-                <div class="dc-message @(grouped ? "dc-message-grouped" : null)">
+                <div class="dc-message @(grouped ? "dc-message-grouped" : null) @(msg.IsDeleted ? "dc-message-deleted" : null)"
+                     data-msg-id="@msg.Id" data-author="@msg.Username" data-author-principal="@msg.AuthorPrincipal">
                     @if (!grouped)
                     {
                         <div class="dc-avatar" style="@AvatarStyle(msg.Username)">@AvatarLetter(msg.Username)</div>
@@ -102,7 +347,16 @@
                             <div class="dc-reply-quote">
                                 <span class="dc-reply-quote-arrow">↪</span>
                                 <span class="dc-reply-quote-user" style="@UsernameStyle(parent.Username)">@parent.Username</span>
-                                <span class="dc-reply-quote-text">@Truncate(parent.Text, 80)</span>
+                                <span class="dc-reply-quote-text">
+                                    @if (parent.IsDeleted)
+                                    {
+                                        <em>message deleted</em>
+                                    }
+                                    else
+                                    {
+                                        @renderSegs(ChatService.ParseSegments(Truncate(parent.Text, 80)))
+                                    }
+                                </span>
                             </div>
                         }
                         <div class="dc-message-head @(grouped ? "dc-message-head-compact" : null)">
@@ -116,7 +370,7 @@
                                         @foreach (var kv in liveReactions)
                                         {
                                             <button type="button" class="dc-react-badge"
-                                                    data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{kv.Key}\"}}")'
+                                                    data-chat-react="@msg.Id" data-react-emoji="@kv.Key"
                                                     aria-label="@kv.Key">
                                                 <span class="dc-react-e">@kv.Key</span>
                                                 <span class="dc-react-n">@kv.Value</span>
@@ -125,31 +379,77 @@
                                     </span>
                                 }
                             }
-                            <div class="dc-actions" aria-hidden="true">
-                                <button type="button" class="dc-action"
-                                        data-wasp-reply-to="@msg.Id"
-                                        aria-label="reply">↩</button>
-                                <button type="button" class="dc-action"
-                                        data-wasp-popover-trigger
-                                        aria-label="add reaction">☺</button>
-                                <div class="dc-popover dc-emoji-popover" data-wasp-popover>
-                                    @foreach (var emoji in ChatService.ReactionEmojis)
-                                    {
-                                        <button type="button" class="dc-react-pick"
-                                                data-wasp-args='@($"{{\"msgId\":\"{msg.Id}\",\"emoji\":\"{emoji}\"}}")'
-                                                aria-label="react @emoji">@emoji</button>
-                                    }
+                            @if (!msg.IsDeleted && Mod.IsPinned(msg.Id))
+                            {
+                                <span class="dc-pin-badge" title="pinned by a moderator">📌</span>
+                            }
+                            @if (!msg.IsDeleted)
+                            {
+                                <div class="dc-actions" aria-hidden="true">
+                                    <a class="dc-action @(activeThreadId == msg.Id ? "dc-action-active" : null)"
+                                       href="/chat?@(roomQuery)&thread=@msg.Id"
+                                       aria-label="reply in thread">↩</a>
+                                    <button type="button" class="dc-action dc-action-own"
+                                            data-wasp-edit-id="@msg.Id"
+                                            data-wasp-edit-raw="@msg.Text"
+                                            aria-label="edit">✎</button>
+                                    <button type="button" class="dc-action"
+                                            data-wasp-popover-trigger
+                                            aria-label="add reaction">☺</button>
+                                    <div class="dc-popover dc-emoji-popover dc-emoji-grid" data-wasp-popover>
+                                        @foreach (var emoji in ChatService.PickerEmojis)
+                                        {
+                                            <button type="button" class="dc-react-pick"
+                                                    data-chat-react="@msg.Id" data-react-emoji="@emoji"
+                                                    aria-label="react @emoji">@emoji</button>
+                                        }
+                                    </div>
+                                    <button type="button" class="dc-action dc-action-own dc-action-danger"
+                                            data-wasp-popover-trigger
+                                            aria-label="delete">🗑</button>
+                                    <div class="dc-popover dc-confirm-popover" data-wasp-popover>
+                                        <button type="button" class="dc-confirm-del"
+                                                data-chat-delete="@msg.Id">Delete message</button>
+                                    </div>
+                                    @* Moderator-only controls — hidden until ServerAdminScript
+                                       confirms RoleOf>=Moderator (or super) for this server. *@
+                                    <span class="dc-mod-actions" data-mod-controls hidden>
+                                        <button type="button" class="dc-action" data-mod-pin="@msg.Id"
+                                                data-pinned="@(Mod.IsPinned(msg.Id) ? "true" : "false")"
+                                                aria-label="pin message">📌</button>
+                                        <button type="button" class="dc-action dc-action-danger"
+                                                data-mod-delete="@msg.Id" aria-label="remove as moderator">🛡</button>
+                                        @if (msg.IsOwned)
+                                        {
+                                            <button type="button" class="dc-action" data-mod-mute="@msg.AuthorPrincipal"
+                                                    data-mute-server="@activeServerId" aria-label="mute author 1h">🔇</button>
+                                        }
+                                    </span>
                                 </div>
-                            </div>
+                            }
                         </div>
-                        @if (!string.IsNullOrEmpty(msg.Text))
+                        @if (msg.IsDeleted)
                         {
-                            <div class="dc-text">@msg.Text</div>
+                            <div class="dc-text dc-text-deleted"><em>message deleted</em></div>
                         }
-                        @if (msg.ImageId > 0)
+                        else if (!string.IsNullOrEmpty(msg.Text))
                         {
-                            <a class="dc-attach" href="/_chat/img?id=@msg.ImageId" target="_blank" rel="noopener">
+                            <div class="dc-text">@renderBlocks(ChatService.ParseBlocks(msg.Text))@if (msg.IsEdited)
+                                {<span class="dc-edited" title="edited">(edited)</span>}</div>
+                        }
+                        @if (!msg.IsDeleted && msg.ImageId > 0)
+                        {
+                            <a class="dc-attach" href="/_chat/img?id=@msg.ImageId" data-wasp-lightbox="/_chat/img?id=@msg.ImageId">
                                 <img src="/_chat/img?id=@msg.ImageId" alt="attachment" loading="lazy" />
+                            </a>
+                        }
+                        @if (!msg.IsDeleted && threadCounts.TryGetValue(msg.Id, out var trc) && trc > 0)
+                        {
+                            <a class="dc-thread-badge @(activeThreadId == msg.Id ? "active" : null)"
+                               href="/chat?@(roomQuery)&thread=@msg.Id">
+                                <span class="dc-thread-badge-icon">💬</span>
+                                <span class="dc-thread-badge-count">@trc</span>
+                                <span class="dc-thread-badge-label">@(trc == 1 ? "reply" : "replies")</span>
                             </a>
                         }
                     </div>
@@ -162,12 +462,15 @@
 
         <form class="dc-composer" autocomplete="off">
             <input name="roomId" type="hidden" value="@activeRoom.Id" />
-            @* All four below: data-wasp-keep so reactivity-poll DOM
+            @* All below: data-wasp-keep so reactivity-poll DOM
                swaps don't clobber the user's in-progress composition. *@
             <input name="replyTo" type="hidden" value="" data-wasp-keep />
             <input name="replyToUser" type="hidden" value="" data-wasp-keep />
             <input name="replyToText" type="hidden" value="" data-wasp-keep />
             <input name="imageData" type="hidden" value="" data-wasp-keep />
+            <input name="editMsgId" type="hidden" value="" data-wasp-keep />
+
+            <div class="dc-typing" aria-live="polite"></div>
 
             <div class="dc-reply-badge" aria-live="polite">
                 <span class="dc-reply-icon">↪</span>
@@ -177,6 +480,13 @@
                 </span>
                 <button type="button" class="dc-reply-cancel"
                         data-wasp-cancel-reply aria-label="cancel reply">×</button>
+            </div>
+
+            <div class="dc-edit-badge" aria-live="polite">
+                <span class="dc-reply-icon">✎</span>
+                <span class="dc-reply-summary">Editing message — <span class="dc-edit-hint">press Enter to save, Esc to cancel</span></span>
+                <button type="button" class="dc-reply-cancel"
+                        data-wasp-cancel-edit aria-label="cancel edit">×</button>
             </div>
 
             <div class="dc-attach-preview" data-wasp-image-preview>
@@ -191,21 +501,163 @@
                            data-wasp-image-into="imageData" />
                     📎
                 </label>
-                @foreach (var emoji in ChatService.ReactionEmojis)
-                {
-                    <button type="button" class="dc-emoji-btn"
-                            data-wasp-emoji="@emoji"
-                            aria-label="insert @emoji">@emoji</button>
-                }
+                <div class="dc-emoji-picker-wrap">
+                    <button type="button" class="dc-emoji-btn dc-emoji-more"
+                            data-wasp-popover-trigger aria-label="more emoji">➕</button>
+                    <div class="dc-popover dc-emoji-popover dc-emoji-popover-up dc-emoji-grid" data-wasp-popover>
+                        @foreach (var emoji in ChatService.PickerEmojis)
+                        {
+                            <button type="button" class="dc-react-pick"
+                                    data-wasp-emoji="@emoji"
+                                    aria-label="insert @emoji">@emoji</button>
+                        }
+                    </div>
+                </div>
             </div>
             <textarea name="text" class="dc-composer-input" rows="1"
                       placeholder="Message #@activeRoom.Name"
-                      data-wasp-keep></textarea>
-            <button type="button" class="dc-send" @onclick="HandleSend" aria-label="Send">
+                      data-wasp-keep data-wasp-mention-target></textarea>
+            <button type="button" class="dc-send" data-chat-send aria-label="Send">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21l20.99-9L2.01 3 2 10l15 2-15 2z"/></svg>
             </button>
         </form>
     </section>
+    }
+
+    @if (dmMode)
+    {
+        <section class="dc-channel dc-dm-channel" data-dm-pane>
+            <header class="dc-channel-header"><div class="dc-channel-title"><span class="dc-dm-at">@@</span><span data-dm-peer-name>Direct Messages</span></div></header>
+            <div class="dc-dm-gate dc-dm-gate-center" data-dm-gate-center>
+                <div class="dc-empty-mark">🔒</div><h2>Private messages</h2>
+                <p>Sign in with Internet Identity to open a conversation. Messages are delivered only to you and the recipient.</p>
+                <button type="button" class="dc-dm-signin" data-ii-signin><span class="ii-mark">∞</span> Sign in to DM</button>
+            </div>
+            <div class="dc-dm-empty-pick" data-dm-empty-pick hidden><div class="dc-empty-mark">✉</div><h2>Your messages</h2><p>Pick a conversation, or hit Message on a member.</p></div>
+            <div class="dc-messages dc-dm-stream" id="dm-scroll" data-dm-stream hidden></div>
+            <form class="dc-composer dc-dm-composer" data-dm-composer autocomplete="off" hidden>
+                <input type="hidden" data-dm-peer-input value="" />
+                <textarea class="dc-composer-input" rows="1" placeholder="Message" data-dm-input data-wasp-keep></textarea>
+                <button type="button" class="dc-send" data-dm-send aria-label="Send DM"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21l20.99-9L2.01 3 2 10l15 2-15 2z"/></svg></button>
+            </form>
+        </section>
+    }
+
+    @if (activeThreadId > 0)
+    {
+        ChatService.Message? parentMsg = ChatState.FindMessage(activeThreadId);
+        // B4: a thread anchored on a PRIVATE server's message must NOT render its
+        // parent/replies on the anonymous SSR path — suppress + gate, members fetch
+        // via the signed /api/thread/read (same posture as the private channel list).
+        var threadParentPrivate = parentMsg is not null && Membership.IsPrivate(Servers.ServerOfChannel(parentMsg.RoomId));
+        IReadOnlyList<ThreadService.ThreadMsg> threadMsgs = threadParentPrivate
+            ? System.Array.Empty<ThreadService.ThreadMsg>()
+            : Threads.Read(activeThreadId);
+        <aside class="dc-thread" aria-label="Thread">
+            <header class="dc-thread-header">
+                <span class="dc-thread-title">Thread</span>
+                <a class="dc-thread-close" href="/chat?@(roomQuery)" aria-label="Close thread">×</a>
+            </header>
+            <div class="dc-thread-scroll" id="thread-scroll">
+                @if (threadParentPrivate)
+                {
+                    <div class="dc-private-gate" data-private-thread-pane data-thread-parent="@activeThreadId">
+                        <div class="dc-empty-mark">🔒</div>
+                        <h2>Private thread</h2>
+                        <p data-private-thread-msg>Members only — sign in with Internet Identity to view.</p>
+                    </div>
+                    <div class="dc-private-stream" data-private-thread-stream></div>
+                }
+                else if (parentMsg is not null)
+                {
+                    <div class="dc-thread-parent">
+                        <div class="dc-message-head">
+                            <span class="dc-username" style="@UsernameStyle(parentMsg.Username)">@parentMsg.Username</span>
+                            <span class="dc-time">@FormatTime(parentMsg.AtMs)</span>
+                        </div>
+                        @if (parentMsg.IsDeleted)
+                        {
+                            <div class="dc-text dc-text-deleted"><em>message deleted</em></div>
+                        }
+                        else
+                        {
+                            <div class="dc-text">@renderSegs(ChatService.ParseSegments(parentMsg.Text))</div>
+                        }
+                    </div>
+                    <div class="dc-thread-divider"><span>@threadMsgs.Count @(threadMsgs.Count == 1 ? "reply" : "replies")</span></div>
+                }
+                else
+                {
+                    <div class="dc-thread-divider"><span>thread</span></div>
+                }
+                @foreach (var tm in threadMsgs)
+                {
+                    <div class="dc-message">
+                        <div class="dc-avatar" style="@AvatarStyle(tm.Username)">@AvatarLetter(tm.Username)</div>
+                        <div class="dc-message-body">
+                            <div class="dc-message-head">
+                                <span class="dc-username" style="@UsernameStyle(tm.Username)">@tm.Username</span>
+                                <span class="dc-time">@FormatTime(tm.AtMs)</span>
+                            </div>
+                            <div class="dc-text">@renderSegs(ChatService.ParseSegments(tm.Text))</div>
+                        </div>
+                    </div>
+                }
+            </div>
+            <form class="dc-composer dc-thread-composer" autocomplete="off">
+                <input type="hidden" name="threadParent" value="@activeThreadId" data-wasp-keep />
+                <textarea name="text" class="dc-composer-input" rows="1" placeholder="Reply in thread…" data-wasp-keep></textarea>
+                <button type="button" class="dc-send" data-thread-send aria-label="Send reply">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21l20.99-9L2.01 3 2 10l15 2-15 2z"/></svg>
+                </button>
+            </form>
+        </aside>
+    }
+    else
+    {
+    <aside class="dc-members" aria-label="Members">
+        <div class="dc-members-section">
+            <div class="dc-members-header">Online — @onlineCount</div>
+            @foreach (var m in members.Where(x => x.Online))
+            {
+                <div class="dc-member-row dc-member-online">
+                    <button type="button" class="dc-member dc-member-online"
+                            data-wasp-mention="@m.Username"
+                            aria-label="mention @m.Username">
+                        <span class="dc-member-avatar-wrap">
+                            <span class="dc-member-avatar" style="@AvatarStyle(m.Username)">@AvatarLetter(m.Username)</span>
+                            <span class="dc-member-dot"></span>
+                        </span>
+                        <span class="dc-member-name" style="@UsernameStyle(m.Username)">@m.Username</span>
+                    </button>
+                    <button type="button" class="dc-member-dm" data-wasp-dm-user="@m.Username" title="Message @m.Username" aria-label="Message @m.Username">✉</button>
+                </div>
+            }
+        </div>
+
+        @{ var offline = members.Where(x => !x.Online).ToList(); }
+        @if (offline.Count > 0)
+        {
+            <div class="dc-members-section">
+                <div class="dc-members-header">Offline — @offline.Count</div>
+                @foreach (var m in offline)
+                {
+                    <div class="dc-member-row dc-member-offline">
+                        <button type="button" class="dc-member dc-member-offline"
+                                data-wasp-mention="@m.Username"
+                                aria-label="mention @m.Username">
+                            <span class="dc-member-avatar-wrap">
+                                <span class="dc-member-avatar" style="@AvatarStyle(m.Username)">@AvatarLetter(m.Username)</span>
+                            </span>
+                            <span class="dc-member-name">@m.Username</span>
+                        </button>
+                        <button type="button" class="dc-member-dm" data-wasp-dm-user="@m.Username" title="Message @m.Username" aria-label="Message @m.Username">✉</button>
+                    </div>
+                }
+            </div>
+        }
+    </aside>
+    }
 </div>
 
 @code {
@@ -226,69 +678,21 @@
         return rooms.Count > 0 ? rooms[0] : ChatState.CreateRoom("general");
     }
 
-    void HandleSend()
-    {
-        var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
-        if (!args.TryGetValue("roomId", out var roomIdStr) || !int.TryParse(roomIdStr, out var roomId)) return;
-        args.TryGetValue("text", out var text);
-        text ??= "";
-
-        long imageId = 0;
-        if (args.TryGetValue("imageData", out var dataUrl) && !string.IsNullOrEmpty(dataUrl))
-        {
-            // Expect a "data:image/png;base64,XXXXX..." URL from the bridge.
-            var comma = dataUrl.IndexOf(',');
-            var contentType = "application/octet-stream";
-            string b64;
-            if (comma > 0)
-            {
-                var prefix = dataUrl.Substring(0, comma);
-                b64 = dataUrl.Substring(comma + 1);
-                var colon = prefix.IndexOf(':');
-                var semi  = prefix.IndexOf(';');
-                if (colon >= 0 && semi > colon)
-                    contentType = prefix.Substring(colon + 1, semi - colon - 1);
-            }
-            else
-            {
-                b64 = dataUrl;
-            }
-            try
-            {
-                var bytes = Convert.FromBase64String(b64);
-                imageId = Images.Add(contentType, bytes);
-            }
-            catch { /* invalid image data — silently drop the attachment */ }
-        }
-
-        // Either text or image is required.
-        if (string.IsNullOrWhiteSpace(text) && imageId == 0) return;
-
-        var msgArgs = new Dictionary<string, string> { ["text"] = text };
-        if (args.TryGetValue("username", out var username)) msgArgs["username"] = username;
-        if (args.TryGetValue("replyTo", out var replyTo) && long.TryParse(replyTo, out var rt) && rt > 0)
-            msgArgs["replyTo"] = replyTo;
-        if (imageId > 0) msgArgs["imageId"] = imageId.ToString();
-        ChatState.Post(roomId, msgArgs);
-    }
-
     string Truncate(string s, int max)
         => string.IsNullOrEmpty(s) ? "" : (s.Length <= max ? s : s.Substring(0, max) + "…");
 
-    void HandleReact()
-    {
-        var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
-        if (!args.TryGetValue("msgId", out var midStr) || !long.TryParse(midStr, out var msgId)) return;
-        if (!args.TryGetValue("emoji", out var emoji) || string.IsNullOrEmpty(emoji)) return;
-        ChatState.React(msgId, emoji);
-    }
+    // M2 / M2-B: ALL mutations moved OFF the anonymous /_wasp/event bridge onto
+    // signed @dfinity/agent calls (ServerAdminScript) so msg_caller is the real
+    // II principal — server/channel create, message post/edit/delete, REACTIONS
+    // (data-chat-react → /api/chat/react), and THREAD REPLIES (data-thread-send →
+    // /api/thread/reply, author principal captured). No client-supplied string
+    // authorizes any mutation; the former HandleMessageAction/HandleThreadReply/
+    // HandleCreateServer/HandleCreateRoom handlers were removed.
 
-    void HandleCreateRoom()
-    {
-        var args = Wasp.AspNetCore.Blazor.Wasp.WaspContext.FormArgs;
-        if (!args.TryGetValue("newRoom", out var name) || string.IsNullOrWhiteSpace(name)) return;
-        ChatState.CreateRoom(name);
-    }
+    string RailGlyph(ServerService.Server s)
+        => s.Id == 0 ? "∞" : (string.IsNullOrEmpty(s.Name) ? "?" : s.Name.Substring(0, 1).ToUpper());
+    string RailIconStyle(ServerService.Server s)
+        => s.Id == 0 ? "background:#5865f2;" : $"background:hsl({HueFor(s.Name)},50%,45%);";
 
     string AvatarLetter(string username)
         => string.IsNullOrEmpty(username) ? "?" : username.Substring(0, 1).ToUpper();
@@ -302,6 +706,39 @@
 
     string AvatarStyle(string username) => $"background: hsl({HueFor(username)}, 50%, 50%);";
     string UsernameStyle(string username) => $"color: hsl({HueFor(username)}, 60%, 65%);";
+
+    // Mention pill: the same colour-tuple as the username, with a low-
+    // alpha fill so the pill reads as "of-them" without overpowering
+    // surrounding text.
+    string MentionStyle(string username)
+    {
+        var h = HueFor(username);
+        return $"color: hsl({h}, 75%, 80%); background: hsla({h}, 60%, 55%, 0.18);";
+    }
+
+    string TagStyle(string tag)
+    {
+        var h = HueFor(tag);
+        return $"color: hsl({h}, 70%, 78%); background: hsla({h}, 55%, 50%, 0.16);";
+    }
+
+    // Space-joined md-* classes for a segment's active style flags.
+    string StyleClass(ChatService.Segment s)
+    {
+        var sb = new System.Text.StringBuilder();
+        if (s.Bold) sb.Append("md-b ");
+        if (s.Italic) sb.Append("md-i ");
+        if (s.Strike) sb.Append("md-s ");
+        if (s.Underline) sb.Append("md-u ");
+        return sb.ToString().TrimEnd();
+    }
+
+    // Same, but with a leading space for appending onto another class.
+    string StyleSuffix(ChatService.Segment s)
+    {
+        var c = StyleClass(s);
+        return c.Length == 0 ? "" : " " + c;
+    }
 
     string FormatTime(long unixMs)
     {

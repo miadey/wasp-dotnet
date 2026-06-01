@@ -63,8 +63,14 @@
     },
     "razoronic": {
       "type": "custom",
-      "wasm": "samples/RazorOnIc/RazorOnIc.canister.wasm",
-      "candid": "samples/RazorOnIc/razoronic.did",
+      "wasm": "samples/BlazorWasp/BlazorWasp.canister.wasm",
+      "candid": "samples/BlazorWasp/blazorwasp.did",
+      "build": []
+    },
+    "wasp": {
+      "type": "custom",
+      "wasm": "samples/BlazorWasp/BlazorWasp.canister.wasm",
+      "candid": "samples/BlazorWasp/blazorwasp.did",
       "build": []
     },
     "circuitonic": {

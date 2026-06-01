@@ -15,6 +15,12 @@ namespace WaspSample.BlazorWasp;
 /// </summary>
 public static class TetrisAssets
 {
+    // Content-Encoding: br header attached to every brotli-precompressed
+    // asset. v1 certifies the body only, so this rides as an uncertified
+    // pass-through header (same class as content-type/content-length).
+    private static readonly IReadOnlyList<KeyValuePair<string, string>> BrHeader =
+        new[] { new KeyValuePair<string, string>("content-encoding", "br") };
+
     public static void Register()
     {
         var asm = typeof(TetrisAssets).Assembly;
@@ -23,8 +29,14 @@ public static class TetrisAssets
         foreach (var name in resourceNames)
         {
             if (!name.StartsWith("tetris/", StringComparison.Ordinal)) continue;
-            var urlPath = "/" + name;        // → "/tetris/index.html"
-            var contentType = ContentTypeFor(name);
+            // Resources are brotli-precompressed (".br"); serve the compressed
+            // bytes AT the original path with Content-Encoding: br (the browser
+            // decodes transparently). RegisterStaticAsset certifies the SAME
+            // bytes we serve (v1 = body hash), so it verifies on icp0.io.
+            bool isBr = name.EndsWith(".br", StringComparison.Ordinal);
+            var logicalName = isBr ? name.Substring(0, name.Length - 3) : name;
+            var urlPath = "/" + logicalName;        // → "/tetris/_framework/...wasm"
+            var contentType = ContentTypeFor(logicalName);
             byte[] bytes;
             try
             {
@@ -40,8 +52,7 @@ public static class TetrisAssets
             }
             try
             {
-                IcServer.RegisterStaticAsset(urlPath, bytes, contentType);
-                IcCertifiedAssets.Insert(urlPath, bytes);
+                IcServer.RegisterStaticAsset(urlPath, bytes, contentType, isBr ? BrHeader : null);
                 registered++;
             }
             catch (Exception ex)
@@ -50,20 +61,17 @@ public static class TetrisAssets
             }
         }
         Wasp.IcCdk.Reply.Print($"[tetris] registered {registered} static assets");
-        // /tetris (no trailing slash) → serve index.html. Same trick as
-        // the rest of the app uses for its registered shells.
+        // /tetris (no trailing slash) → serve index.html (also brotli).
         try
         {
-            using var s = asm.GetManifestResourceStream("tetris/index.html");
+            using var s = asm.GetManifestResourceStream("tetris/index.html.br");
             if (s is not null)
             {
                 using var ms = new MemoryStream();
                 s.CopyTo(ms);
                 var bytes = ms.ToArray();
-                IcServer.RegisterStaticAsset("/tetris", bytes, "text/html; charset=utf-8");
-                IcCertifiedAssets.Insert("/tetris", bytes);
-                IcServer.RegisterStaticAsset("/tetris/", bytes, "text/html; charset=utf-8");
-                IcCertifiedAssets.Insert("/tetris/", bytes);
+                IcServer.RegisterStaticAsset("/tetris", bytes, "text/html; charset=utf-8", BrHeader);
+                IcServer.RegisterStaticAsset("/tetris/", bytes, "text/html; charset=utf-8", BrHeader);
             }
         }
         catch { /* fallback path-only registration is best-effort */ }
