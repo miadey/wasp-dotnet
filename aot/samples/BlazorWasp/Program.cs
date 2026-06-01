@@ -2602,7 +2602,6 @@ public static class Program
         Group("Servers", ServerKind.Discussion, "/chat", normalized == "/chat", "discussion", "New server");
         Group("Forums", ServerKind.Forum, "/forum", normalized == "/forum", "forum", "New forum");
         Group("Feeds", ServerKind.Feed, "/feed", normalized == "/feed", "feed", "New feed");
-        sb.Append("<div class=\"spaces-grp\"><a class=\"space-item space-dm").Append(dmActive ? " active" : "").Append("\" href=\"/chat?dm=1\"><span class=\"space-ic space-ic-dm\" aria-hidden=\"true\">✉</span><span class=\"space-nm\">Direct messages</span></a></div>");
         // Shared create form (hidden; a "+ New X" button sets the kind + reveals it).
         sb.Append("<form class=\"space-create\" data-create-form autocomplete=\"off\" hidden>");
         sb.Append("<input name=\"newServer\" type=\"text\" class=\"space-create-in\" placeholder=\"name\" maxlength=\"20\" data-wasp-keep />");
@@ -2611,6 +2610,9 @@ public static class Program
         sb.Append("<div class=\"space-create-row\"><button type=\"button\" class=\"space-create-go\" data-create-server>Create</button><button type=\"button\" class=\"space-create-x\" data-create-cancel>Cancel</button></div>");
         sb.Append("</form>");
         sb.Append("</nav>");
+        // Direct messages — pinned to the BOTTOM of the nav (outside the scrollable
+        // groups), just above the account card.
+        sb.Append("<div class=\"spaces-dm\"><a class=\"space-item space-dm").Append(dmActive ? " active" : "").Append("\" href=\"/chat?dm=1\"><span class=\"space-ic space-ic-dm\" aria-hidden=\"true\">✉</span><span class=\"space-nm\">Direct messages</span></a></div>");
         // Internet Identity sign-in — wasp-ii.js swaps these between
         // signed-out / signed-in states on load and on every II event.
         // Server-side we always emit both; CSS hides one based on the
@@ -2623,6 +2625,7 @@ public static class Program
         sb.Append("<span class=\"ii-avatar\" data-ii-avatar>?</span>");
         sb.Append("<span class=\"ii-meta\">");
         sb.Append("<span class=\"ii-name\" data-ii-name>—</span>");
+        sb.Append("<button type=\"button\" class=\"ii-id\" data-ii-principal data-copy-principal title=\"Your principal (on-chain ID) — click to copy\">ID: —</button>");
         sb.Append("<button type=\"button\" class=\"ii-signout\" data-ii-signout>Sign out</button>");
         sb.Append("</span>");
         sb.Append("</div>");
@@ -2740,6 +2743,7 @@ public static class Program
         .space-create-go { flex: 1; background: #5b8def; color: #fff; border: 0; border-radius: 6px; padding: 0.35rem; font: inherit; font-size: 0.82rem; cursor: pointer; }
         .space-create-go:hover { background: #4a7ad8; }
         .space-create-x { background: transparent; color: #8b95ab; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 0.35rem 0.6rem; font: inherit; font-size: 0.82rem; cursor: pointer; }
+        .spaces-dm { flex: 0 0 auto; padding: 0.35rem 0.5rem 0.1rem; margin-top: 0.2rem; border-top: 1px solid rgba(255,255,255,0.07); }
         .space-item.dc-rail-unread .space-nm::after { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #f23f42; margin-left: 0.4rem; vertical-align: middle; }
         .sidebar-auth {
             margin-top: auto;
@@ -2793,6 +2797,15 @@ public static class Program
             color: #fff; font-size: 0.88rem; font-weight: 600;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
+        .ii-id {
+            align-self: flex-start; margin-top: 1px;
+            background: transparent; border: 0; padding: 0;
+            color: rgba(255,255,255,0.45); font: inherit; font-size: 0.68rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            cursor: pointer; max-width: 100%;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
+        }
+        .ii-id:hover { color: #5b8cff; }
         .ii-signout {
             align-self: flex-start;
             margin-top: 2px;
@@ -3969,7 +3982,7 @@ public static class Program
                 overflow-x: auto; overflow-y: hidden; align-items: stretch;
             }
             .spaces-grp { flex-direction: row; margin-bottom: 0; gap: 0; }
-            .spaces-h, .space-new, .space-create, .space-empty, .space-lock { display: none; }
+            .spaces-h, .space-new, .space-create, .space-empty, .space-lock, .spaces-dm { display: none; }
             .space-item {
                 flex: 0 0 auto; max-width: 84px;
                 flex-direction: column; gap: 2px;
@@ -4622,6 +4635,14 @@ function applyState() {
       let h = 0; for (const c of name) h = (h * 131 + c.charCodeAt(0)) & 0xFFFFFF;
       el.style.background = 'hsl(' + (h % 360) + ', 50%, 50%)';
     });
+    // Principal (on-chain ID): show a truncated form, full value on hover (title)
+    // + data-principal for click-to-copy.
+    document.querySelectorAll('[data-ii-principal]').forEach(el => {
+      const short = principal.length > 14 ? (principal.slice(0, 8) + '…' + principal.slice(-4)) : principal;
+      el.textContent = 'ID: ' + short;
+      el.setAttribute('title', principal);
+      el.setAttribute('data-principal', principal);
+    });
     // Force-fill any visible username inputs. Tag them as locked so
     // a wandering user can't accidentally type a different name into
     // the chat sidebar while signed in.
@@ -4708,6 +4729,16 @@ document.addEventListener('click', (e) => {
   const t = e.target;
   if (t.closest && t.closest('[data-ii-signin]')) { e.preventDefault(); signIn(); return; }
   if (t.closest && t.closest('[data-ii-signout]')) { e.preventDefault(); signOut(); return; }
+  const cp = t.closest && t.closest('[data-copy-principal]');
+  if (cp) {
+    e.preventDefault();
+    const p = cp.getAttribute('data-principal') || '';
+    if (!p) return;
+    const flash = (msg) => { const prev = cp.textContent; cp.textContent = msg; setTimeout(() => { cp.textContent = prev; }, 1200); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(p).then(() => flash('Copied!')).catch(() => flash(p));
+    else flash(p);
+    return;
+  }
 });
 
 // Re-apply on every SPA-style DOM swap (wasp.js replaces #wasp-root on
