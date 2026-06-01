@@ -239,6 +239,20 @@
     var scrollKept = (scrollStrategy === 'preserve') ? _snapshotScroll() : null;
 
     target.innerHTML = batch.html;
+    // Auto-reload on redeploy: the shell carries a per-deploy build stamp
+    // (data-build, resets each --mode upgrade). If a freshly-rendered batch
+    // carries a different stamp than the one this page loaded under, the
+    // canister was upgraded since load — the <head> CSS/JS is now stale, so
+    // do a full reload to pick up the new shell. (Same-deploy renders match,
+    // and the reloaded page matches itself, so this can't loop.)
+    try {
+      var _be = target.querySelector('[data-build]');
+      var _bv = _be ? _be.getAttribute('data-build') : null;
+      if (_bv) {
+        if (window.__waspBuild && window.__waspBuild !== _bv) { location.reload(); return; }
+        window.__waspBuild = _bv;
+      }
+    } catch (_e) {}
     lastBatchId = batch.batchId || lastBatchId;
     _wireEvents(target);
     _waspPersistRestore(target);

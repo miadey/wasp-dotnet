@@ -2482,6 +2482,18 @@ public static class Program
         return h % 360;
     }
 
+    // Per-deploy build stamp: the ms time of the first call after each canister
+    // start. A `--mode upgrade` wipes the heap, so this static resets to 0 and
+    // gets a fresh value on the next deploy. It is emitted as data-build on the
+    // shell root; wasp.js watches it across render swaps and hard-reloads when it
+    // changes, so a long-open tab never shows new markup under a stale <head>.
+    private static long _buildStamp = 0;
+    private static long BuildStamp()
+    {
+        if (_buildStamp == 0) _buildStamp = (long)(Ic0.time() / 1_000_000UL);
+        return _buildStamp;
+    }
+
     private static void RegisterShell(IWaspRenderer renderer, string path)
     {
         var batch = renderer.Render(new WaspRenderRequest { Path = path });
@@ -2533,7 +2545,7 @@ public static class Program
         if (normalized == "/")
         {
             var m = new StringBuilder();
-            m.Append("<div class=\"sg\">");
+            m.Append("<div class=\"sg\" data-build=\"").Append(BuildStamp()).Append("\">");
             m.Append("<header class=\"sg-nav\">");
             m.Append("<a class=\"sg-brand\" href=\"/\">").Append(WaveMark()).Append("<span>WASP <em>Bzzz</em></span></a>");
             m.Append("<nav class=\"sg-nav-links\"><a href=\"#features\">Features</a><a href=\"#security\">Security</a><a href=\"#chain\">On-chain</a><a href=\"#verify\">Verify</a></nav>");
@@ -2558,7 +2570,7 @@ public static class Program
         }
 
         var sb = new StringBuilder();
-        sb.Append("<div class=\"page\">");
+        sb.Append("<div class=\"page\" data-build=\"").Append(BuildStamp()).Append("\">");
         sb.Append("<aside class=\"sidebar\">");
         sb.Append("<a class=\"brand\" href=\"/\">");
         sb.Append("<span class=\"brand-text\" style=\"display:inline-flex;align-items:center;gap:0.5rem;color:#5B8CFF\">").Append(WaveMark()).Append("</span><span class=\"brand-text\">WASP <span style=\"color:#5B8CFF;font-family:ui-monospace,monospace;font-weight:600\">Bzzz</span></span>");
