@@ -4622,7 +4622,7 @@ async function getClient() {
     const mod = await import(II_BUNDLE_URL);
     _authClientCtor = mod.AuthClient;
   }
-  if (!authClient) authClient = await _authClientCtor.create();
+  if (!authClient) authClient = await _authClientCtor.create({ keyType: 'Ed25519', idleOptions: { disableIdle: true } });
   return authClient;
 }
 
@@ -4776,7 +4776,7 @@ const httpResp = IDL.Record({ status_code: IDL.Nat16, headers: IDL.Vec(IDL.Tuple
 const idlFactory = ({ IDL }) => IDL.Service({ http_request_update: IDL.Func([httpReq], [httpResp], []) });
 let authClient, agent, actor, myPrincipal = '2vxsx-fae';
 async function ensureAgent() {
-  authClient = authClient || await AuthClient.create();
+  authClient = authClient || await AuthClient.create({ keyType: 'Ed25519', idleOptions: { disableIdle: true } });
   const identity = authClient.getIdentity();
   myPrincipal = identity.getPrincipal().toText();
   agent = new HttpAgent({ identity, host: 'https://icp0.io' });
@@ -4873,7 +4873,7 @@ const isLocal = /(^|\.)localhost$/.test(location.hostname) || location.hostname 
 const HOST = isLocal ? location.origin : 'https://icp0.io';
 let authClient, agent, actor;
 async function ensureAgent() {
-  authClient = authClient || await AuthClient.create();
+  authClient = authClient || await AuthClient.create({ keyType: 'Ed25519', idleOptions: { disableIdle: true } });
   const identity = authClient.getIdentity();
   agent = new HttpAgent({ identity, host: HOST });
   if (isLocal) { try { await agent.fetchRootKey(); } catch (_) {} }
