@@ -2747,6 +2747,11 @@ public static class Program
         .space-empty { color: #6b7488; font-size: 0.78rem; padding: 0.1rem 0.85rem 0.3rem; }
         .space-new { margin: 0.15rem 0.3rem 0; background: transparent; color: #8b95ab; border: 1px dashed rgba(255,255,255,0.14); border-radius: 8px; padding: 0.3rem 0.5rem; font: inherit; font-size: 0.8rem; cursor: pointer; text-align: left; transition: background 0.12s, color 0.12s, border-color 0.12s; }
         .space-new:hover { background: rgba(91,141,239,0.12); color: #fff; border-color: rgba(91,141,239,0.4); }
+        /* Super-admin create buttons: visibility driven by the persistent body flag
+           so a reactivity-poll re-render (which re-emits them SSR-hidden) can't hide
+           them. Default hidden; shown only when the signed role check set data-cansrv. */
+        .space-new { display: none; }
+        body[data-cansrv='1'] .space-new { display: block; }
         .space-create { display: flex; flex-direction: column; gap: 0.4rem; padding: 0.5rem; margin: 0 0.3rem 0.5rem; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; }
         .space-create-in { background: #0e1420; color: #f2f3f5; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 0.35rem 0.5rem; font: inherit; font-size: 0.85rem; outline: none; }
         .space-create-in:focus { border-color: rgba(91,141,239,0.6); }
@@ -4711,6 +4716,10 @@ async function signIn() {
     localStorage.setItem(LS_PRINCIPAL, principal);
     localStorage.setItem(LS_NAME, name);
     applyState();
+    // Reload so the signed-call agents rebuild AFTER the delegation is stored —
+    // otherwise they keep an anonymous agent created at page-load and every signed
+    // call (myrole, post, mod, create) lands anonymous until the next manual reload.
+    setTimeout(function () { location.reload(); }, 250);
     // Seed the global online-presence with the new name immediately
     // so the chat member rail picks us up without waiting for the
     // next 10-second heartbeat tick.
@@ -4776,10 +4785,11 @@ const httpResp = IDL.Record({ status_code: IDL.Nat16, headers: IDL.Vec(IDL.Tuple
 const idlFactory = ({ IDL }) => IDL.Service({ http_request_update: IDL.Func([httpReq], [httpResp], []) });
 let authClient, agent, actor, myPrincipal = '2vxsx-fae';
 async function ensureAgent() {
+  if (actor) return;
   authClient = authClient || await AuthClient.create({ keyType: 'Ed25519', idleOptions: { disableIdle: true } });
   const identity = authClient.getIdentity();
   myPrincipal = identity.getPrincipal().toText();
-  agent = new HttpAgent({ identity, host: 'https://icp0.io' });
+  agent = await HttpAgent.create({ identity, host: 'https://icp0.io' });
   actor = Actor.createActor(idlFactory, { agent, canisterId });
 }
 // ALWAYS update calls (signed). A query call would land anonymous.
@@ -4873,9 +4883,13 @@ const isLocal = /(^|\.)localhost$/.test(location.hostname) || location.hostname 
 const HOST = isLocal ? location.origin : 'https://icp0.io';
 let authClient, agent, actor;
 async function ensureAgent() {
+  if (actor) return;
   authClient = authClient || await AuthClient.create({ keyType: 'Ed25519', idleOptions: { disableIdle: true } });
   const identity = authClient.getIdentity();
-  agent = new HttpAgent({ identity, host: HOST });
+  // HttpAgent.create() (async factory) is the v2-correct path — it syncs IC time
+  // so update calls are properly signed; the sync `new HttpAgent()` produced calls
+  // the canister saw as anonymous.
+  agent = await HttpAgent.create({ identity, host: HOST });
   if (isLocal) { try { await agent.fetchRootKey(); } catch (_) {} }
   actor = Actor.createActor(idlFactory, { agent, canisterId });
 }
@@ -4914,6 +4928,10 @@ function applyVisibility(info, sid) {
   // Spaces sidebar has one 'New' button per group — reveal them ALL for super.
   const showCreate = !!(info && info.isSuperAdmin);
   document.querySelectorAll('[data-create-server-ui]').forEach(el => { el.hidden = !showCreate; });
+  // Persist the super flag on <body> (outside #wasp-root) so CSS keeps the create
+  // buttons visible across reactivity-poll re-renders — the per-element .hidden
+  // toggle alone flaps because each poll re-emits the buttons SSR-hidden.
+  document.body.setAttribute('data-cansrv', showCreate ? '1' : '');
   // Re-assert the create-form open state: the reactivity poll re-emits the form
   // hidden from SSR every swap, so without this it would snap shut mid-typing.
   const cf = document.querySelector('[data-create-form]');
@@ -4929,6 +4947,7 @@ function applyVisibility(info, sid) {
   const canMembers = !!(info && info.canManageMembers);
   document.querySelectorAll('[data-manage-ui]').forEach(el => { el.hidden = !(canMembers && sid >= 1); });
 }
+let _roleBusy = false;
 async function refreshRoleUi() {
   // The spaces sidebar (with the super-only New buttons) shows on every app
   // route, so the role check must run on chat/forum/feed (not just /chat).
@@ -4936,15 +4955,14 @@ async function refreshRoleUi() {
   if (_p !== '/chat' && _p !== '/forum' && _p !== '/feed') return;
   if (!signedIn()) { applyVisibility(null, 0); lastSid = -999; lastInfo = null; return; }
   const sid = activeServerId();
-  if (sid === lastSid && lastInfo) { applyVisibility(lastInfo, sid); return; }
-  applyVisibility(null, sid);
+  if (lastInfo && sid === lastSid) { applyVisibility(lastInfo, sid); return; }
+  if (_roleBusy) return;
+  _roleBusy = true;
   try {
     await ensureAgent();
     const r = await signedCall('POST', '/api/server/myrole', JSON.stringify({ serverId: sid }));
-    if (r.status !== 200) return;
-    const info = JSON.parse(r.text);
-    lastSid = sid; lastInfo = info; applyVisibility(info, sid);
-  } catch (_) {}
+    if (r.status === 200) { const info = JSON.parse(r.text); lastSid = sid; lastInfo = info; applyVisibility(info, sid); }
+  } catch (_) {} finally { _roleBusy = false; }
 }
 async function createServer() {
   if (!signedIn()) { const b = document.querySelector('[data-ii-signin]'); if (b) b.click(); return; }
