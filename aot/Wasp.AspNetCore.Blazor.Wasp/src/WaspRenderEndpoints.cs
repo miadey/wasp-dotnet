@@ -143,6 +143,31 @@ public static class WaspRenderEndpoints
             Reply.Print("[wasp-render] bridge js register: " + ex.Message);
         }
 
+        // Vendored @dfinity bundle (agent + auth-client + candid, one consistent
+        // copy) served from the canister so the SIGNED transport never depends on
+        // esm.sh at runtime. Loading those libs from a CDN was unreliable: a 503 on
+        // a transitive dep killed the inline scripts, and version drift across
+        // separately-fetched deps caused a dual-package hazard where the agent did
+        // not recognise the auth-client delegation and silently signed as anonymous.
+        try
+        {
+            using var dfStream = typeof(WaspRenderEndpoints).Assembly
+                .GetManifestResourceStream("Wasp.AspNetCore.Blazor.Wasp.wwwroot.dfinity.js");
+            if (dfStream is not null)
+            {
+                using var ms = new System.IO.MemoryStream();
+                dfStream.CopyTo(ms);
+                IcServer.RegisterStaticAsset(
+                    "/_wasp/dfinity.js",
+                    ms.ToArray(),
+                    "application/javascript; charset=utf-8");
+            }
+        }
+        catch (Exception ex)
+        {
+            Reply.Print("[wasp-render] dfinity js register: " + ex.Message);
+        }
+
         return app;
     }
 

@@ -4607,7 +4607,7 @@ public static class Program
 // resolve to @dfinity/candid@3.x where bufFromBufLike was renamed to
 // uint8FromBufLike, breaking delegation.ts:14. Pinning candid@2.4.1 keeps
 // the legacy export name available.
-const II_BUNDLE_URL = 'https://esm.sh/@dfinity/auth-client@2.1.3?deps=@dfinity/candid@2.4.1,@dfinity/agent@2.1.3,@dfinity/identity@2.1.3,@dfinity/principal@2.4.1&target=es2022';
+const II_BUNDLE_URL = '/_wasp/dfinity.js';
 const IDENTITY_PROVIDER = 'https://identity.ic0.app';
 const LS_PRINCIPAL = 'wasp:ii:principal';
 const LS_NAME = 'wasp:ii:name';
@@ -4767,9 +4767,9 @@ applyState();
 ";
 
     private const string DmClientScript = @"
-import { Actor, HttpAgent } from 'https://esm.sh/@dfinity/agent@2.4.1?deps=@dfinity/candid@2.4.1,@dfinity/principal@2.4.1,@dfinity/identity@2.4.1,@dfinity/agent@2.4.1';
-import { AuthClient } from 'https://esm.sh/@dfinity/auth-client@2.4.1?deps=@dfinity/candid@2.4.1,@dfinity/principal@2.4.1,@dfinity/identity@2.4.1,@dfinity/agent@2.4.1';
-import { IDL } from 'https://esm.sh/@dfinity/candid@2.4.1?deps=@dfinity/principal@2.4.1';
+import { Actor, HttpAgent } from '/_wasp/dfinity.js';
+import { AuthClient } from '/_wasp/dfinity.js';
+import { IDL } from '/_wasp/dfinity.js';
 const canisterId = document.body.getAttribute('data-wasp-canister');
 const httpReq = IDL.Record({ method: IDL.Text, url: IDL.Text, headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)), body: IDL.Vec(IDL.Nat8) });
 const httpResp = IDL.Record({ status_code: IDL.Nat16, headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)), body: IDL.Vec(IDL.Nat8), upgrade: IDL.Opt(IDL.Bool) });
@@ -4862,9 +4862,9 @@ if (location.pathname==='/chat' && qparam('dm')==='1' && !document.querySelector
     // canister sees a real msg_caller, and gates the create-server/-channel
     // UI on /api/server/myrole.
     private const string ServerAdminScript = @"
-import { Actor, HttpAgent } from 'https://esm.sh/@dfinity/agent@2.4.1?deps=@dfinity/candid@2.4.1,@dfinity/principal@2.4.1,@dfinity/identity@2.4.1,@dfinity/agent@2.4.1';
-import { AuthClient } from 'https://esm.sh/@dfinity/auth-client@2.4.1?deps=@dfinity/candid@2.4.1,@dfinity/principal@2.4.1,@dfinity/identity@2.4.1,@dfinity/agent@2.4.1';
-import { IDL } from 'https://esm.sh/@dfinity/candid@2.4.1?deps=@dfinity/principal@2.4.1';
+import { Actor, HttpAgent } from '/_wasp/dfinity.js';
+import { AuthClient } from '/_wasp/dfinity.js';
+import { IDL } from '/_wasp/dfinity.js';
 const canisterId = document.body.getAttribute('data-wasp-canister');
 const httpReq = IDL.Record({ method: IDL.Text, url: IDL.Text, headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)), body: IDL.Vec(IDL.Nat8) });
 const httpResp = IDL.Record({ status_code: IDL.Nat16, headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)), body: IDL.Vec(IDL.Nat8), upgrade: IDL.Opt(IDL.Bool) });

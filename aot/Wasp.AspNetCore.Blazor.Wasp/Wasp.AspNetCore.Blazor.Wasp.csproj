@@ -27,6 +27,8 @@
 
     <EmbeddedResource Include="wwwroot\wasp.js"
                       LogicalName="Wasp.AspNetCore.Blazor.Wasp.wwwroot.wasp.js" />
+    <EmbeddedResource Include="wwwroot\dfinity.js"
+                      LogicalName="Wasp.AspNetCore.Blazor.Wasp.wwwroot.dfinity.js" />
   </ItemGroup>
 
 </Project>
