@@ -181,6 +181,28 @@ public sealed unsafe class AdminService
         fixed (byte* ptr = p) return Ic0.is_controller((nint)ptr, (uint)p.Length) != 0;
     }
 
+    /// <summary>The canister's current cycle balance. The IC writes 16
+    /// little-endian bytes via <c>ic0.canister_cycle_balance128</c>; wasm
+    /// and .NET are both little-endian so the low/high halves read back
+    /// directly.</summary>
+    public static System.UInt128 CycleBalance()
+    {
+        var buf = new byte[16];
+        fixed (byte* p = buf) Ic0.canister_cycle_balance128((nint)p);
+        ulong lo = BitConverter.ToUInt64(buf, 0);
+        ulong hi = BitConverter.ToUInt64(buf, 8);
+        return new UInt128(hi, lo);
+    }
+
+    /// <summary>Below this cycle balance the canister is considered "low"
+    /// and the UI/health endpoint should warn. Plain code constant (2T),
+    /// NOT persisted to stable memory.</summary>
+    public const ulong LowCycleThreshold = 2_000_000_000_000UL;
+
+    /// <summary>True when the cycle balance has fallen to or below
+    /// <see cref="LowCycleThreshold"/>.</summary>
+    public static bool IsLowCycles() => CycleBalance() <= (UInt128)LowCycleThreshold;
+
     /// <summary>Render a principal as the standard textual form
     /// (group-of-5, CRC32 prefix, dashes). Used to display admin list
     /// + caller in the UI.</summary>

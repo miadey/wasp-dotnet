@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Wasp.AspNetCore;
 using Wasp.IcCdk;
+using Wasp.WebSockets;
 
 namespace Wasp.AspNetCore.Blazor.Wasp;
 
@@ -28,6 +29,26 @@ namespace Wasp.AspNetCore.Blazor.Wasp;
 /// </summary>
 public static class WaspRenderEndpoints
 {
+    /// <summary>
+    /// SRI integrity value ("sha256-…") for the vendored @dfinity bundle
+    /// served at /_wasp/dfinity.js, computed at registration time. Null
+    /// when the bundle resource is absent.
+    /// NOTE: dfinity.js is consumed via an ES-module `import` specifier, and
+    /// browsers do NOT enforce SRI on bare module specifiers — so this value is
+    /// NOT applied as an integrity= attribute today. The bundle is instead
+    /// pinned by the IC asset certification of /_wasp/dfinity.js (a swapped
+    /// bundle fails boundary cert on icp0.io). This property is exposed for a
+    /// future import-map `integrity` (Chrome 127+) once browser support is broad.
+    /// </summary>
+    public static string? DfinityJsSri { get; private set; }
+
+    /// <summary>
+    /// SRI integrity value ("sha256-…") for the bridge JS served at
+    /// /_wasp/wasp.js, computed at registration time. Null when the
+    /// bundle resource is absent.
+    /// </summary>
+    public static string? WaspJsSri { get; private set; }
+
     public static WebApplicationBuilder UseInternetComputerWasp(this WebApplicationBuilder builder)
     {
         if (builder is null) throw new ArgumentNullException(nameof(builder));
@@ -132,9 +153,11 @@ public static class WaspRenderEndpoints
             {
                 using var ms = new System.IO.MemoryStream();
                 jsStream.CopyTo(ms);
+                var jsBytes = ms.ToArray();
+                WaspJsSri = "sha256-" + Convert.ToBase64String(Sha256.Hash(jsBytes));
                 IcServer.RegisterStaticAsset(
                     "/_wasp/wasp.js",
-                    ms.ToArray(),
+                    jsBytes,
                     "application/javascript; charset=utf-8");
             }
         }
@@ -157,9 +180,11 @@ public static class WaspRenderEndpoints
             {
                 using var ms = new System.IO.MemoryStream();
                 dfStream.CopyTo(ms);
+                var dfBytes = ms.ToArray();
+                DfinityJsSri = "sha256-" + Convert.ToBase64String(Sha256.Hash(dfBytes));
                 IcServer.RegisterStaticAsset(
                     "/_wasp/dfinity.js",
-                    ms.ToArray(),
+                    dfBytes,
                     "application/javascript; charset=utf-8");
             }
         }

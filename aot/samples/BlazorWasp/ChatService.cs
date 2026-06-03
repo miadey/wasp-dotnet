@@ -787,7 +787,34 @@ public sealed unsafe class ChatService
         }
         var bytes = buf.ToArray();
         WriteBytes(Offset, bytes);
+        // Tail-zero any bytes freed by a shrink (delete/room-removal/FIFO-drop):
+        // start at the END of the blob just written so live data is never
+        // touched, and bound by _highWaterEnd (the highest end ChatService has
+        // ever written) so we only clear plaintext WE previously persisted.
+        ulong newEnd = Offset + (ulong)bytes.Length;
+        if (_highWaterEnd > newEnd) ZeroRange(newEnd, _highWaterEnd - newEnd);
+        _highWaterEnd = newEnd > _highWaterEnd ? newEnd : _highWaterEnd;
         WriteMagic();
+    }
+
+    /// <summary>Overwrite [offset, offset+len) in stable memory with zeros,
+    /// in 4096-byte chunks via the existing WriteBytes. Reuses one preallocated
+    /// zero buffer for full chunks; the final partial chunk gets a right-sized
+    /// zero array. Used only to scrub the tail freed by a Persist() shrink.</summary>
+    private void ZeroRange(ulong offset, ulong len)
+    {
+        if (len == 0) return;
+        const int Chunk = 4096;
+        var zeros = new byte[Chunk];   // default-initialised to 0
+        ulong remaining = len, at = offset;
+        while (remaining >= Chunk)
+        {
+            WriteBytes(at, zeros);
+            at += Chunk;
+            remaining -= Chunk;
+        }
+        if (remaining > 0)
+            WriteBytes(at, new byte[(int)remaining]);   // right-sized zero array
     }
 
     private const uint ReactionsMagic = 0x52454143;   // "REAC"
@@ -850,14 +877,21 @@ public sealed unsafe class ChatService
 
     private ulong _afterMessagesOffset;
 
+    // End (exclusive) of the highest stable-memory offset ChatService has ever
+    // written for the CHAT blob. Used to zero out the tail freed by a shrink
+    // (delete/room-removal/FIFO-drop) so stale plaintext can't be recovered
+    // from the bytes past the new, shorter blob. Tracked across Read/Persist;
+    // only ever reflects bytes ChatService itself wrote (no RegionEnd exists).
+    private ulong _highWaterEnd;
+
     private void ReadReactions()
     {
         _reactions.Clear();
         var r = new MemoryReader(_afterMessagesOffset);
         uint magic;
         try { magic = r.ReadU32(); }
-        catch { return; }
-        if (magic != ReactionsMagic) return;   // pre-reactions blob
+        catch { _highWaterEnd = _afterMessagesOffset; return; }
+        if (magic != ReactionsMagic) { _highWaterEnd = _afterMessagesOffset; return; }   // pre-reactions blob
         var entries = (int)r.ReadU32();
         for (int i = 0; i < entries; i++)
         {
@@ -872,6 +906,7 @@ public sealed unsafe class ChatService
             }
             _reactions[msgId] = inner;
         }
+        _highWaterEnd = r.Cursor;   // post-read end of the CHAT blob on disk
     }
 
     // ─── helpers ─────────────────────────────────────────────────────

@@ -49,6 +49,7 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(UserFollowService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(RepostTimeService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(VoteService))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(RateService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspRouter))]
     [ModuleInitializer]
@@ -85,6 +86,7 @@ public static class Program
             builder.Services.AddSingleton<UserFollowService>(); // F2-A user follows (region 100M)
             builder.Services.AddSingleton<RepostTimeService>(); // F2-A repost timestamps (region 110M)
             builder.Services.AddSingleton<VoteService>();       // identity-weighted voting (region 120M)
+            builder.Services.AddSingleton<RateService>();        // Phase-0 per-principal token-bucket rate limiting (heap-only)
             builder.Services.AddSingleton<IWaspRenderer>(sp =>
             {
                 var r = new WaspRouter(sp);
@@ -108,6 +110,37 @@ public static class Program
             var app = builder.Build();
             app.UseInternetComputerWasp();
             app.StartAsync().GetAwaiter().GetResult();
+
+            // ── Phase-0: Content-Security-Policy + Subresource-Integrity ──────────
+            // The three inline <script type=module> blocks BuildPage emits are pinned
+            // by their sha256 hash so script-src can drop 'unsafe-inline'. CSP hash
+            // source-expressions MUST be wrapped in single quotes: 'sha256-<b64>'.
+            // The hashes must match the EXACT bytes BuildPage concatenates — do NOT
+            // change how the inline scripts are joined (no added whitespace).
+            static string CspHash(string s) =>
+                "'sha256-" + Convert.ToBase64String(
+                    Wasp.WebSockets.Sha256.Hash(System.Text.Encoding.UTF8.GetBytes(s))) + "'";
+            var inlineHashes = CspHash(IiClientScript) + " " + CspHash(DmClientScript) + " " + CspHash(ServerAdminScript);
+            // CSP keyword tokens (self/none/unsafe-inline) are each single-quoted per spec.
+            Wasp.AspNetCore.IcServer.HtmlCsp =
+                "default-src 'none'; " +
+                "script-src 'self' " + inlineHashes + "; " +
+                "connect-src 'self' https://icp0.io https://identity.ic0.app; " +
+                "img-src 'self' https: data:; " +
+                "media-src 'self' https:; " +
+                "style-src 'self' 'unsafe-inline'; " +
+                "frame-src https://www.youtube-nocookie.com https://player.vimeo.com https://identity.ic0.app https://identity.internetcomputer.org; " +
+                "font-src 'self'; " +
+                "base-uri 'none'; " +
+                "form-action 'self'; " +
+                "frame-ancestors 'none'";
+            // ─────────────────────────────────────────────────────────────────────
+            // SHIPPING AS REPORT-ONLY — verify on mainnet (open devtools console;
+            // confirm II sign-in still lands non-anonymous and the @dfinity agent
+            // calls to icp0.io succeed with no CSP violation) THEN set
+            // IcServer.HtmlCspReportOnly = false to enforce.
+            // ─────────────────────────────────────────────────────────────────────
+            Wasp.AspNetCore.IcServer.HtmlCspReportOnly = true;   // default; left explicit for the flip above
 
             // Pre-render each route's SSR shell + register as a
             // certified static asset. Subsequent direct GETs to "/" /
@@ -156,7 +189,23 @@ public static class Program
             var userFollows = app.Services.GetRequiredService<UserFollowService>(); // F2-A user follows
             var repostTimes = app.Services.GetRequiredService<RepostTimeService>(); // F2-A repost timestamps
             var votes = app.Services.GetRequiredService<VoteService>();           // identity-weighted voting
+            var rate = app.Services.GetRequiredService<RateService>();            // Phase-0 token-bucket rate limiting
             var identity = app.Services.GetRequiredService<IdentityService>();
+            // Phase-0 rate gate: returns TRUE when the request was rate-limited (caller
+            // should `return` immediately after writing 429) and FALSE when allowed.
+            // Keys on the signed principal when present/non-anonymous, else a shared
+            // anon bucket. RateService.TryConsume returns true when a token was granted.
+            Func<HttpContext, byte[], string, System.Threading.Tasks.Task<bool>> rateLimited = async (ctx, caller, bucket) =>
+            {
+                long now = (long)(Ic0.time() / 1_000_000UL);
+                byte[] key = (caller is { Length: > 0 } && !AdminService.IsAnonymous(caller)) ? caller : RateService.AnonKey;
+                if (rate.TryConsume(key, bucket, now)) return false;   // allowed
+                ctx.Response.StatusCode = 429;
+                ctx.Response.Headers["Retry-After"] = "1";
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                await ctx.Response.WriteAsync("{\"error\":\"rate limit — slow down\"}");
+                return true;   // rate-limited
+            };
             // B4: explorer excludes private-server messages (anonymous /stable page).
             StableExplorer.Register(new ChatMessagesCollection(chat, servers, membership));
             // Super-admin = explicit AdminService allowlist OR the canister
@@ -396,6 +445,10 @@ public static class Program
             // Minimal API routing on the canister.
             app.MapPost("/api/crm/presence-heartbeat", async (HttpContext ctx) =>
             {
+                // Phase-0 soft gate: anonymous heartbeat — DON'T 401, just throttle by client id
+                // (no-op for callers that don't pass ?p=; this endpoint identifies via the body).
+                var pk = System.Text.Encoding.UTF8.GetBytes(ctx.Request.Query["p"].ToString());
+                if (pk.Length > 0 && await rateLimited(ctx, pk, "ping")) return;
                 var recordId = ctx.Request.Query["recordId"].ToString();
                 using var body = new System.IO.MemoryStream();
                 await ctx.Request.Body.CopyToAsync(body);
@@ -414,6 +467,9 @@ public static class Program
             // 30 s = "online right now". Heap-only; resets on upgrade.
             app.MapPost("/api/online-ping", async (HttpContext ctx) =>
             {
+                // Phase-0 soft gate: anonymous heartbeat — DON'T 401, just throttle by client id.
+                var pk = System.Text.Encoding.UTF8.GetBytes(ctx.Request.Query["p"].ToString());
+                if (pk.Length > 0 && await rateLimited(ctx, pk, "ping")) return;
                 var p = ctx.Request.Query["p"].ToString();
                 if (string.IsNullOrEmpty(p)) p = "anon-" + Random.Shared.Next(10000, 99999);
                 var n = ctx.Request.Query["n"].ToString();
@@ -441,6 +497,9 @@ public static class Program
             const long TypingWindowMs = 6000;
             app.MapPost("/api/chat/typing-ping", async (HttpContext ctx) =>
             {
+                // Phase-0 soft gate: anonymous heartbeat — DON'T 401, just throttle by client id.
+                var pk = System.Text.Encoding.UTF8.GetBytes(ctx.Request.Query["p"].ToString());
+                if (pk.Length > 0 && await rateLimited(ctx, pk, "ping")) return;
                 var roomId = ctx.Request.Query["roomId"].ToString();
                 var name = ctx.Request.Query["n"].ToString();
                 var pid = ctx.Request.Query["p"].ToString();
@@ -557,6 +616,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in to post\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!int.TryParse(ExtractJsonNumber(body, "roomId") ?? "", out var roomId))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad roomId\"}"); return; }
@@ -605,6 +665,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "msgId") ?? "", out var mid))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad msgId\"}"); return; }
@@ -620,6 +681,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "msgId") ?? "", out var mid))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad msgId\"}"); return; }
@@ -635,6 +697,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in to react\"}"); return; }
+                if (await rateLimited(ctx, caller, "react")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "msgId") ?? "", out var mid))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad msgId\"}"); return; }
@@ -656,6 +719,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in to reply\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "parentMsgId") ?? "", out var parent) || parent <= 0)
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad parentMsgId\"}"); return; }
@@ -684,6 +748,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "msgId") ?? "", out var mid))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad msgId\"}"); return; }
@@ -702,6 +767,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "msgId") ?? "", out var mid))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad msgId\"}"); return; }
@@ -720,6 +786,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "msgId") ?? "", out var mid))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad msgId\"}"); return; }
@@ -737,6 +804,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!int.TryParse(ExtractJsonNumber(body, "roomId") ?? "", out var roomId))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad roomId\"}"); return; }
@@ -760,6 +828,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!int.TryParse(ExtractJsonNumber(body, "serverId") ?? "", out var sid))
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad serverId\"}"); return; }
@@ -867,30 +936,12 @@ public static class Program
                 await WriteJsonAsync(ctx, "{\"principal\":\"" + EscapeJson(b.Principal) + "\",\"name\":\"" + EscapeJson(b.DisplayName) + "\"}");
             }).DisableAntiforgery();
 
-            // POST /api/identity/bind  body={"principal":"...","name":"..."}
-            //   → LEGACY cosmetic bind (anyone-can-claim). Kept for back-compat;
-            //     new sign-ups use the SIGNED /api/account/bind above.
+            // Phase-0: the UNAUTHENTICATED /api/identity/bind (client-supplied
+            // {principal,name}, NO msg_caller check → anyone could claim any name) has
+            // been REMOVED. Display-name binding now goes exclusively through the SIGNED
+            // /api/account/bind above (binds msg_caller). The GET lookups below stay.
             // GET  /api/identity/lookup?p=<principal>
             //   → returns {"name":"..."} or 404 if unbound.
-            app.MapPost("/api/identity/bind", async (HttpContext ctx) =>
-            {
-                using var body = new System.IO.MemoryStream();
-                await ctx.Request.Body.CopyToAsync(body);
-                var json = Encoding.UTF8.GetString(body.ToArray());
-                var principal = ExtractJsonString(json, "principal");
-                var name = ExtractJsonString(json, "name");
-                if (string.IsNullOrEmpty(principal) || string.IsNullOrEmpty(name))
-                {
-                    ctx.Response.StatusCode = 400;
-                    await ctx.Response.WriteAsync("{\"error\":\"missing principal or name\"}");
-                    return;
-                }
-                var b = identity.Bind(principal, name);
-                var resp = "{\"principal\":\"" + EscapeJson(b.Principal)
-                         + "\",\"name\":\"" + EscapeJson(b.DisplayName)
-                         + "\",\"boundAtMs\":" + b.BoundAtMs + "}";
-                await WriteJsonAsync(ctx, resp);
-            }).DisableAntiforgery();
             IcResponseCertV2.RegisterPassThroughPath("/api/identity/lookup", "GET");
             IcServer.RegisterQueryHandler("/api/identity/lookup", (req) =>
             {
@@ -988,6 +1039,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "create")) return;
                 if (!isSuper(caller))
                 { ctx.Response.StatusCode = 403; await ctx.Response.WriteAsync("{\"error\":\"super-admin only\"}"); return; }
                 var body = await ReadBodyAsync(ctx);
@@ -1027,6 +1079,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "create")) return;
                 var body = await ReadBodyAsync(ctx);
                 int.TryParse(ExtractJsonNumber(body, "serverId") ?? "0", out var sid);
                 if (roles.RoleOf(sid, caller) < ServerRole.Admin && !isSuper(caller))
@@ -1052,6 +1105,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in to post\"}"); return; }
+                if (await rateLimited(ctx, caller, "topic")) return;   // "topic" (not "create"): topic-posting is a normal member verb
                 var body = await ReadBodyAsync(ctx);
                 if (!int.TryParse(ExtractJsonNumber(body, "serverId") ?? "", out var sid) || sid <= 0)
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad serverId\"}"); return; }
@@ -1119,6 +1173,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in to vote\"}"); return; }
+                if (await rateLimited(ctx, caller, "vote")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "msgId") ?? "", out var msgId) || msgId <= 0)
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad msgId\"}"); return; }
@@ -1244,6 +1299,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in to follow\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!int.TryParse(ExtractJsonNumber(body, "serverId") ?? "", out var sid) || sid <= 0)
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad serverId\"}"); return; }
@@ -1263,6 +1319,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in to repost\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 if (!long.TryParse(ExtractJsonNumber(body, "msgId") ?? "", out var msgId) || msgId <= 0)
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad msgId\"}"); return; }
@@ -1291,6 +1348,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in to follow\"}"); return; }
+                if (await rateLimited(ctx, caller, "write")) return;
                 var body = await ReadBodyAsync(ctx);
                 var who = ExtractJsonString(body, "principal");
                 string target;
@@ -1488,7 +1546,9 @@ public static class Program
                 // whether this server's content is SSR (public) or signed-fetched (private).
                 sb.Append(",\"serverPrivate\":").Append(membership.IsPrivate(sid) ? "true" : "false");
                 sb.Append(",\"canManageMembers\":").Append((role >= ServerRole.Admin || isSuper(caller)) ? "true" : "false");
-                sb.Append(",\"canAccess\":").Append(canAccess(sid, caller) ? "true" : "false").Append('}');
+                sb.Append(",\"canAccess\":").Append(canAccess(sid, caller) ? "true" : "false");
+                // Phase-0: passive low-cycle flag — supers see the real state; everyone else always false.
+                sb.Append(",\"lowCycles\":").Append((isSuper(caller) && AdminService.IsLowCycles()) ? "true" : "false").Append('}');
                 await WriteJsonAsync(ctx, sb.ToString());
             }).DisableAntiforgery();
 
@@ -1640,6 +1700,7 @@ public static class Program
                 var caller = AdminService.CurrentCaller();
                 if (AdminService.IsAnonymous(caller))
                 { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "dm")) return;
                 var body = await ReadBodyAsync(ctx);
                 var peer = ExtractJsonString(body, "peer") ?? "";
                 var text = ExtractJsonString(body, "text") ?? "";
@@ -2123,6 +2184,24 @@ public static class Program
                 { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"" + EscapeJson(err) + "\"}"); return; }
                 Reply.Print($"[stable-edit] {AdminService.ToText(caller)} edited {collection}/{keyId}");
                 await WriteJsonAsync(ctx, "{\"ok\":true}");
+            }).DisableAntiforgery();
+
+            // Phase-0 cycle balance — SIGNED, super-admin only. u128 cycles exceed JS's
+            // safe-integer range, so the raw balance + threshold are returned as STRINGS;
+            // cyclesTrillions is a small number for a friendly display. low=true when the
+            // balance is at or below AdminService.LowCycleThreshold.
+            app.MapPost("/api/admin/cycles", async (HttpContext ctx) =>
+            {
+                var caller = AdminService.CurrentCaller();
+                if (!isSuper(caller))
+                { ctx.Response.StatusCode = 403; await ctx.Response.WriteAsync("{\"error\":\"super-admin only\"}"); return; }
+                var bal = AdminService.CycleBalance();
+                var low = bal <= (UInt128)AdminService.LowCycleThreshold;
+                await WriteJsonAsync(ctx,
+                    "{\"cycles\":\"" + bal.ToString() + "\""
+                    + ",\"cyclesTrillions\":" + (bal / 1_000_000_000_000UL).ToString()
+                    + ",\"threshold\":\"" + AdminService.LowCycleThreshold.ToString() + "\""
+                    + ",\"low\":" + (low ? "true" : "false") + "}");
             }).DisableAntiforgery();
         }
         catch (Exception ex)
@@ -2657,6 +2736,17 @@ public static class Program
         sb.Append("<main").Append(fullbleed).Append(">").Append(innerHtml).Append("</main>");
         sb.Append("</div>");
         return sb.ToString();
+    }
+
+    // Phase-0 SRI: when the bridge JS hash is known, pin /_wasp/wasp.js via
+    // integrity + crossorigin=anonymous. Returns "" when no hash (no-op). Only the
+    // ONE external <script src> gets integrity — inline modules cannot (it's invalid).
+    private static string WaspJsSriAttrs()
+    {
+        var sri = Wasp.AspNetCore.Blazor.Wasp.WaspRenderEndpoints.WaspJsSri;
+        return sri is null
+            ? ""
+            : " integrity=\"" + sri + "\" crossorigin=\"anonymous\"";
     }
 
     private static string BuildPage(string contentHtml)
@@ -4591,7 +4681,7 @@ public static class Program
 </head>
 <body data-wasp-canister=""" + AdminService.CanisterIdText() + @""">
     <div id=""wasp-root"">" + contentHtml + @"</div>
-    <script src=""/_wasp/wasp.js""></script>
+    <script src=""/_wasp/wasp.js""" + WaspJsSriAttrs() + @"></script>
     <script type=""module"">" + IiClientScript + @"</script>
     <script type=""module"">" + DmClientScript + @"</script>
     <script type=""module"">" + ServerAdminScript + @"</script>
@@ -4604,7 +4694,7 @@ public static class Program
     // Stores {principal, displayName} in localStorage and force-fills any
     // <input name=""username""> on the page so the existing form-args path
     // (wasp.js) carries the chosen name into every handler — no canister
-    // changes needed beyond the /api/identity/bind + /api/identity/lookup
+    // changes needed beyond the /api/account/bind + /api/identity/lookup
     // endpoints. Not signed-request auth (anyone can fake the value);
     // see IdentityService for the security rationale.
     private const string IiClientScript = @"

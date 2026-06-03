@@ -58,6 +58,10 @@ public sealed unsafe class DmService
     public sealed record ThreadSummary(string Peer, string LastText, long LastAtMs, int MsgCount);
 
     private Dictionary<string, List<DmMessage>>? _threads;
+    // Highest stable offset the serialized DM store has ever reached. When a
+    // later Persist() shrinks the blob (FIFO-drop), the tail [newEnd, _highWaterEnd)
+    // is zeroed so dropped private DM plaintext stops lingering in stable memory.
+    private ulong _highWaterEnd;
 
     // ─── Public API (authenticated caller bytes only) ─────────────────
 
@@ -170,7 +174,7 @@ public sealed unsafe class DmService
         EnsureGrown(Offset);
         _threads = new Dictionary<string, List<DmMessage>>(StringComparer.Ordinal);
         if (ReadU32(MagicOffset) != Magic || ReadU32(MagicOffset + 4) != Version)
-            return _threads;
+        { _highWaterEnd = Offset; return _threads; }
         var r = new MemoryReader(Offset);
         var threadCount = (int)r.ReadU32();
         for (int i = 0; i < threadCount; i++)
@@ -189,6 +193,7 @@ public sealed unsafe class DmService
             if (!string.IsNullOrEmpty(a) && !string.IsNullOrEmpty(b))
                 _threads[CanonicalKey(a, b)] = msgs;   // re-canonicalise defensively
         }
+        _highWaterEnd = r.Cursor;   // furthest valid byte of the persisted blob
         return _threads;
     }
 
@@ -215,6 +220,17 @@ public sealed unsafe class DmService
         var bytes = buf.ToArray();
         if (Offset + (ulong)bytes.Length > RegionEnd) return false;   // region-end guard
         WriteBytes(Offset, bytes);
+        // FIFO-drop tail-zeroing: if the new blob is shorter than what was
+        // previously persisted, scrub the now-orphaned tail so dropped private
+        // DM plaintext stops lingering in stable memory. Clamped by RegionEnd
+        // so the zero range can never cross into the neighbouring region.
+        ulong newEnd = Offset + (ulong)bytes.Length;
+        if (_highWaterEnd > newEnd)
+        {
+            ulong zEnd = Math.Min(_highWaterEnd, RegionEnd);
+            if (zEnd > newEnd) ZeroRange(newEnd, zEnd - newEnd);
+        }
+        _highWaterEnd = Math.Max(newEnd, _highWaterEnd);
         WriteU32(MagicOffset, Magic);
         WriteU32(MagicOffset + 4, Version);
         return true;
@@ -239,6 +255,24 @@ public sealed unsafe class DmService
         ulong haveBytes = Ic0.stable64_size() * 65536UL;
         if (needed > haveBytes) Ic0.stable64_grow(((needed - haveBytes) + 65535UL) / 65536UL);
         fixed (byte* p = buf) Ic0.stable64_write(offset, (ulong)(nint)p, (ulong)buf.Length);
+    }
+
+    // Overwrite [offset, offset+len) in stable memory with zeros, in 4096-byte
+    // chunks. Used by Persist() to scrub the orphaned tail when the DM blob
+    // shrinks; the caller clamps len to RegionEnd so this never crosses regions.
+    private static void ZeroRange(ulong offset, ulong len)
+    {
+        if (len == 0) return;
+        var zeros = new byte[4096];
+        ulong remaining = len;
+        ulong at = offset;
+        while (remaining > 0)
+        {
+            int chunk = remaining > 4096UL ? 4096 : (int)remaining;
+            fixed (byte* p = zeros) Ic0.stable64_write(at, (ulong)(nint)p, (ulong)chunk);
+            at += (ulong)chunk;
+            remaining -= (ulong)chunk;
+        }
     }
 
     private sealed class MemoryWriter

@@ -41,6 +41,26 @@ public sealed class IcServer : IServer
     public static string? InitFailureMessage { get; set; }
 
     /// <summary>
+    /// Opt-in Content-Security-Policy applied to served static assets whose
+    /// content-type is text/html. When null (the default), NO security
+    /// headers are emitted and responses are byte-identical to before — so
+    /// canisters that don't set this are unaffected. When set, the static
+    /// HTML response additionally carries CSP, x-content-type-options,
+    /// referrer-policy, and x-frame-options headers (see the static-asset
+    /// header construction in Dispatch).
+    /// </summary>
+    public static string? HtmlCsp { get; set; }
+
+    /// <summary>
+    /// When true (the default), <see cref="HtmlCsp"/> is emitted as
+    /// <c>content-security-policy-report-only</c> (observe violations
+    /// without enforcing). Set to false to emit the enforcing
+    /// <c>content-security-policy</c> header instead. Only has an effect
+    /// when <see cref="HtmlCsp"/> is non-null.
+    /// </summary>
+    public static bool HtmlCspReportOnly { get; set; } = true;
+
+    /// <summary>
     /// path → (body, content-type). When the consumer registers paths
     /// here at init, the query path serves them directly without
     /// upgrading — turns a ~3 s update-call round trip into a ~50 ms
@@ -457,6 +477,21 @@ public sealed class IcServer : IServer
                         if (certHeader is not null)
                         {
                             headers.Add(new KeyValuePair<string, string>("ic-certificate", certHeader));
+                        }
+                        // Opt-in security headers for served HTML. Only emitted
+                        // when HtmlCsp is set AND the asset is text/html — when
+                        // HtmlCsp is null (default) nothing is added and the
+                        // response stays byte-identical for canisters that
+                        // don't opt in.
+                        if (HtmlCsp is not null
+                            && asset.ContentType.StartsWith("text/html", StringComparison.OrdinalIgnoreCase))
+                        {
+                            headers.Add(new KeyValuePair<string, string>(
+                                HtmlCspReportOnly ? "content-security-policy-report-only" : "content-security-policy",
+                                HtmlCsp));
+                            headers.Add(new KeyValuePair<string, string>("x-content-type-options", "nosniff"));
+                            headers.Add(new KeyValuePair<string, string>("referrer-policy", "no-referrer"));
+                            headers.Add(new KeyValuePair<string, string>("x-frame-options", "DENY"));
                         }
                         Reply.Bytes(CandidHttp.EncodeResponse(new IcHttpResponse
                         {

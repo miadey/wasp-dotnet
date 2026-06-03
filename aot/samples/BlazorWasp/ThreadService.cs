@@ -58,6 +58,10 @@ public sealed unsafe class ThreadService
     public ThreadService(ChatService chat) { _chat = chat; }
 
     private Dictionary<long, List<ThreadMsg>>? _threads;
+    // Highest data byte ever occupied (Offset + last-serialized length, or the
+    // stored blob's end on load). On shrink we zero (newEnd, _highWaterEnd) so
+    // dropped FIFO-capped reply plaintext doesn't linger in stable memory.
+    private ulong _highWaterEnd;
 
     // ─── public API (open, no auth — same as the main chat) ───────────
 
@@ -120,7 +124,7 @@ public sealed unsafe class ThreadService
         _threads = new Dictionary<long, List<ThreadMsg>>();
         var magic = ReadU32(MagicOffset);
         if ((magic != Magic && magic != Magic2) || ReadU32(MagicOffset + 4) != Version)
-            return _threads;
+        { _highWaterEnd = Offset; return _threads; }
         // THR2 carries a 3rd per-message string (authorPrincipal); legacy THRD
         // blobs have only 2. Read the SAME local magic for arity so a THR2 blob
         // is never read as 2-string (which would desync the binary cursor).
@@ -142,6 +146,7 @@ public sealed unsafe class ThreadService
             }
             if (parent > 0) _threads[parent] = msgs;
         }
+        _highWaterEnd = r.Cursor;
         return _threads;
     }
 
@@ -167,6 +172,17 @@ public sealed unsafe class ThreadService
         var bytes = buf.ToArray();
         if (Offset + (ulong)bytes.Length > RegionEnd) return false;   // region-end guard
         WriteBytes(Offset, bytes);
+        // Tail-zeroing: a FIFO-cap / shorter blob can leave a previous, longer
+        // serialization's plaintext (dropped thread replies) lingering past the
+        // new end. Zero (newEnd, _highWaterEnd], clamped to RegionEnd, so that
+        // stale plaintext can't be recovered from stable memory.
+        ulong newEnd = Offset + (ulong)bytes.Length;
+        if (_highWaterEnd > newEnd)
+        {
+            ulong zEnd = Math.Min(_highWaterEnd, RegionEnd);
+            if (zEnd > newEnd) ZeroRange(newEnd, zEnd - newEnd);
+        }
+        _highWaterEnd = newEnd > _highWaterEnd ? newEnd : _highWaterEnd;
         WriteU32(MagicOffset, Magic2);                // write the v2 (THR2) magic
         WriteU32(MagicOffset + 4, Version);
         return true;
@@ -191,6 +207,29 @@ public sealed unsafe class ThreadService
         ulong haveBytes = Ic0.stable64_size() * 65536UL;
         if (needed > haveBytes) Ic0.stable64_grow(((needed - haveBytes) + 65535UL) / 65536UL);
         fixed (byte* p = buf) Ic0.stable64_write(offset, (ulong)(nint)p, (ulong)buf.Length);
+    }
+
+    /// <summary>Overwrite [offset, offset+length) in stable memory with zeros,
+    /// in 4096-byte chunks (a single reusable buffer), clamped to the region.
+    /// Used to wipe stale plaintext left behind when the store shrinks.</summary>
+    private static void ZeroRange(ulong offset, ulong length)
+    {
+        if (length == 0) return;
+        ulong end = offset + length;
+        if (end > RegionEnd) end = RegionEnd;     // never write past Threads' region
+        if (end <= offset) return;
+        var zeros = new byte[4096];               // already zero-initialised
+        ulong cur = offset;
+        fixed (byte* p = zeros)
+        {
+            while (cur < end)
+            {
+                ulong chunk = end - cur;
+                if (chunk > 4096UL) chunk = 4096UL;
+                Ic0.stable64_write(cur, (ulong)(nint)p, chunk);
+                cur += chunk;
+            }
+        }
     }
 
     private sealed class MemoryWriter
