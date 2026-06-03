@@ -21,4 +21,14 @@ service : {
         body : blob;
         upgrade : opt bool;
     });
+    // vetKeys (vetKD) for end-to-end-encrypted 1:1 DMs. vetkd_derive binds the
+    // derived key to the canonical {caller, peer} conversation id (built on the
+    // canister from msg_caller, so a caller can only derive keys for its own
+    // conversations); the key is returned ENCRYPTED to the caller's transport
+    // key — the canister never sees it.
+    vetkd_pubkey : () -> (record { public_key : blob });
+    vetkd_derive : (record {
+        peer : text;
+        transport_public_key : blob;
+    }) -> (record { encrypted_key : blob });
 }
