@@ -50,6 +50,7 @@ public static class Program
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(RepostTimeService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(VoteService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(RateService))]
+    [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(KeyDirectoryService))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspHtmlRenderer))]
     [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(WaspRouter))]
     [ModuleInitializer]
@@ -87,6 +88,7 @@ public static class Program
             builder.Services.AddSingleton<RepostTimeService>(); // F2-A repost timestamps (region 110M)
             builder.Services.AddSingleton<VoteService>();       // identity-weighted voting (region 120M)
             builder.Services.AddSingleton<RateService>();        // Phase-0 per-principal token-bucket rate limiting (heap-only)
+            builder.Services.AddSingleton<KeyDirectoryService>(); // Phase-1 public key directory: IK/SPK/OTPK per device (region 140M)
             builder.Services.AddSingleton<IWaspRenderer>(sp =>
             {
                 var r = new WaspRouter(sp);
@@ -190,6 +192,7 @@ public static class Program
             var repostTimes = app.Services.GetRequiredService<RepostTimeService>(); // F2-A repost timestamps
             var votes = app.Services.GetRequiredService<VoteService>();           // identity-weighted voting
             var rate = app.Services.GetRequiredService<RateService>();            // Phase-0 token-bucket rate limiting
+            var keys = app.Services.GetRequiredService<KeyDirectoryService>();     // Phase-1 public key directory
             var identity = app.Services.GetRequiredService<IdentityService>();
             // Phase-0 rate gate: returns TRUE when the request was rate-limited (caller
             // should `return` immediately after writing 429) and FALSE when allowed.
@@ -471,7 +474,7 @@ public static class Program
                 var pk = System.Text.Encoding.UTF8.GetBytes(ctx.Request.Query["p"].ToString());
                 if (pk.Length > 0 && await rateLimited(ctx, pk, "ping")) return;
                 var p = ctx.Request.Query["p"].ToString();
-                if (string.IsNullOrEmpty(p)) p = "anon-" + Random.Shared.Next(10000, 99999);
+                if (string.IsNullOrEmpty(p)) p = "anon-" + (10000 + (int)(Ic0.time() % 90000UL));  // deterministic (replica-safe), not RNG
                 var n = ctx.Request.Query["n"].ToString();
                 if (string.IsNullOrEmpty(n)) n = "Guest";
                 presence.Heartbeat("__online__", p, n);
@@ -504,7 +507,7 @@ public static class Program
                 var name = ctx.Request.Query["n"].ToString();
                 var pid = ctx.Request.Query["p"].ToString();
                 if (string.IsNullOrEmpty(roomId)) { ctx.Response.StatusCode = 400; return; }
-                if (string.IsNullOrEmpty(pid)) pid = "anon-" + Random.Shared.Next(10000, 99999);
+                if (string.IsNullOrEmpty(pid)) pid = "anon-" + (10000 + (int)(Ic0.time() % 90000UL));  // deterministic (replica-safe), not RNG
                 if (string.IsNullOrEmpty(name)) name = "Someone";
                 presence.Heartbeat("typing:" + roomId, pid, name);
                 ctx.Response.StatusCode = 200;
@@ -1758,6 +1761,125 @@ public static class Program
                 await WriteJsonAsync(ctx, sb.ToString());
             }).DisableAntiforgery();
 
+            // ─── Phase-1 public key directory — SIGNED writes, anonymous device read ─
+            // Stores PUBLIC bytes only (IK/SPK/OTPK + SPK signature) per caller's
+            // device. Same auth posture as /api/dm/*: AdminService.CurrentCaller()
+            // (the signed update-call msg_caller); anonymous → 401. Binary fields are
+            // base64 on the wire (JSON can't carry raw bytes).
+            //   POST /api/keys/publish    body={deviceId,ikAlg,ikPub(b64),spkAlg,spkPub(b64),spkSig(b64),spkAtMs}
+            //   POST /api/keys/replenish  body={deviceId,otpks:[b64,...]}
+            //   POST /api/keys/fetch      body={peer,deviceId?}  (CONSUMES one OTPK)
+            //   GET  /api/keys/devices?p=<principal>            (query, NO pop)
+            app.MapPost("/api/keys/publish", async (HttpContext ctx) =>
+            {
+                var caller = AdminService.CurrentCaller();
+                if (AdminService.IsAnonymous(caller))
+                { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "key")) return;
+                var body = await ReadBodyAsync(ctx);
+                var deviceId = ExtractJsonString(body, "deviceId") ?? "";
+                int.TryParse(ExtractJsonNumber(body, "ikAlg") ?? "0", out var ikAlg);
+                int.TryParse(ExtractJsonNumber(body, "spkAlg") ?? "0", out var spkAlg);
+                long.TryParse(ExtractJsonNumber(body, "spkAtMs") ?? "0", out var spkAtMs);
+                byte[] ikPub, spkPub, spkSig;
+                try
+                {
+                    ikPub = Convert.FromBase64String(ExtractJsonString(body, "ikPub") ?? "");
+                    spkPub = Convert.FromBase64String(ExtractJsonString(body, "spkPub") ?? "");
+                    spkSig = Convert.FromBase64String(ExtractJsonString(body, "spkSig") ?? "");
+                }
+                catch { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad base64\"}"); return; }
+                var ok = keys.PublishDevice(caller, deviceId, (byte)ikAlg, ikPub, (byte)spkAlg, spkPub, spkSig, spkAtMs);
+                if (!ok) { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"could not publish\"}"); return; }
+                Reply.Print($"[keys] publish {AdminService.ToText(caller)} dev={deviceId}");
+                await WriteJsonAsync(ctx, "{\"ok\":true}");
+            }).DisableAntiforgery();
+
+            app.MapPost("/api/keys/replenish", async (HttpContext ctx) =>
+            {
+                var caller = AdminService.CurrentCaller();
+                if (AdminService.IsAnonymous(caller))
+                { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "key")) return;
+                var body = await ReadBodyAsync(ctx);
+                var deviceId = ExtractJsonString(body, "deviceId") ?? "";
+                List<byte[]> otpks = new();
+                try
+                {
+                    // Cap decode at the storage limit (KeyDirectoryService clamps to 100
+                    // anyway) so an oversized otpks array can't force unbounded transient
+                    // base64 allocations before the clamp.
+                    foreach (var b64 in ExtractJsonStringArray(body, "otpks"))
+                    {
+                        if (otpks.Count >= 100) break;
+                        otpks.Add(Convert.FromBase64String(b64));
+                    }
+                }
+                catch { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"error\":\"bad base64\"}"); return; }
+                var accepted = keys.ReplenishOtpk(caller, deviceId, otpks);
+                Reply.Print($"[keys] replenish {AdminService.ToText(caller)} dev={deviceId} +{accepted}");
+                await WriteJsonAsync(ctx, "{\"accepted\":" + accepted + "}");
+            }).DisableAntiforgery();
+
+            app.MapPost("/api/keys/fetch", async (HttpContext ctx) =>
+            {
+                var caller = AdminService.CurrentCaller();
+                if (AdminService.IsAnonymous(caller))
+                { ctx.Response.StatusCode = 401; await ctx.Response.WriteAsync("{\"error\":\"sign in required\"}"); return; }
+                if (await rateLimited(ctx, caller, "keyfetch")) return;
+                var body = await ReadBodyAsync(ctx);
+                var peer = ExtractJsonString(body, "peer") ?? "";
+                var preferDeviceId = ExtractJsonString(body, "deviceId");   // optional
+                var bundle = keys.FetchBundle(caller, peer, preferDeviceId);   // CONSUMES one OTPK
+                if (bundle is null) { await WriteJsonAsync(ctx, "{\"bundle\":null}"); return; }
+                var sb = new StringBuilder();
+                sb.Append("{\"peerPrincipalText\":\"").Append(EscapeJson(bundle.peerPrincipalText))
+                  .Append("\",\"deviceId\":\"").Append(EscapeJson(bundle.deviceId))
+                  .Append("\",\"ikAlg\":").Append(bundle.ikAlg)
+                  .Append(",\"ikPub\":\"").Append(Convert.ToBase64String(bundle.ikPub))
+                  .Append("\",\"spkAlg\":").Append(bundle.spkAlg)
+                  .Append(",\"spkPub\":\"").Append(Convert.ToBase64String(bundle.spkPub))
+                  .Append("\",\"spkSig\":\"").Append(Convert.ToBase64String(bundle.spkSig))
+                  .Append("\",\"spkAtMs\":").Append(bundle.spkAtMs);
+                if (bundle.otpkPub is null)
+                    sb.Append(",\"otpk\":null");
+                else
+                    sb.Append(",\"otpk\":{\"otpkAlg\":").Append(bundle.otpkAlg)
+                      .Append(",\"otpkPub\":\"").Append(Convert.ToBase64String(bundle.otpkPub))
+                      .Append("\",\"otpkId\":").Append(bundle.otpkId).Append('}');
+                sb.Append('}');
+                Reply.Print($"[keys] fetch {AdminService.ToText(caller)} <- {peer}");
+                await WriteJsonAsync(ctx, sb.ToString());
+            }).DisableAntiforgery();
+
+            // GET /api/keys/devices?p=<principal> — anonymous-OK device list, NO pop.
+            // Query channel like /api/identity/lookup; otpkCount is advisory only.
+            IcResponseCertV2.RegisterPassThroughPath("/api/keys/devices", "GET");
+            IcServer.RegisterQueryHandler("/api/keys/devices", (req) =>
+            {
+                if (req.Method != "GET") return null;
+                var p = ExtractQueryParam(req.Url, "p");
+                if (string.IsNullOrEmpty(p)) return null;
+                var devs = keys.DevicesOf(p);
+                var sb = new StringBuilder();
+                sb.Append("{\"principalText\":\"").Append(EscapeJson(p)).Append("\",\"devices\":[");
+                for (int i = 0; i < devs.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    var d = devs[i];
+                    sb.Append("{\"deviceId\":\"").Append(EscapeJson(d.deviceId))
+                      .Append("\",\"ikAlg\":").Append(d.ikAlg)
+                      .Append(",\"ikPub\":\"").Append(Convert.ToBase64String(d.ikPub))
+                      .Append("\",\"spkAlg\":").Append(d.spkAlg)
+                      .Append(",\"spkPub\":\"").Append(Convert.ToBase64String(d.spkPub))
+                      .Append("\",\"spkSig\":\"").Append(Convert.ToBase64String(d.spkSig))
+                      .Append("\",\"spkAtMs\":").Append(d.spkAtMs)
+                      .Append(",\"otpkCount\":").Append(d.otpkCount).Append('}');
+                }
+                sb.Append("]}");
+                return (Encoding.UTF8.GetBytes(sb.ToString()), "application/json; charset=utf-8");
+            });
+
 
             IcResponseCertV2.RegisterPassThroughPath("/api/crm/presence-get", "GET");
             IcServer.RegisterQueryHandler("/api/crm/presence-get", (req) =>
@@ -2448,6 +2570,39 @@ public static class Program
         using var ms = new System.IO.MemoryStream();
         await ctx.Request.Body.CopyToAsync(ms);
         return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
+    /// <summary>Extract a <c>"field":["s","s",...]</c> array of string
+    /// literals. Matches the minimal JSON shape we serialise client-side
+    /// (no nested objects/arrays inside the elements). AOT-safe, no LINQ.</summary>
+    private static List<string> ExtractJsonStringArray(string json, string field)
+    {
+        var result = new List<string>();
+        var marker = "\"" + field + "\":[";
+        int i = json.IndexOf(marker, StringComparison.Ordinal);
+        if (i < 0) return result;
+        i += marker.Length;
+        while (i < json.Length && json[i] != ']')
+        {
+            // advance to the next opening quote (skip whitespace/commas)
+            while (i < json.Length && json[i] != '"' && json[i] != ']') i++;
+            if (i >= json.Length || json[i] == ']') break;
+            i++;   // past opening quote
+            var sb = new StringBuilder();
+            while (i < json.Length && json[i] != '"')
+            {
+                if (json[i] == '\\' && i + 1 < json.Length)
+                {
+                    var esc = json[i + 1];
+                    sb.Append(esc == 'n' ? '\n' : esc == 't' ? '\t' : esc);
+                    i += 2; continue;
+                }
+                sb.Append(json[i]); i++;
+            }
+            result.Add(sb.ToString());
+            if (i < json.Length) i++;   // past closing quote
+        }
+        return result;
     }
 
     /// <summary>Extract the contents of a <c>"field":{...}</c> object as

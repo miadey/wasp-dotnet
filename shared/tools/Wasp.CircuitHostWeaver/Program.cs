@@ -172,7 +172,9 @@ if (rewriteTypeNameHash)
                 il.Emit(Mono.Cecil.Cil.OpCodes.Call, objectCtor);
             }
             il.Emit(Mono.Cecil.Cil.OpCodes.Ret);
-            Console.WriteLine("rewrote: ServerComponentInvocationSequence..ctor() → no-op");
+            // RandomNumberGenerator.Fill seed site — neutered. Loud marker so a
+            // new framework RNG site cannot pass silently (see invariant below).
+            Console.WriteLine("WASP-RNG-WEAVE: rewrote ServerComponentInvocationSequence..ctor() → no-op (neutered RandomNumberGenerator.Fill seed)");
         }
     }
 
@@ -209,6 +211,24 @@ if (rewriteTypeNameHash)
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// INVARIANT: all canister randomness must come from the browser
+// (crypto.getRandomValues, injected JS) or the IC management raw_rand (async).
+// System.Random / RandomNumberGenerator must NEVER produce live entropy in
+// canister code; this weaver only neuters framework RNG SEEDS in
+// Microsoft.AspNetCore.Components.{Server,Endpoints}. Each rewrite is now
+// logged so a new site cannot pass silently.
+//
+// Visibility-not-assertion: the EXACT number of framework RNG call sites is a
+// moving target across .NET 10 minor versions, so we deliberately do NOT
+// hard-fail on a frozen count here. Instead every rewrite emits a loud,
+// uniquely-prefixed Console.WriteLine ("WASP-RNG-WEAVE: …") to the build log —
+// if a new framework site appears (or an expected one disappears) it shows up
+// in CI output and the running total below changes, making it reviewable.
+// The complementary app-side guard is shared/tools/check-no-rng.sh, which
+// hard-fails the build if APP source ever reintroduces a forbidden RNG pattern.
+// ───────────────────────────────────────────────────────────────────────────
+
 // Default-mode patch for Components.Server: rewrite every
 // `RandomNumberGenerator.Fill(byte[])` and `RandomNumberGenerator.GetBytes(byte[])`
 // call inside Circuits/* types to a single `pop` instruction. Those calls are
@@ -238,12 +258,14 @@ if (!rewriteTypeNameHash)
                     var pop = il.Create(Mono.Cecil.Cil.OpCodes.Pop);
                     il.Replace(ins, pop);
                     patched++;
-                    Console.WriteLine($"rewrote: {t.FullName}::{m.Name} — pop RandomNumberGenerator.{mr.Name}");
+                    // Loud, uniquely-greppable marker — one line per rewritten
+                    // site so a newly-introduced RNG site is visible in build logs.
+                    Console.WriteLine($"WASP-RNG-WEAVE: rewrote {t.FullName}::{m.Name} — pop RandomNumberGenerator.{mr.Name} (neutered framework RNG seed)");
                 }
             }
         }
     }
-    Console.WriteLine($"patched {patched} RandomNumberGenerator.Fill/GetBytes call sites");
+    Console.WriteLine($"WASP-RNG-WEAVE: patched {patched} RandomNumberGenerator.Fill/GetBytes call sites total (count is NOT asserted — see invariant above)");
 }
 
 // Strip the [InternalsVisibleTo] attributes — once everything is public,

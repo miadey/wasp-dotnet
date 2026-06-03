@@ -71,6 +71,10 @@ public sealed class RateService
         "dm"     => (10, 1),
         "create" => (5, 0.1),   // server / channel creation: genuinely heavy + rare
         "topic"  => (10, 0.5),  // forum topic creation: a NORMAL member verb — far more generous than "create"
+        "key"    => (20, 1),    // key publish/replenish: device + prekey upkeep, modest steady-state
+        "keyfetch" => (5, 0.2), // /api/keys/fetch POPS a scarce one-time prekey — tight bucket only SLOWS
+                                // OTPK depletion (a determined caller still drains over time); the real
+                                // mitigation is client-side replenish when /api/keys/devices shows low otpkCount
         _        => (12, 1),   // default / "write"
     };
 }
