@@ -32,12 +32,12 @@ public static class VetkdService
     private static readonly byte[] DmContext =
         System.Text.Encoding.UTF8.GetBytes("wasp-bzzz/dm/v1");
 
-    // vetKD key name. "test_key_1" = mainnet TEST key — available now, but
-    // DFINITY labels it non-production and MAY rotate/wipe it (which would
-    // orphan anything encrypted under it). Switch to "key_1" for production once
-    // you accept the ~26G-cycles-per-derive cost and confirm key_1 is enabled on
-    // razoronic's subnet. Local dfx uses "dfx_test_key".
-    private const string KeyName = "test_key_1";
+    // vetKD key name. "key_1" = PRODUCTION mainnet key (~26G cycles per derive;
+    // a stable, non-test key). Changing this name changes every derived key, so
+    // it is a ONE-TIME migration (DMs encrypted under a previous key name become
+    // undecryptable) — done here before real adoption. "test_key_1" is the
+    // mainnet test key (DFINITY may wipe it); local dfx uses "dfx_test_key".
+    private const string KeyName = "key_1";
 
     // Cycles attached to vetkd_derive_key (test_key_1 ~10G, key_1 ~26G); 30G
     // covers both with margin. vetkd_public_key is free (0 cycles).
