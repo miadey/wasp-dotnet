@@ -43,6 +43,16 @@ public static class WaspRenderEndpoints
     public static string? DfinityJsSri { get; private set; }
 
     /// <summary>
+    /// SRI integrity value ("sha256-…") for the vendored vetKeys bundle
+    /// served at /_wasp/vetkeys.js, computed at registration time. Null
+    /// when the bundle resource is absent. As with dfinity.js this is not
+    /// applied as an integrity= attribute today (bare module specifiers are
+    /// not SRI-checked by browsers); the bundle is pinned by IC asset
+    /// certification of /_wasp/vetkeys.js instead.
+    /// </summary>
+    public static string? VetkeysJsSri { get; private set; }
+
+    /// <summary>
     /// SRI integrity value ("sha256-…") for the bridge JS served at
     /// /_wasp/wasp.js, computed at registration time. Null when the
     /// bundle resource is absent.
@@ -191,6 +201,31 @@ public static class WaspRenderEndpoints
         catch (Exception ex)
         {
             Reply.Print("[wasp-render] dfinity js register: " + ex.Message);
+        }
+
+        // Vendored vetKeys bundle (TransportSecretKey, EncryptedVetKey,
+        // DerivedPublicKey, …) served from the canister so the browser half of
+        // 1:1 DM E2EE never depends on a CDN at runtime, mirroring the dfinity
+        // bundle rationale above.
+        try
+        {
+            using var vkStream = typeof(WaspRenderEndpoints).Assembly
+                .GetManifestResourceStream("Wasp.AspNetCore.Blazor.Wasp.wwwroot.vetkeys.js");
+            if (vkStream is not null)
+            {
+                using var ms = new System.IO.MemoryStream();
+                vkStream.CopyTo(ms);
+                var vkBytes = ms.ToArray();
+                VetkeysJsSri = "sha256-" + Convert.ToBase64String(Sha256.Hash(vkBytes));
+                IcServer.RegisterStaticAsset(
+                    "/_wasp/vetkeys.js",
+                    vkBytes,
+                    "application/javascript; charset=utf-8");
+            }
+        }
+        catch (Exception ex)
+        {
+            Reply.Print("[wasp-render] vetkeys js register: " + ex.Message);
         }
 
         return app;

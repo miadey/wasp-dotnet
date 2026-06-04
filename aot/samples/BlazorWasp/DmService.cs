@@ -50,7 +50,7 @@ public sealed unsafe class DmService
     private const ulong RegionEnd = 15_900_000;
 
     private const int MaxMsgsPerThread = 200;       // FIFO cap per conversation
-    private const int MaxTextLen = 1000;
+    private const int MaxTextLen = 4000;            // headroom for base64url E2E1 ciphertext (~1.4x plaintext)
     private const int MaxPrincipalTextLen = 96;
     private const char KeySep = '';           // unit separator; not in a sanitised principal
 

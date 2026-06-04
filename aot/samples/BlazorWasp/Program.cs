@@ -5024,10 +5024,18 @@ applyState();
 import { Actor, HttpAgent } from '/_wasp/dfinity.js';
 import { AuthClient } from '/_wasp/dfinity.js';
 import { IDL } from '/_wasp/dfinity.js';
+import { TransportSecretKey, EncryptedVetKey, DerivedPublicKey } from '/_wasp/vetkeys.js';
 const canisterId = document.body.getAttribute('data-wasp-canister');
 const httpReq = IDL.Record({ method: IDL.Text, url: IDL.Text, headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)), body: IDL.Vec(IDL.Nat8) });
 const httpResp = IDL.Record({ status_code: IDL.Nat16, headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)), body: IDL.Vec(IDL.Nat8), upgrade: IDL.Opt(IDL.Bool) });
-const idlFactory = ({ IDL }) => IDL.Service({ http_request_update: IDL.Func([httpReq], [httpResp], []) });
+// Same Service the existing authenticated Actor uses — adding the two vetKD
+// methods lets actor.vetkd_pubkey()/vetkd_derive() ride the same signed agent
+// (real msg_caller), which the canister's participation gate requires.
+const idlFactory = ({ IDL }) => IDL.Service({
+  http_request_update: IDL.Func([httpReq], [httpResp], []),
+  vetkd_pubkey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
+  vetkd_derive: IDL.Func([IDL.Record({ peer: IDL.Text, transport_public_key: IDL.Vec(IDL.Nat8) })], [IDL.Vec(IDL.Nat8)], [])
+});
 let authClient, agent, actor, myPrincipal = '2vxsx-fae';
 async function ensureAgent() {
   if (actor) return;
@@ -5043,6 +5051,58 @@ async function signedCall(method, url, jsonBody) {
   const resp = await actor.http_request_update({ method, url, headers: jsonBody ? [['content-type','application/json']] : [], body });
   return { status: Number(resp.status_code), text: new TextDecoder().decode(new Uint8Array(resp.body)) };
 }
+// ── vetKeys 1:1 DM E2EE ─────────────────────────────────────────────────────
+// Per-conversation AES-GCM key derived via the canister's vetKD methods. The
+// derivation input (convId) MUST byte-match what the canister builds from
+// msg_caller+peer, so it is computed identically here.
+const SEP = String.fromCharCode(0x1F);
+const E2E_TAG = 'E2E1';
+let _dpkPromise = null;        // cached master DerivedPublicKey (global)
+const _convoKeys = new Map();  // peer -> Promise<CryptoKey> (per session)
+function b64uEnc(bytes){ let s=''; const a=(bytes instanceof Uint8Array)?bytes:new Uint8Array(bytes); for(let i=0;i<a.length;i++) s+=String.fromCharCode(a[i]); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function b64uDec(str){ let s=str.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; const bin=atob(s); const out=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i); return out; }
+async function masterDpk(){
+  if(!_dpkPromise){
+    _dpkPromise = (async ()=>{
+      const pk = await actor.vetkd_pubkey();
+      return DerivedPublicKey.deserialize(Uint8Array.from(pk));
+    })().catch(e=>{ _dpkPromise=null; throw e; });
+  }
+  return _dpkPromise;
+}
+async function convoKey(peer){
+  let p = _convoKeys.get(peer);
+  if(!p){
+    p = (async ()=>{
+      const me = localStorage.getItem('wasp:ii:principal') || myPrincipal;
+      const convId = (me < peer) ? (me + SEP + peer) : (peer + SEP + me);
+      const input = new TextEncoder().encode(convId);
+      const dpk = await masterDpk();
+      const tsk = TransportSecretKey.random();
+      const enc = await actor.vetkd_derive({ peer, transport_public_key: tsk.publicKeyBytes() });
+      const vetKey = EncryptedVetKey.deserialize(Uint8Array.from(enc)).decryptAndVerify(tsk, dpk, input);
+      return (await vetKey.asDerivedKeyMaterial()).deriveAesGcmCryptoKey('wasp-bzzz/dm/v1');
+    })().catch(e=>{ _convoKeys.delete(peer); throw e; });
+    _convoKeys.set(peer, p);
+  }
+  return p;
+}
+async function e2eEncrypt(peer, plaintext){
+  const aesKey = await convoKey(peer);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv }, aesKey, new TextEncoder().encode(plaintext)));
+  const blob = new Uint8Array(iv.length + ct.length); blob.set(iv,0); blob.set(ct, iv.length);
+  return E2E_TAG + b64uEnc(blob);
+}
+async function e2eDecrypt(peer, stored){
+  if(typeof stored !== 'string' || stored.slice(0,4) !== E2E_TAG) return stored; // legacy plaintext, backward compatible
+  const aesKey = await convoKey(peer);
+  const b = b64uDec(stored.slice(4));
+  const iv = b.slice(0,12), ct = b.slice(12);
+  return new TextDecoder().decode(await crypto.subtle.decrypt({ name:'AES-GCM', iv }, aesKey, ct));
+}
+function isEncrypted(s){ return typeof s === 'string' && s.slice(0,4) === E2E_TAG; }
+// ────────────────────────────────────────────────────────────────────────────
 function signedIn() { return !!localStorage.getItem('wasp:ii:principal'); }
 function qparam(k) { return new URLSearchParams(location.search).get(k); }
 // SPA navigation: synthesize an internal-link click so wasp.js's anchor
@@ -5057,9 +5117,26 @@ function msgRow(m){
     '<div class=""dc-message-body""><div class=""dc-message-head""><span class=""dc-username"" style=""color:hsl('+h+',60%,65%)"">'+esc(m.from)+'</span></div>'+
     '<div class=""dc-text"">'+esc(m.text)+'</div></div></div>';
 }
-async function loadThreads(){ const r=await signedCall('POST','/api/dm/threads','{}'); if(r.status!==200) return []; try{return JSON.parse(r.text).threads||[];}catch{return [];} }
-async function loadMessages(peer){ const r=await signedCall('POST','/api/dm/read',JSON.stringify({peer})); if(r.status!==200) return []; try{return JSON.parse(r.text).messages||[];}catch{return [];} }
-async function sendDm(peer,text){ return signedCall('POST','/api/dm/send',JSON.stringify({peer,text})); }
+async function loadThreads(){
+  const r=await signedCall('POST','/api/dm/threads','{}'); if(r.status!==200) return [];
+  let threads; try{ threads=JSON.parse(r.text).threads||[]; }catch{ return []; }
+  // Never surface raw ciphertext in a preview. lastText is the stored body; if
+  // it is an E2E1 envelope, show a lock placeholder instead of the base64 blob.
+  for(const t of threads){ if(isEncrypted(t.lastText)) t.lastText='Encrypted message'; }
+  return threads;
+}
+async function loadMessages(peer){
+  const r=await signedCall('POST','/api/dm/read',JSON.stringify({peer})); if(r.status!==200) return [];
+  let msgs; try{ msgs=JSON.parse(r.text).messages||[]; }catch{ return []; }
+  // Decrypt in place; a single bad envelope renders a placeholder, never crashes.
+  for(const m of msgs){
+    try{ m.text = await e2eDecrypt(peer, m.text); }
+    catch(_){ m.text = '(cannot decrypt)'; }
+  }
+  return msgs;
+}
+// Encrypt over the existing signed /api/dm/send path (server stores ciphertext).
+async function sendDm(peer,text){ const ct=await e2eEncrypt(peer,text); return signedCall('POST','/api/dm/send',JSON.stringify({peer,text:ct})); }
 // names are public on the member rail; only thread bodies are private.
 async function principalForName(name){ try{ const r=await fetch('/api/identity/lookup-name?n='+encodeURIComponent(name)); if(r.ok){ const j=await r.json(); if(j.bound) return j.principal; } }catch(_){} return null; }
 async function renderDmSurface(){
@@ -5094,7 +5171,12 @@ document.addEventListener('click', async (e)=>{
     const composer=send.closest('[data-dm-composer]'); const ta=composer.querySelector('[data-dm-input]');
     const peer=composer.querySelector('[data-dm-peer-input]').value; const text=(ta.value||'').trim();
     if(!peer||!text) return; send.disabled=true; await ensureAgent();
-    const r=await sendDm(peer,text); send.disabled=false;
+    // Encrypt first; if it throws, surface the error and DO NOT send — never
+    // silently fall back to plaintext under an encrypted UI.
+    let r;
+    try{ r=await sendDm(peer,text); }
+    catch(err){ send.disabled=false; ta.title='Encryption failed — message not sent'; alert('Could not encrypt this message — it was NOT sent.'); return; }
+    send.disabled=false;
     if(r.status===200){ ta.value=''; await renderDmSurface(); } return; }
 });
 const root=document.getElementById('wasp-root');
