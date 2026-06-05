@@ -2,6 +2,9 @@
 **/bin/
 **/obj/
 
+# extracted Bzzz repo lives in a nested git repo under bzzz/ — never track it here
+bzzz/
+
 # rust build artifacts
 **/target/
 

@@ -100,10 +100,7 @@ public static class Program
                 r.AddRoute<StableExplorerPage>("/stable");
                 r.AddRoute<Forum>("/forum");
                 r.AddRoute<Feed>("/feed");
-                r.WrapShell((path, inner) => WrapWithSidebar(path, inner,
-                    sp.GetRequiredService<ServerService>(),
-                    sp.GetRequiredService<ServerKindService>(),
-                    sp.GetRequiredService<MembershipService>()));
+                r.WrapShell((path, inner) => WrapWithSidebar(path, inner));
                 return r;
             });
 
@@ -122,7 +119,7 @@ public static class Program
             static string CspHash(string s) =>
                 "'sha256-" + Convert.ToBase64String(
                     Wasp.WebSockets.Sha256.Hash(System.Text.Encoding.UTF8.GetBytes(s))) + "'";
-            var inlineHashes = CspHash(IiClientScript) + " " + CspHash(DmClientScript) + " " + CspHash(ServerAdminScript);
+            var inlineHashes = CspHash(IiClientScript) + " " + CspHash(BaseChatScript);
             // CSP keyword tokens (self/none/unsafe-inline) are each single-quoted per spec.
             Wasp.AspNetCore.IcServer.HtmlCsp =
                 "default-src 'none'; " +
@@ -2762,107 +2759,37 @@ public static class Program
     internal static string WaveMark() =>
         "<span class=\"sg-brand-mark\"><svg width='22' height='22' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' aria-hidden='true'><line x1='3' y1='10' x2='3' y2='14'/><line x1='8' y1='5' x2='8' y2='19'/><line x1='12' y1='2.5' x2='12' y2='21.5'/><line x1='16' y1='7' x2='16' y2='17'/><line x1='21' y1='11' x2='21' y2='13'/></svg></span>";
 
-    private static string WrapWithSidebar(string currentPath, string innerHtml,
-        ServerService servers, ServerKindService kinds, MembershipService membership)
+    private static string WrapWithSidebar(string currentPath, string innerHtml)
     {
         var normalized = currentPath;
         int q = normalized.IndexOf('?');
         if (q >= 0) normalized = normalized.Substring(0, q);
         if (normalized.Length > 1 && normalized.EndsWith("/")) normalized = normalized.Substring(0, normalized.Length - 1);
 
-        string Active(string p) => string.Equals(p, normalized, StringComparison.OrdinalIgnoreCase)
-            ? " class=\"active\"" : "";
-
-        // ── Marketing site chrome (the public front door at "/") ──
-        // Full-width top-nav + footer, NO app sidebar — a real business site.
-        // The app routes (/chat etc.) keep the sidebar shell below.
-        if (normalized == "/")
+        var sb = new StringBuilder();
+        void Nav(string href, string label, string icon, int hue)
         {
-            var m = new StringBuilder();
-            m.Append("<div class=\"sg\" data-build=\"").Append(BuildStamp()).Append("\">");
-            m.Append("<header class=\"sg-nav\">");
-            m.Append("<a class=\"sg-brand\" href=\"/\">").Append(WaveMark()).Append("<span>WASP <em>Bzzz</em></span></a>");
-            m.Append("<nav class=\"sg-nav-links\"><a href=\"#features\">Features</a><a href=\"#security\">Security</a><a href=\"#chain\">On-chain</a><a href=\"#verify\">Verify</a></nav>");
-            m.Append("<div class=\"sg-nav-actions\">");
-            m.Append("<a class=\"sg-nav-open\" href=\"/chat\">Open app →</a>");
-            m.Append("<button type=\"button\" class=\"sg-btn sg-btn-primary sg-nav-cta ii-signin\" data-ii-signin><span class=\"ii-mark\">∞</span> Sign in</button>");
-            m.Append("<div class=\"ii-card sg-nav-card\" data-ii-card hidden><span class=\"ii-avatar\" data-ii-avatar>?</span><span class=\"ii-meta\"><span class=\"ii-name\" data-ii-name>—</span><button type=\"button\" class=\"ii-signout\" data-ii-signout>Sign out</button></span></div>");
-            m.Append("</div></header>");
-            m.Append("<main class=\"sg-main\">").Append(innerHtml).Append("</main>");
-            m.Append("<footer class=\"sg-footer\">");
-            m.Append("<div class=\"sg-foot-top\">");
-            m.Append("<div class=\"sg-foot-brand\"><a class=\"sg-brand\" href=\"/\">").Append(WaveMark()).Append("<span>WASP <em>Bzzz</em></span></a><p class=\"sg-foot-tag\">An on-chain community platform. No backend to trust — every message is a signed transaction inside one canister.</p></div>");
-            m.Append("<div class=\"sg-foot-cols\">");
-            m.Append("<div class=\"sg-foot-col\"><h4>Product</h4><a href=\"/chat\">Open app</a><a href=\"#features\">Features</a><a href=\"#richmsg\">Messages</a></div>");
-            m.Append("<div class=\"sg-foot-col\"><h4>On-chain</h4><a href=\"#chain\">Why on-chain</a><a href=\"#security\">Security</a><a href=\"/stable\">Stable memory</a></div>");
-            m.Append("<div class=\"sg-foot-col\"><h4>Verify</h4><a href=\"#verify\">Verify it yourself</a><a href=\"/stable\">Certified state</a></div>");
-            m.Append("</div></div>");
-            m.Append("<div class=\"sg-foot-bottom\"><span>Served from a single canister on the Internet Computer · ").Append(AdminService.CanisterIdText()).Append("</span><span>free · no email · no password</span></div>");
-            m.Append("</footer>");
-            m.Append("</div>");
-            return m.ToString();
+            var active = string.Equals(href, normalized, StringComparison.OrdinalIgnoreCase);
+            sb.Append("<a class=\"space-item").Append(active ? " active" : "").Append("\" href=\"").Append(href).Append("\">");
+            sb.Append("<span class=\"space-ic\" style=\"background:hsl(").Append(hue).Append(",46%,42%)\">").Append(Icon(icon)).Append("</span>");
+            sb.Append("<span class=\"space-nm\">").Append(label).Append("</span></a>");
         }
 
-        var sb = new StringBuilder();
         sb.Append("<div class=\"page\" data-build=\"").Append(BuildStamp()).Append("\">");
         sb.Append("<aside class=\"sidebar\">");
         sb.Append("<a class=\"brand\" href=\"/\">");
-        sb.Append("<span class=\"brand-text\" style=\"display:inline-flex;align-items:center;gap:0.5rem;color:#5B8CFF\">").Append(WaveMark()).Append("</span><span class=\"brand-text\">WASP <span style=\"color:#5B8CFF;font-family:ui-monospace,monospace;font-weight:600\">Bzzz</span></span>");
+        sb.Append("<span class=\"brand-text\" style=\"display:inline-flex;align-items:center;gap:0.5rem;color:#5B8CFF\">").Append(WaveMark()).Append("</span><span class=\"brand-text\">WASP</span>");
         sb.Append("</a>");
-        // ── Spaces nav: the app's servers grouped by kind (Servers / Forums /
-        // Feeds) + a Direct-messages entry. Replaces the old Home/Chat links.
-        // Pure Blazor SSR — the list is baked into the certified shell at deploy
-        // and refreshes within ~5s via the /_wasp/render poll (the sidebar lives
-        // inside #wasp-root). The per-group "+ New" buttons are super-admin-only
-        // (revealed by the signed client, same gate as the old create-server +),
-        // and the unread dot is toggled by the existing wasp.js bridge.
-        string queryStr = q >= 0 ? currentPath.Substring(q + 1) : "";
-        int activeS = 0; bool dmActive = false;
-        foreach (var part in queryStr.Split('&'))
-        {
-            if (part.StartsWith("s=", StringComparison.Ordinal)) int.TryParse(part.Substring(2), out activeS);
-            else if (part == "dm=1") dmActive = true;
-        }
-        var spaceServers = servers.ListServers();
-        void Group(string heading, ServerKind kind, string routeBase, bool sectionActive, string kindKey, string newLabel)
-        {
-            sb.Append("<div class=\"spaces-grp\">");
-            sb.Append("<div class=\"spaces-h\">").Append(heading).Append("</div>");
-            int shown = 0;
-            foreach (var srv in spaceServers)
-            {
-                if (kinds.KindOf(srv.Id) != kind) continue;
-                shown++;
-                var active = sectionActive && !dmActive && srv.Id == activeS;
-                sb.Append("<a class=\"space-item").Append(active ? " active" : "").Append("\" data-server-id=\"").Append(srv.Id).Append("\" href=\"").Append(routeBase).Append("?s=").Append(srv.Id).Append("\">");
-                sb.Append("<span class=\"space-ic\" style=\"background:hsl(").Append(SpaceHue(srv.Name)).Append(",46%,42%)\">").Append(HtmlEsc(SpaceGlyph(srv.Name))).Append("</span>");
-                sb.Append("<span class=\"space-nm\">").Append(HtmlEsc(srv.Name)).Append("</span>");
-                if (membership.IsPrivate(srv.Id)) sb.Append("<span class=\"space-lock\" aria-hidden=\"true\">\U0001F512</span>");
-                sb.Append("</a>");
-            }
-            if (shown == 0) sb.Append("<div class=\"space-empty\">None yet</div>");
-            sb.Append("<button type=\"button\" class=\"space-new\" data-new-space=\"").Append(kindKey).Append("\" data-create-server-ui hidden>+ ").Append(newLabel).Append("</button>");
-            sb.Append("</div>");
-        }
-        sb.Append("<nav class=\"spaces\" aria-label=\"Spaces\">");
-        Group("Servers", ServerKind.Discussion, "/chat", normalized == "/chat", "discussion", "New server");
-        Group("Forums", ServerKind.Forum, "/forum", normalized == "/forum", "forum", "New forum");
-        Group("Feeds", ServerKind.Feed, "/feed", normalized == "/feed", "feed", "New feed");
-        // Shared create form (hidden; a "+ New X" button sets the kind + reveals it).
-        sb.Append("<form class=\"space-create\" data-create-form autocomplete=\"off\" hidden>");
-        sb.Append("<input name=\"newServer\" type=\"text\" class=\"space-create-in\" placeholder=\"name\" maxlength=\"20\" data-wasp-keep />");
-        sb.Append("<input type=\"hidden\" name=\"newServerKind\" value=\"discussion\" data-wasp-keep />");
-        sb.Append("<label class=\"space-create-priv\"><input type=\"checkbox\" name=\"newServerPrivate\" data-wasp-keep /> Private</label>");
-        sb.Append("<div class=\"space-create-row\"><button type=\"button\" class=\"space-create-go\" data-create-server>Create</button><button type=\"button\" class=\"space-create-x\" data-create-cancel>Cancel</button></div>");
-        sb.Append("</form>");
-        sb.Append("</nav>");
-        // Direct messages — pinned to the BOTTOM of the nav (outside the scrollable
-        // groups), just above the account card.
-        sb.Append("<div class=\"spaces-dm\"><a class=\"space-item space-dm").Append(dmActive ? " active" : "").Append("\" href=\"/chat?dm=1\"><span class=\"space-ic space-ic-dm\" aria-hidden=\"true\">✉</span><span class=\"space-nm\">Direct messages</span></a></div>");
-        // Internet Identity sign-in — wasp-ii.js swaps these between
-        // signed-out / signed-in states on load and on every II event.
-        // Server-side we always emit both; CSS hides one based on the
-        // [data-ii-state] attribute the JS sets on <body>.
+        sb.Append("<nav class=\"spaces\" aria-label=\"Samples\"><div class=\"spaces-grp\">");
+        Nav("/", "Home", "home", 220);
+        Nav("/counter", "Counter", "counter", 145);
+        Nav("/place", "Place", "place", 280);
+        Nav("/chat", "Chat", "chat", 200);
+        Nav("/weather", "Weather", "weather", 40);
+        Nav("/tetris", "Tetris", "tetris", 330);
+        Nav("/crm", "CRM", "crm", 170);
+        Nav("/stable", "Stable memory", "stable", 20);
+        sb.Append("</div></nav>");
         sb.Append("<div class=\"sidebar-auth\">");
         sb.Append("<button type=\"button\" class=\"ii-signin\" data-ii-signin>");
         sb.Append("<span class=\"ii-mark\">").Append(Icon("login")).Append("</span>Sign in with Internet Identity");
@@ -2876,17 +2803,10 @@ public static class Program
         sb.Append("</span>");
         sb.Append("</div>");
         sb.Append("</div>");
-        // Online users — live count of clients heartbeating in the last
-        // 30 s. data-online-count is wired by wasp.js (poll + heartbeat
-        // every 10 s; updates the innerText reactively).
-        sb.Append("<div class=\"sidebar-online\"><span class=\"online-dot\"></span>");
-        sb.Append("<span data-online-count>—</span> online</div>");
+        sb.Append("<div class=\"sidebar-online\"><span class=\"online-dot\"></span><span data-online-count>—</span> online</div>");
         sb.Append("<div class=\"sidebar-foot\">on-chain · always</div>");
         sb.Append("</aside>");
-        // Chat + Place want the full viewport (no padding, no max-width,
-        // internal scroll only). Older browsers don't support :has() so
-        // a class on <main> is more portable than a :has(.dc-shell) rule.
-        var fullbleed = normalized == "/chat" || normalized == "/place" || normalized == "/stable" || normalized == "/forum" || normalized == "/feed"
+        var fullbleed = normalized == "/chat" || normalized == "/place" || normalized == "/stable"
             ? " class=\"fullbleed\"" : "";
         sb.Append("<main").Append(fullbleed).Append(">").Append(innerHtml).Append("</main>");
         sb.Append("</div>");
@@ -4838,8 +4758,7 @@ public static class Program
     <div id=""wasp-root"">" + contentHtml + @"</div>
     <script src=""/_wasp/wasp.js""" + WaspJsSriAttrs() + @"></script>
     <script type=""module"">" + IiClientScript + @"</script>
-    <script type=""module"">" + DmClientScript + @"</script>
-    <script type=""module"">" + ServerAdminScript + @"</script>
+    <script type=""module"">" + BaseChatScript + @"</script>
 </body>
 </html>";
     }
@@ -5020,185 +4939,7 @@ if (root) {
 applyState();
 ";
 
-    private const string DmClientScript = @"
-import { Actor, HttpAgent } from '/_wasp/dfinity.js';
-import { AuthClient } from '/_wasp/dfinity.js';
-import { IDL } from '/_wasp/dfinity.js';
-import { TransportSecretKey, EncryptedVetKey, DerivedPublicKey } from '/_wasp/vetkeys.js';
-const canisterId = document.body.getAttribute('data-wasp-canister');
-const httpReq = IDL.Record({ method: IDL.Text, url: IDL.Text, headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)), body: IDL.Vec(IDL.Nat8) });
-const httpResp = IDL.Record({ status_code: IDL.Nat16, headers: IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text)), body: IDL.Vec(IDL.Nat8), upgrade: IDL.Opt(IDL.Bool) });
-// Same Service the existing authenticated Actor uses — adding the two vetKD
-// methods lets actor.vetkd_pubkey()/vetkd_derive() ride the same signed agent
-// (real msg_caller), which the canister's participation gate requires.
-const idlFactory = ({ IDL }) => IDL.Service({
-  http_request_update: IDL.Func([httpReq], [httpResp], []),
-  vetkd_pubkey: IDL.Func([], [IDL.Vec(IDL.Nat8)], []),
-  vetkd_derive: IDL.Func([IDL.Record({ peer: IDL.Text, transport_public_key: IDL.Vec(IDL.Nat8) })], [IDL.Vec(IDL.Nat8)], [])
-});
-let authClient, agent, actor, myPrincipal = '2vxsx-fae';
-async function ensureAgent() {
-  if (actor) return;
-  authClient = authClient || await AuthClient.create({ keyType: 'Ed25519', idleOptions: { disableIdle: true } });
-  const identity = authClient.getIdentity();
-  myPrincipal = identity.getPrincipal().toText();
-  agent = await HttpAgent.create({ identity, host: 'https://icp0.io' });
-  actor = Actor.createActor(idlFactory, { agent, canisterId });
-}
-// ALWAYS update calls (signed). A query call would land anonymous.
-async function signedCall(method, url, jsonBody) {
-  const body = jsonBody ? Array.from(new TextEncoder().encode(jsonBody)) : [];
-  const resp = await actor.http_request_update({ method, url, headers: jsonBody ? [['content-type','application/json']] : [], body });
-  return { status: Number(resp.status_code), text: new TextDecoder().decode(new Uint8Array(resp.body)) };
-}
-// ── vetKeys 1:1 DM E2EE ─────────────────────────────────────────────────────
-// Per-conversation AES-GCM key derived via the canister's vetKD methods. The
-// derivation input (convId) MUST byte-match what the canister builds from
-// msg_caller+peer, so it is computed identically here.
-const SEP = String.fromCharCode(0x1F);
-const E2E_TAG = 'E2E1';
-let _dpkPromise = null;        // cached master DerivedPublicKey (global)
-const _convoKeys = new Map();  // peer -> Promise<CryptoKey> (per session)
-function b64uEnc(bytes){ let s=''; const a=(bytes instanceof Uint8Array)?bytes:new Uint8Array(bytes); for(let i=0;i<a.length;i++) s+=String.fromCharCode(a[i]); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
-function b64uDec(str){ let s=str.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; const bin=atob(s); const out=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i); return out; }
-async function masterDpk(){
-  if(!_dpkPromise){
-    _dpkPromise = (async ()=>{
-      const pk = await actor.vetkd_pubkey();
-      return DerivedPublicKey.deserialize(Uint8Array.from(pk));
-    })().catch(e=>{ _dpkPromise=null; throw e; });
-  }
-  return _dpkPromise;
-}
-async function convoKey(peer){
-  let p = _convoKeys.get(peer);
-  if(!p){
-    p = (async ()=>{
-      const me = localStorage.getItem('wasp:ii:principal') || myPrincipal;
-      const convId = (me < peer) ? (me + SEP + peer) : (peer + SEP + me);
-      const input = new TextEncoder().encode(convId);
-      const dpk = await masterDpk();
-      const tsk = TransportSecretKey.random();
-      const enc = await actor.vetkd_derive({ peer, transport_public_key: tsk.publicKeyBytes() });
-      const vetKey = EncryptedVetKey.deserialize(Uint8Array.from(enc)).decryptAndVerify(tsk, dpk, input);
-      return (await vetKey.asDerivedKeyMaterial()).deriveAesGcmCryptoKey('wasp-bzzz/dm/v1');
-    })().catch(e=>{ _convoKeys.delete(peer); throw e; });
-    _convoKeys.set(peer, p);
-  }
-  return p;
-}
-async function e2eEncrypt(peer, plaintext){
-  const aesKey = await convoKey(peer);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv }, aesKey, new TextEncoder().encode(plaintext)));
-  const blob = new Uint8Array(iv.length + ct.length); blob.set(iv,0); blob.set(ct, iv.length);
-  return E2E_TAG + b64uEnc(blob);
-}
-async function e2eDecrypt(peer, stored){
-  if(typeof stored !== 'string' || stored.slice(0,4) !== E2E_TAG) return stored; // legacy plaintext, backward compatible
-  const aesKey = await convoKey(peer);
-  const b = b64uDec(stored.slice(4));
-  const iv = b.slice(0,12), ct = b.slice(12);
-  return new TextDecoder().decode(await crypto.subtle.decrypt({ name:'AES-GCM', iv }, aesKey, ct));
-}
-function isEncrypted(s){ return typeof s === 'string' && s.slice(0,4) === E2E_TAG; }
-// ────────────────────────────────────────────────────────────────────────────
-function signedIn() { return !!localStorage.getItem('wasp:ii:principal'); }
-function qparam(k) { return new URLSearchParams(location.search).get(k); }
-// SPA navigation: synthesize an internal-link click so wasp.js's anchor
-// interceptor routes it through /_wasp/render (which honours the query),
-// instead of a full page load that hits the query-stripped /chat snapshot.
-function spaNav(p){ const a=document.createElement('a'); a.href=p; document.body.appendChild(a); a.click(); a.remove(); }
-function esc(s){ const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
-function hue(n){ let h=0; for(const c of (n||'?')) h=(h*131+c.charCodeAt(0))&0xFFFFFF; return h%360; }
-function msgRow(m){
-  const h = hue(m.from);
-  return '<div class=""dc-message""><div class=""dc-avatar"" style=""background:hsl('+h+',50%,50%)"">'+esc(((m.from||'?')[0]||'?').toUpperCase())+'</div>'+
-    '<div class=""dc-message-body""><div class=""dc-message-head""><span class=""dc-username"" style=""color:hsl('+h+',60%,65%)"">'+esc(m.from)+'</span></div>'+
-    '<div class=""dc-text"">'+esc(m.text)+'</div></div></div>';
-}
-async function loadThreads(){
-  const r=await signedCall('POST','/api/dm/threads','{}'); if(r.status!==200) return [];
-  let threads; try{ threads=JSON.parse(r.text).threads||[]; }catch{ return []; }
-  // Never surface raw ciphertext in a preview. lastText is the stored body; if
-  // it is an E2E1 envelope, show a lock placeholder instead of the base64 blob.
-  for(const t of threads){ if(isEncrypted(t.lastText)) t.lastText='Encrypted message'; }
-  return threads;
-}
-async function loadMessages(peer){
-  const r=await signedCall('POST','/api/dm/read',JSON.stringify({peer})); if(r.status!==200) return [];
-  let msgs; try{ msgs=JSON.parse(r.text).messages||[]; }catch{ return []; }
-  // Decrypt in place; a single bad envelope renders a placeholder, never crashes.
-  for(const m of msgs){
-    try{ m.text = await e2eDecrypt(peer, m.text); }
-    catch(_){ m.text = '(cannot decrypt)'; }
-  }
-  return msgs;
-}
-// Encrypt over the existing signed /api/dm/send path (server stores ciphertext).
-async function sendDm(peer,text){ const ct=await e2eEncrypt(peer,text); return signedCall('POST','/api/dm/send',JSON.stringify({peer,text:ct})); }
-// names are public on the member rail; only thread bodies are private.
-async function principalForName(name){ try{ const r=await fetch('/api/identity/lookup-name?n='+encodeURIComponent(name)); if(r.ok){ const j=await r.json(); if(j.bound) return j.principal; } }catch(_){} return null; }
-async function renderDmSurface(){
-  if (location.pathname !== '/chat' || qparam('dm') !== '1') return;
-  const gate=document.querySelector('[data-dm-gate]'), gateC=document.querySelector('[data-dm-gate-center]');
-  const threadsEl=document.querySelector('[data-dm-threads]'), emptyPick=document.querySelector('[data-dm-empty-pick]');
-  const stream=document.querySelector('[data-dm-stream]'), composer=document.querySelector('[data-dm-composer]');
-  if (!signedIn()){ if(gate)gate.hidden=false; if(gateC)gateC.style.display=''; if(threadsEl)threadsEl.hidden=true; if(stream)stream.hidden=true; if(composer)composer.hidden=true; if(emptyPick)emptyPick.hidden=true; return; }
-  await ensureAgent();
-  if(gate)gate.hidden=true; if(gateC)gateC.style.display='none'; if(threadsEl)threadsEl.hidden=false;
-  const threads=await loadThreads();
-  if(threadsEl){ const e='<div class=""dc-dm-threads-empty"">No conversations yet. Open one from a member’s Message button.</div>';
-    threadsEl.innerHTML = threads.length ? threads.map(t=>'<a class=""dc-dm-thread"" href=""/chat?dm=1&t='+encodeURIComponent(t.peer)+'""><span class=""dc-dm-thread-avatar"" style=""background:hsl('+hue(t.name||t.peer)+',50%,50%)"">'+esc(((t.name||'?')[0]||'?').toUpperCase())+'</span><span class=""dc-dm-thread-name"">'+esc(t.name||t.peer)+'</span></a>').join('') : e; }
-  const peer=qparam('t');
-  if(!peer){ if(emptyPick)emptyPick.hidden=false; if(stream)stream.hidden=true; if(composer)composer.hidden=true; return; }
-  if(emptyPick)emptyPick.hidden=true;
-  if(stream){ stream.hidden=false; const msgs=await loadMessages(peer); stream.innerHTML=msgs.map(msgRow).join(''); stream.scrollTop=stream.scrollHeight; }
-  if(composer){ composer.hidden=false; const inp=composer.querySelector('[data-dm-peer-input]'); if(inp)inp.value=peer; }
-  const nameEl=document.querySelector('[data-dm-peer-name]'); const t=threads.find(x=>x.peer===peer);
-  if(nameEl)nameEl.textContent=(t&&t.name)?t.name:peer;
-}
-document.addEventListener('click', async (e)=>{
-  const dmBtn = e.target.closest && e.target.closest('[data-wasp-dm-user]');
-  if (dmBtn){ e.preventDefault();
-    if(!signedIn()){ document.querySelector('[data-ii-signin]')?.click(); return; }
-    const name=dmBtn.getAttribute('data-wasp-dm-user'); dmBtn.disabled=true;
-    const p=await principalForName(name); dmBtn.disabled=false;
-    if(!p){ dmBtn.title=name+' has not signed in with II — can’t DM'; return; }
-    spaNav('/chat?dm=1&t='+encodeURIComponent(p)); return; }
-  const send = e.target.closest && e.target.closest('[data-dm-send]');
-  if (send){ e.preventDefault();
-    const composer=send.closest('[data-dm-composer]'); const ta=composer.querySelector('[data-dm-input]');
-    const peer=composer.querySelector('[data-dm-peer-input]').value; const text=(ta.value||'').trim();
-    if(!peer||!text) return; send.disabled=true; await ensureAgent();
-    // Encrypt first; if it throws, surface the error and DO NOT send — never
-    // silently fall back to plaintext under an encrypted UI.
-    let r;
-    try{ r=await sendDm(peer,text); }
-    catch(err){ send.disabled=false; ta.title='Encryption failed — message not sent'; alert('Could not encrypt this message — it was NOT sent.'); return; }
-    send.disabled=false;
-    if(r.status===200){ ta.value=''; await renderDmSurface(); } return; }
-});
-const root=document.getElementById('wasp-root');
-if(root){ let pend=null; new MutationObserver(()=>{ if(pend)return; pend=requestAnimationFrame(()=>{pend=null; renderDmSurface();}); }).observe(root,{childList:true,subtree:true}); }
-renderDmSurface();
-// Deep-link / full-load recovery: a fresh load of /chat?dm=1 is served as
-// the query-stripped channel snapshot (no DM DOM). Re-render via SPA (which
-// honours the query) so bookmarks/shared links and the back button land on
-// the DM surface rather than #general.
-if (location.pathname==='/chat' && qparam('dm')==='1' && !document.querySelector('[data-dm-pane]')) {
-  spaNav(location.pathname + location.search);
-}
-";
-
-    // M2 signed server-actions client. Mirrors DmClientScript's signed
-    // @dfinity/agent http_request_update transport, but ENV-AWARE: on a
-    // *.localhost / 127.0.0.1 replica it points the agent at the page origin
-    // and fetchRootKey()s (mainnet uses the hardcoded icp0.io host + the
-    // baked-in root key). Issues the role-gated create/grant calls so the
-    // canister sees a real msg_caller, and gates the create-server/-channel
-    // UI on /api/server/myrole.
-    private const string ServerAdminScript = @"
+    private const string BaseChatScript = @"
 import { Actor, HttpAgent } from '/_wasp/dfinity.js';
 import { AuthClient } from '/_wasp/dfinity.js';
 import { IDL } from '/_wasp/dfinity.js';
@@ -5213,137 +4954,39 @@ async function ensureAgent() {
   if (actor) return;
   authClient = authClient || await AuthClient.create({ keyType: 'Ed25519', idleOptions: { disableIdle: true } });
   const identity = authClient.getIdentity();
-  // HttpAgent.create() (async factory) is the v2-correct path — it syncs IC time
-  // so update calls are properly signed; the sync `new HttpAgent()` produced calls
-  // the canister saw as anonymous.
+  // HttpAgent.create() (async factory) syncs IC time so update calls are properly signed.
   agent = await HttpAgent.create({ identity, host: HOST });
   if (isLocal) { try { await agent.fetchRootKey(); } catch (_) {} }
   actor = Actor.createActor(idlFactory, { agent, canisterId });
 }
 async function signedCall(method, url, jsonBody) {
   const body = jsonBody ? Array.from(new TextEncoder().encode(jsonBody)) : [];
-  const resp = await actor.http_request_update({ method, url, headers: jsonBody ? [['content-type','application/json']] : [], body });
+  const resp = await actor.http_request_update({ method, url, headers: jsonBody ? [['content-type', 'application/json']] : [], body });
   return { status: Number(resp.status_code), text: new TextDecoder().decode(new Uint8Array(resp.body)) };
 }
 function signedIn() { return !!localStorage.getItem('wasp:ii:principal'); }
-function qp(k) { return new URLSearchParams(location.search).get(k); }
-function activeServerId() { const n = parseInt(qp('s') || '0', 10); return isNaN(n) ? 0 : n; }
 // Signed sign-up: bind the caller's OWN principal to a display name. Exposed for
-// the II sign-in flow (IiClientScript) which holds the same II session.
+// the II sign-in flow (IiClientScript), which holds the same II session.
 window.waspBindName = async function (name) {
-  try { await ensureAgent(); const r = await signedCall('POST', '/api/account/bind', JSON.stringify({ name: name }));
-    if (r.status === 200) { try { return JSON.parse(r.text).name || name; } catch (_) {} } }
-  catch (_) {}
+  try {
+    await ensureAgent();
+    const r = await signedCall('POST', '/api/account/bind', JSON.stringify({ name: name }));
+    if (r.status === 200) { try { return JSON.parse(r.text).name || name; } catch (_) {} }
+  } catch (_) {}
   return name;
 };
-function spaNav(p) { const a = document.createElement('a'); a.href = p; document.body.appendChild(a); a.click(); a.remove(); }
 function errText(r) { try { return JSON.parse(r.text).error || ('error ' + r.status); } catch { return 'error ' + r.status; } }
 function toast(msg) {
   let t = document.getElementById('wasp-toast');
-  if (!t) { t = document.createElement('div'); t.id = 'wasp-toast';
+  if (!t) {
+    t = document.createElement('div'); t.id = 'wasp-toast';
     t.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1e1f22;color:#f2f3f5;border:1px solid rgba(255,255,255,0.12);padding:10px 16px;border-radius:8px;font-size:0.85rem;z-index:9999;box-shadow:0 6px 24px rgba(0,0,0,0.45);opacity:0;transition:opacity 0.18s ease;pointer-events:none;max-width:80vw';
-    document.body.appendChild(t); }
+    document.body.appendChild(t);
+  }
   t.textContent = msg; t.style.opacity = '1';
   clearTimeout(t._h); t._h = setTimeout(() => { t.style.opacity = '0'; }, 3200);
 }
-let lastSid = -999, lastInfo = null;
-let lastPrivRoom = -1, lastPrivAt = 0, lastPrivThread = -1, lastPrivThreadAt = 0, lastSettingsSid = -1;
-let lastPFSid = -1, lastPFTid = -1, lastPFAt = 0, lastPFeedSid = -1, lastPFeedAt = 0;
-let lastFeedHomeAt = 0, feedTabChoice = null, feedHomeLimit = 60;
-let createFormOpen = false;
-function applyVisibility(info, sid) {
-  // Spaces sidebar has one 'New' button per group — reveal them ALL for super.
-  const showCreate = !!(info && info.isSuperAdmin);
-  document.querySelectorAll('[data-create-server-ui]').forEach(el => { el.hidden = !showCreate; });
-  // Persist the super flag on <body> (outside #wasp-root) so CSS keeps the create
-  // buttons visible across reactivity-poll re-renders — the per-element .hidden
-  // toggle alone flaps because each poll re-emits the buttons SSR-hidden.
-  document.body.setAttribute('data-cansrv', showCreate ? '1' : '');
-  // Re-assert the create-form open state: the reactivity poll re-emits the form
-  // hidden from SSR every swap, so without this it would snap shut mid-typing.
-  const cf = document.querySelector('[data-create-form]');
-  if (cf) cf.hidden = !(showCreate && createFormOpen);
-  const ch = document.querySelector('[data-create-channel-ui]');
-  const canCh = info && (info.isSuperAdmin || info.role === 'admin' || info.role === 'owner');
-  if (ch) ch.hidden = !(canCh && sid >= 1);
-  // Moderator+ (or super) reveals per-message + channel mod controls. The server
-  // re-checks per-room on every mod call, so this is a convenience reveal only.
-  const canMod = info && (info.isSuperAdmin || info.role === 'moderator' || info.role === 'admin' || info.role === 'owner');
-  document.querySelectorAll('[data-mod-controls]').forEach(el => { el.hidden = !canMod; });
-  // B4: owner/admin (or super) reveals the server-settings gear + membership UI.
-  const canMembers = !!(info && info.canManageMembers);
-  document.querySelectorAll('[data-manage-ui]').forEach(el => { el.hidden = !(canMembers && sid >= 1); });
-}
-let _roleBusy = false;
-async function refreshRoleUi() {
-  // The spaces sidebar (with the super-only New buttons) shows on every app
-  // route, so the role check must run on chat/forum/feed (not just /chat).
-  const _p = location.pathname;
-  if (_p !== '/chat' && _p !== '/forum' && _p !== '/feed') return;
-  if (!signedIn()) { applyVisibility(null, 0); lastSid = -999; lastInfo = null; return; }
-  const sid = activeServerId();
-  if (lastInfo && sid === lastSid) { applyVisibility(lastInfo, sid); return; }
-  if (_roleBusy) return;
-  _roleBusy = true;
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/server/myrole', JSON.stringify({ serverId: sid }));
-    if (r.status === 200) { const info = JSON.parse(r.text); lastSid = sid; lastInfo = info; applyVisibility(info, sid); }
-  } catch (_) {} finally { _roleBusy = false; }
-}
-async function createServer() {
-  if (!signedIn()) { const b = document.querySelector('[data-ii-signin]'); if (b) b.click(); return; }
-  const inp = document.querySelector('[name=newServer]'); const name = ((inp && inp.value) || '').trim();
-  if (!name) return;
-  const pc = document.querySelector('[name=newServerPrivate]'); const priv = !!(pc && pc.checked);
-  const kc = document.querySelector('[name=newServerKind]'); const kind = (kc && kc.value) || 'discussion';
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/servers', JSON.stringify({ name, private: String(priv), kind: kind }));
-    if (r.status === 200) {
-      if (inp) inp.value = ''; let j = {}; try { j = JSON.parse(r.text); } catch (_) {} lastSid = -999; createFormOpen = false;
-      const id = j.id || ''; const k = j.kind || kind;
-      if (k === 'forum') spaNav('/forum?s=' + id);
-      else if (k === 'feed') spaNav('/feed?s=' + id);
-      else spaNav('/chat?s=' + id);
-    }
-    else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function createChannel() {
-  if (!signedIn()) { const b = document.querySelector('[data-ii-signin]'); if (b) b.click(); return; }
-  const inp = document.querySelector('[name=newRoom]'); const name = ((inp && inp.value) || '').trim();
-  if (!name) return;
-  const sid = activeServerId();
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/server-channels', JSON.stringify({ serverId: sid, name }));
-    if (r.status === 200) { if (inp) inp.value = ''; let j = {}; try { j = JSON.parse(r.text); } catch (_) {} spaNav('/chat?s=' + sid + '&r=' + encodeURIComponent(j.channelName || name)); }
-    else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-document.addEventListener('click', (e) => {
-  const nsp = e.target.closest && e.target.closest('[data-new-space]');
-  if (nsp) {
-    e.preventDefault(); e.stopPropagation();
-    const kc = document.querySelector('[name=newServerKind]'); if (kc) kc.value = nsp.getAttribute('data-new-space') || 'discussion';
-    createFormOpen = true;
-    const form = document.querySelector('[data-create-form]');
-    if (form) { form.hidden = false; const inp = form.querySelector('[name=newServer]'); if (inp) inp.focus(); }
-    return;
-  }
-  if (e.target.closest && e.target.closest('[data-create-cancel]')) { e.preventDefault(); e.stopPropagation(); createFormOpen = false; const f = document.querySelector('[data-create-form]'); if (f) f.hidden = true; return; }
-  if (e.target.closest && e.target.closest('[data-create-server]')) { e.preventDefault(); createServer(); return; }
-  if (e.target.closest && e.target.closest('[data-create-channel]')) { e.preventDefault(); createChannel(); return; }
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter') return;
-  const t = e.target;
-  if (t && t.name === 'newServer') { e.preventDefault(); createServer(); }
-  else if (t && t.name === 'newRoom') { e.preventDefault(); createChannel(); }
-});
-
-// ── M2-B signed chat writes: post / edit / delete (sign-in required) ──
+// Signed chat writes: post / edit / delete / react (sign-in required).
 function mainComposer() { const b = document.querySelector('[data-chat-send]'); return b ? b.closest('form') : null; }
 function fieldVal(form, n) { const el = form.querySelector('[name=' + n + ']'); return el ? (el.value || '') : ''; }
 async function chatSend() {
@@ -5362,15 +5005,13 @@ async function chatSend() {
       const imageData = fieldVal(form, 'imageData');
       if (!text && !imageData) return;
       const payload = { roomId: Number(fieldVal(form, 'roomId') || '0'), text, username: (document.querySelector('[name=username]') || {}).value || '' };
-      const replyTo = fieldVal(form, 'replyTo');
-      if (replyTo && replyTo !== '0') payload.replyTo = Number(replyTo);
       if (imageData) payload.imageData = imageData;
       r = await signedCall('POST', '/api/chat/post', JSON.stringify(payload));
     }
     if (r.status === 200) {
       if (ta) { ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); }
-      ['imageData', 'replyTo', 'editMsgId'].forEach(n => { const el = form.querySelector('[name=' + n + ']'); if (el) el.value = ''; });
-      ['[data-wasp-cancel-reply]', '[data-wasp-cancel-edit]', '[data-wasp-image-clear]'].forEach(sel => { const b = document.querySelector(sel); if (b && b.offsetParent !== null) b.click(); });
+      ['imageData', 'editMsgId'].forEach(n => { const el = form.querySelector('[name=' + n + ']'); if (el) el.value = ''; });
+      ['[data-wasp-cancel-edit]', '[data-wasp-image-clear]'].forEach(sel => { const b = document.querySelector(sel); if (b && b.offsetParent !== null) b.click(); });
     } else { toast(errText(r)); }
   } catch (_) { toast('network error'); }
 }
@@ -5387,420 +5028,22 @@ async function chatReact(id, emoji) {
   try { await ensureAgent(); const r = await signedCall('POST', '/api/chat/react', JSON.stringify({ msgId: Number(id), emoji: emoji })); if (r.status !== 200) toast(errText(r)); }
   catch (_) { toast('network error'); }
 }
-async function threadSend(btn) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  const form = btn.closest('form'); if (!form) return;
-  const pe = form.querySelector('[name=threadParent]'); const ta = form.querySelector('textarea[name=text]');
-  const parent = pe ? Number(pe.value || '0') : 0; const text = ((ta && ta.value) || '').trim();
-  if (!parent || !text) return;
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/thread/reply', JSON.stringify({ parentMsgId: parent, text: text }));
-    if (r.status === 200) { if (ta) { ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); } } else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function modCall(url, payload) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  try { await ensureAgent(); const r = await signedCall('POST', url, JSON.stringify(payload)); if (r.status !== 200) toast(errText(r)); }
-  catch (_) { toast('network error'); }
-}
-async function deleteServer(sid) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/server/delete', JSON.stringify({ serverId: Number(sid) }));
-    if (r.status !== 200) { toast(errText(r)); return; }
-    toast('Server deleted'); lastSid = -999; lastSettingsSid = -1; location.href = '/chat';
-  } catch (_) { toast('network error'); }
-}
-function modDelete(id) { return modCall('/api/chat/mod/delete', { msgId: Number(id) }); }
-function modPin(btn) { const cur = btn.getAttribute('data-pinned') === 'true'; return modCall('/api/chat/mod/pin', { msgId: Number(btn.getAttribute('data-mod-pin')), pinned: String(!cur) }); }
-function modLock(btn) { const cur = btn.getAttribute('data-locked') === 'true'; return modCall('/api/chat/mod/lock', { roomId: Number(btn.getAttribute('data-mod-lock')), locked: String(!cur) }); }
-function modMute(btn) { return modCall('/api/chat/mod/mute', { serverId: Number(btn.getAttribute('data-mute-server') || activeServerId()), principal: btn.getAttribute('data-mod-mute'), durationMs: 3600000 }); }
-
-// ── F1 forum: new topic / reply / mark-accepted-answer (all signed) ──
-async function forumNewTopic(serverId, title, text) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  if (!title || !text) { toast('title and body required'); return; }
-  try {
-    await ensureAgent();
-    const uname = (document.querySelector('[name=username]') || {}).value || '';
-    const r = await signedCall('POST', '/api/forum/topic', JSON.stringify({ serverId: Number(serverId), title: title, text: text, username: uname }));
-    if (r.status === 200) { let j = {}; try { j = JSON.parse(r.text); } catch (_) {} spaNav('/forum?s=' + Number(serverId) + '&t=' + (j.topicId || '')); }
-    else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function forumReply(roomId, text) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  if (!text) return;
-  try {
-    await ensureAgent();
-    const uname = (document.querySelector('[name=username]') || {}).value || '';
-    const r = await signedCall('POST', '/api/chat/post', JSON.stringify({ roomId: Number(roomId), text: text, username: uname }));
-    if (r.status === 200) spaNav(location.pathname + location.search);
-    else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function forumSolve(roomId, msgId, on) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/forum/solve', JSON.stringify({ roomId: Number(roomId), msgId: on ? Number(msgId) : 0 }));
-    if (r.status === 200) spaNav(location.pathname + location.search);
-    else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function voteForum(btn) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/forum/vote', JSON.stringify({ msgId: Number(btn.getAttribute('data-msg')), dir: btn.getAttribute('data-dir') }));
-    if (r.status === 200) spaNav(location.pathname + location.search); else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
 document.addEventListener('click', (e) => {
   if (!e.target.closest) return;
-  const fv = e.target.closest('[data-forum-vote]');
-  if (fv) { e.preventDefault(); voteForum(fv); return; }
-  const nt = e.target.closest('[data-forum-new]');
-  if (nt) { e.preventDefault(); const f = document.querySelector('[data-forum-newform]'); if (f) { f.hidden = false; const ti = f.querySelector('[data-forum-new-title]'); if (ti) ti.focus(); } return; }
-  const nc = e.target.closest('[data-forum-new-cancel]');
-  if (nc) { e.preventDefault(); const f = document.querySelector('[data-forum-newform]'); if (f) f.hidden = true; return; }
-  const ns = e.target.closest('[data-forum-new-submit]');
-  if (ns) { e.preventDefault(); const f = document.querySelector('[data-forum-newform]'); const ti = f && f.querySelector('[data-forum-new-title]'); const bo = f && f.querySelector('[data-forum-new-body]'); forumNewTopic(ns.getAttribute('data-server'), ((ti && ti.value) || '').trim(), ((bo && bo.value) || '').trim()); return; }
-  const rb = e.target.closest('[data-forum-reply]');
-  if (rb) { e.preventDefault(); const room = rb.getAttribute('data-room'); const ta = document.querySelector('[data-forum-reply-text=""' + room + '""]'); forumReply(room, ((ta && ta.value) || '').trim()); return; }
-  const sv = e.target.closest('[data-forum-solve]');
-  if (sv) { e.preventDefault(); forumSolve(sv.getAttribute('data-room'), sv.getAttribute('data-msg'), sv.getAttribute('data-on') === '1'); return; }
-});
-
-// ── F2 feed: post / reply / like / repost / follow (all signed) ──
-async function feedPost(roomId, text) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  if (!text) return;
-  try {
-    await ensureAgent();
-    const uname = (document.querySelector('[name=username]') || {}).value || '';
-    const r = await signedCall('POST', '/api/chat/post', JSON.stringify({ roomId: Number(roomId), text: text, username: uname }));
-    if (r.status === 200) spaNav(location.pathname + location.search); else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function feedReply(roomId, replyTo, text) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  if (!text) return;
-  try {
-    await ensureAgent();
-    const uname = (document.querySelector('[name=username]') || {}).value || '';
-    const r = await signedCall('POST', '/api/chat/post', JSON.stringify({ roomId: Number(roomId), replyTo: Number(replyTo), text: text, username: uname }));
-    if (r.status === 200) spaNav(location.pathname + location.search); else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function feedRepost(btn) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  const on = btn.getAttribute('data-on') === '1';
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/feed/repost', JSON.stringify({ msgId: Number(btn.getAttribute('data-msg')), on: String(on) }));
-    if (r.status === 200) spaNav(location.pathname + location.search); else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function feedFollow(btn) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  const on = btn.getAttribute('data-on') === '1';
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/feed/follow', JSON.stringify({ serverId: Number(btn.getAttribute('data-server')), on: String(on) }));
-    if (r.status === 200) spaNav(location.pathname + location.search); else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-// Personalized FOLLOWING home — signed read, client-rendered (anonymous SSR can't
-// know the viewer), mirroring renderPrivateChannel. privEsc/privHue are hoisted fns.
-function feedPostRow(p) {
-  const a = p.author || 'anon'; const h = privHue(a); const init = ((a[0] || '?')).toUpperCase();
-  const src = p.srcName ? ' <a class=""fd-srcinline"" href=""/feed?s=' + p.srcId + '"">' + privEsc(p.srcName) + '</a>' : '';
-  const rb = p.repostedBy ? '<div class=""fd-repost-by"">🔁 Reposted by ' + privEsc(p.repostedBy) + '…</div>' : '';
-  const fbtn = p.authorPrincipal ? '<button type=""button"" class=""fd-followbtn' + (p.following ? ' on' : '') + '"" data-user-follow data-principal=""' + privEsc(p.authorPrincipal) + '"" data-on=""' + (p.following ? '0' : '1') + '"">' + (p.following ? 'Following' : 'Follow') + '</button>' : '';
-  return rb + '<div class=""fd-post"">' +
-    '<span class=""fd-av"" style=""background:hsl(' + h + ',55%,45%)"">' + privEsc(init) + '</span>' +
-    '<div class=""fd-post-main"">' +
-    '<div class=""fd-post-head""><span class=""fd-author"">' + privEsc(a) + '</span>' + src + fbtn + '</div>' +
-    '<div class=""fd-body"">' + (p.html || '') + '</div>' +
-    '<div class=""fd-actions"">' +
-    '<a class=""fd-act"" href=""/feed?s=' + p.srcId + '&p=' + p.id + '"">💬 ' + (p.replies || 0) + '</a>' +
-    '<button type=""button"" class=""fd-act"" data-feed-repost data-msg=""' + p.id + '"" data-on=""' + (p.reposted ? '0' : '1') + '"">🔁 ' + (p.reposts || 0) + '</button>' +
-    '<button type=""button"" class=""fd-act"" data-feed-like data-msg=""' + p.id + '"">❤ ' + (p.likes || 0) + '</button>' +
-    '</div></div></div>';
-}
-async function userFollow(btn) {
-  if (!signedIn()) { const s = document.querySelector('[data-ii-signin]'); if (s) s.click(); return; }
-  const who = btn.getAttribute('data-principal'); if (!who) return;
-  const on = btn.getAttribute('data-on') === '1';
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/user/follow', JSON.stringify({ principal: who, on: String(on) }));
-    if (r.status === 200) spaNav(location.pathname + location.search); else toast(errText(r));
-  } catch (_) { toast('network error'); }
-}
-async function renderFeedHome() {
-  const wrap = document.querySelector('[data-feed-following-stream]'); if (!wrap) return;
-  if (!signedIn()) { wrap.innerHTML = '<div class=""fd-empty""><p>Sign in to see posts from feeds you follow.</p></div>'; return; }
-  // Throttle re-fetches, but always fetch when the stream is empty (a reactivity-poll
-  // DOM swap re-renders the empty SSR container, which we must repopulate immediately).
-  const t = Date.now(); if (wrap.innerHTML !== '' && t - lastFeedHomeAt < 2500) return; lastFeedHomeAt = t;
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/feed/home', JSON.stringify({ limit: feedHomeLimit }));
-    if (r.status !== 200) { wrap.innerHTML = '<div class=""fd-empty""><p>Could not load your feed.</p></div>'; return; }
-    let j = {}; try { j = JSON.parse(r.text); } catch (_) {}
-    const posts = j.posts || [];
-    if (!posts.length) { wrap.innerHTML = '<div class=""fd-empty""><p>You do not follow any feeds yet — open a feed and tap Follow, or follow people.</p></div>'; return; }
-    let html = posts.map(feedPostRow).join('');
-    if (posts.length >= feedHomeLimit) html += '<a class=""fd-loadmore"" data-feed-home-more>Load more</a>';
-    wrap.innerHTML = html;
-  } catch (_) { wrap.innerHTML = '<div class=""fd-empty""><p>Network error.</p></div>'; }
-}
-function applyFeedTab(which) {
-  const fo = document.querySelector('[data-feed-following]'); const al = document.querySelector('[data-feed-all]');
-  if (!fo || !al) return;
-  const on = which === 'following';
-  fo.hidden = !on; al.hidden = on;
-  const tabs = document.querySelectorAll('[data-feed-tab]');
-  for (let i = 0; i < tabs.length; i++) tabs[i].classList.toggle('on', tabs[i].getAttribute('data-feed-tab') === which);
-  if (on) renderFeedHome();
-}
-function feedTab(which) { feedTabChoice = which; applyFeedTab(which); }   // user click — sticky choice
-function feedHomeTick() {
-  const fo = document.querySelector('[data-feed-following]');
-  if (!fo) { feedTabChoice = null; return; }               // left /feed home — reset
-  if (feedTabChoice === null) feedTabChoice = signedIn() ? 'following' : 'all';   // default
-  applyFeedTab(feedTabChoice);   // re-assert after every reactivity-poll DOM swap (SSR resets to All feeds)
-}
-document.addEventListener('click', (e) => {
-  if (!e.target.closest) return;
-  const ftab = e.target.closest('[data-feed-tab]');
-  if (ftab) { e.preventDefault(); feedTab(ftab.getAttribute('data-feed-tab')); return; }
-  const fhm = e.target.closest('[data-feed-home-more]');
-  if (fhm) { e.preventDefault(); feedHomeLimit += 60; lastFeedHomeAt = 0; renderFeedHome(); return; }
-  const fp = e.target.closest('[data-feed-post]');
-  if (fp) { e.preventDefault(); const room = fp.getAttribute('data-room'); const ta = document.querySelector('[data-feed-post-text=""' + room + '""]'); feedPost(room, ((ta && ta.value) || '').trim()); return; }
-  const fr = e.target.closest('[data-feed-reply]');
-  if (fr) { e.preventDefault(); const room = fr.getAttribute('data-room'); const rt = fr.getAttribute('data-replyto'); const ta = document.querySelector('[data-feed-reply-text=""' + rt + '""]'); feedReply(room, rt, ((ta && ta.value) || '').trim()); return; }
-  const fl = e.target.closest('[data-feed-like]');
-  if (fl) { e.preventDefault(); chatReact(fl.getAttribute('data-msg'), '❤️'); return; }
-  const frp = e.target.closest('[data-feed-repost]');
-  if (frp) { e.preventDefault(); feedRepost(frp); return; }
-  const ff = e.target.closest('[data-feed-follow]');
-  if (ff) { e.preventDefault(); feedFollow(ff); return; }
-  const ufb = e.target.closest('[data-user-follow]');
-  if (ufb) { e.preventDefault(); userFollow(ufb); return; }
-});
-
-// ── B4: private-channel signed READ + membership management ──
-function privEsc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
-function privHue(n) { let h = 0; for (const c of (n || '?')) h = (h * 131 + c.charCodeAt(0)) & 0xFFFFFF; return h % 360; }
-function privMsgRow(m) {
-  if (m.deleted) return '<div class=""dc-message dc-message-deleted""><div class=""dc-message-body""><div class=""dc-text""><em>message deleted</em></div></div></div>';
-  const h = privHue(m.author);
-  return '<div class=""dc-message""><div class=""dc-avatar"" style=""background:hsl(' + h + ',50%,50%)"">' + privEsc(((m.author || '?')[0] || '?').toUpperCase()) + '</div>' +
-    '<div class=""dc-message-body""><div class=""dc-message-head""><span class=""dc-username"" style=""color:hsl(' + h + ',60%,65%)"">' + privEsc(m.author) + '</span></div>' +
-    '<div class=""dc-text"">' + privEsc(m.text) + (m.edited ? ' <span class=""dc-edited"">(edited)</span>' : '') + '</div></div></div>';
-}
-async function renderPrivateChannel() {
-  const pane = document.querySelector('[data-private-pane]'); if (!pane) return;
-  const stream = document.querySelector('[data-private-stream]'); const gateMsg = document.querySelector('[data-private-gate-msg]');
-  const roomId = Number(pane.getAttribute('data-room-id') || '0');
-  if (!signedIn()) { if (gateMsg) gateMsg.textContent = 'Members only — sign in with Internet Identity to view.'; return; }
-  // Throttle: the MutationObserver fires on every DOM swap; re-fetch at most every
-  // ~2.5s per room so we get near-live updates without spamming signed calls.
-  const t = Date.now(); if (roomId === lastPrivRoom && t - lastPrivAt < 2500) return; lastPrivRoom = roomId; lastPrivAt = t;
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/chat/private-read', JSON.stringify({ roomId: roomId }));
-    if (r.status === 200) {
-      let j = {}; try { j = JSON.parse(r.text); } catch (_) {} const msgs = j.messages || [];
-      if (stream) { stream.innerHTML = msgs.map(privMsgRow).join(''); stream.scrollTop = stream.scrollHeight; }
-      if (gateMsg) gateMsg.textContent = msgs.length ? '' : 'No messages yet — you can post below.';
-    } else if (r.status === 403) { if (gateMsg) gateMsg.textContent = 'You are not a member of this private server.'; }
-    else if (gateMsg) { gateMsg.textContent = 'Could not load this channel.'; }
-  } catch (_) { if (gateMsg) gateMsg.textContent = 'Network error.'; }
-}
-async function renderPrivateThread() {
-  const pane = document.querySelector('[data-private-thread-pane]'); if (!pane) return;
-  const stream = document.querySelector('[data-private-thread-stream]'); const msg = document.querySelector('[data-private-thread-msg]');
-  const parent = Number(pane.getAttribute('data-thread-parent') || '0');
-  if (!signedIn()) { if (msg) msg.textContent = 'Members only — sign in with Internet Identity to view.'; return; }
-  const t = Date.now(); if (parent === lastPrivThread && t - lastPrivThreadAt < 2500) return; lastPrivThread = parent; lastPrivThreadAt = t;
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/thread/read', JSON.stringify({ parentMsgId: parent }));
-    if (r.status === 200) {
-      let j = {}; try { j = JSON.parse(r.text); } catch (_) {}
-      const reps = j.replies || [];
-      let html = j.parent ? privMsgRow(j.parent) : '';
-      html += '<div class=""dc-thread-divider""><span>' + reps.length + (reps.length === 1 ? ' reply' : ' replies') + '</span></div>';
-      html += reps.map(privMsgRow).join('');
-      if (stream) stream.innerHTML = html;
-      if (msg) msg.textContent = '';
-    } else if (r.status === 403) { if (msg) msg.textContent = 'You are not a member of this private server.'; }
-    else if (msg) { msg.textContent = 'Could not load this thread.'; }
-  } catch (_) { if (msg) msg.textContent = 'Network error.'; }
-}
-async function setVisibility(sid, makePrivate) { return modCall('/api/server/visibility', { serverId: Number(sid), private: String(!!makePrivate) }); }
-async function addMember(sid, principal) { if (!principal) return; return modCall('/api/server/member/add', { serverId: Number(sid), principal: principal }); }
-async function removeMember(sid, principal) { return modCall('/api/server/member/remove', { serverId: Number(sid), principal: principal }); }
-async function renderSettings() {
-  const panel = document.querySelector('[data-server-settings]'); if (!panel) return;
-  const sid = activeServerId(); if (sid < 1 || !signedIn()) return;
-  // Fetch the roster once per server (observer fires often); the mutate handlers
-  // reset lastSettingsSid to force a refresh after add/remove/visibility.
-  if (sid === lastSettingsSid) return; lastSettingsSid = sid;
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/server/members', JSON.stringify({ serverId: sid }));
-    if (r.status !== 200) return; let j = {}; try { j = JSON.parse(r.text); } catch (_) { return; }
-    const vis = document.querySelector('[data-visibility-state]'); if (vis) vis.textContent = j.private ? 'Private' : 'Public';
-    const tog = document.querySelector('[data-visibility-toggle]'); if (tog) { tog.setAttribute('data-private', j.private ? 'true' : 'false'); tog.textContent = j.private ? 'Make public' : 'Make private'; }
-    const list = document.querySelector('[data-member-list]');
-    if (list) {
-      const ms = j.members || [];
-      list.innerHTML = ms.length
-        ? ms.map(function (m) { return '<li class=""dc-member-row""><span class=""dc-member-name"">' + privEsc(m.name || m.principal) + '</span><button type=""button"" class=""dc-member-remove"" data-remove-member=""' + privEsc(m.principal) + '"">remove</button></li>'; }).join('')
-        : '<li class=""dc-member-empty"">No explicit members yet.</li>';
-    }
-  } catch (_) {}
-}
-document.addEventListener('click', (e) => {
-  const vt = e.target.closest && e.target.closest('[data-visibility-toggle]');
-  if (vt) { e.preventDefault(); e.stopPropagation(); setVisibility(activeServerId(), vt.getAttribute('data-private') !== 'true').then(() => { lastSid = -999; lastSettingsSid = -1; lastPrivRoom = -1; refreshRoleUi(); renderSettings(); }); return; }
-  const dsv = e.target.closest && e.target.closest('[data-delete-server]');
-  if (dsv) {
-    e.preventDefault(); e.stopPropagation();
-    // Two-click arm (no native confirm dialog): first click arms for 4s, second deletes.
-    if (dsv.getAttribute('data-armed') !== '1') {
-      dsv.setAttribute('data-armed', '1'); dsv.classList.add('armed');
-      dsv.textContent = 'Click again to delete — erases all channels';
-      setTimeout(function () { dsv.setAttribute('data-armed', '0'); dsv.classList.remove('armed'); dsv.textContent = 'Delete this server'; }, 4000);
-      return;
-    }
-    deleteServer(activeServerId()); return;
-  }
-  const amb = e.target.closest && e.target.closest('[data-add-member-btn]');
-  if (amb) { e.preventDefault(); e.stopPropagation(); const inp = document.querySelector('[name=memberPrincipal]'); const p = inp ? (inp.value || '').trim() : ''; if (p) addMember(activeServerId(), p).then(() => { if (inp) inp.value = ''; lastSettingsSid = -1; renderSettings(); }); return; }
-  const rmb = e.target.closest && e.target.closest('[data-remove-member]');
-  if (rmb) { e.preventDefault(); e.stopPropagation(); removeMember(activeServerId(), rmb.getAttribute('data-remove-member')).then(() => { lastSettingsSid = -1; renderSettings(); }); return; }
-  const mkm = e.target.closest && e.target.closest('[data-make-member]');
-  if (mkm) { e.preventDefault(); e.stopPropagation(); addMember(activeServerId(), mkm.getAttribute('data-make-member')).then(() => { lastSettingsSid = -1; renderSettings(); }); return; }
-  const sb = e.target.closest && e.target.closest('[data-chat-send]');
+  const sb = e.target.closest('[data-chat-send]');
   if (sb) { e.preventDefault(); e.stopPropagation(); chatSend(); return; }
-  const db = e.target.closest && e.target.closest('[data-chat-delete]');
+  const db = e.target.closest('[data-chat-delete]');
   if (db) { e.preventDefault(); e.stopPropagation(); chatDelete(db.getAttribute('data-chat-delete')); return; }
-  // React: NO stopPropagation so wasp.js's outside-click popover-close still fires after a pick.
-  const rb = e.target.closest && e.target.closest('[data-chat-react]');
+  const rb = e.target.closest('[data-chat-react]');
   if (rb) { e.preventDefault(); chatReact(rb.getAttribute('data-chat-react'), rb.getAttribute('data-react-emoji')); return; }
-  const tb = e.target.closest && e.target.closest('[data-thread-send]');
-  if (tb) { e.preventDefault(); e.stopPropagation(); threadSend(tb); return; }
-  const mdb = e.target.closest && e.target.closest('[data-mod-delete]');
-  if (mdb) { e.preventDefault(); e.stopPropagation(); modDelete(mdb.getAttribute('data-mod-delete')); return; }
-  const mpb = e.target.closest && e.target.closest('[data-mod-pin]');
-  if (mpb) { e.preventDefault(); e.stopPropagation(); modPin(mpb); return; }
-  const mlb = e.target.closest && e.target.closest('[data-mod-lock]');
-  if (mlb) { e.preventDefault(); e.stopPropagation(); modLock(mlb); return; }
-  const mmb = e.target.closest && e.target.closest('[data-mod-mute]');
-  if (mmb) { e.preventDefault(); e.stopPropagation(); modMute(mmb); return; }
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
-  const ta = e.target;
-  if (ta && ta.tagName === 'TEXTAREA' && ta.name === 'text') {
-    const form = ta.closest('form');
+  if (e.key !== 'Enter' || e.shiftKey) return;
+  const t = e.target;
+  if (t && t.tagName === 'TEXTAREA' && t.name === 'text') {
+    const form = t.closest('form');
     if (form && form.querySelector('[data-chat-send]')) { e.preventDefault(); chatSend(); }
-    else if (form && form.querySelector('[data-thread-send]')) { e.preventDefault(); threadSend(form.querySelector('[data-thread-send]')); }
   }
 });
-
-// PRIVATE forum/feed signed-read render (members only) — mirrors renderPrivateChannel.
-async function renderPrivateForum() {
-  const pane = document.querySelector('[data-private-forum]'); if (!pane) return;
-  const stream = document.querySelector('[data-private-forum-stream]'); const msg = document.querySelector('[data-private-forum-msg]');
-  const sid = Number(pane.getAttribute('data-server') || '0'); const tid = Number(pane.getAttribute('data-topic') || '0');
-  if (!signedIn()) { if (msg) msg.textContent = 'Members only — sign in with Internet Identity to view.'; return; }
-  const t = Date.now(); if (sid === lastPFSid && tid === lastPFTid && t - lastPFAt < 2500) return; lastPFSid = sid; lastPFTid = tid; lastPFAt = t;
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/forum/read', JSON.stringify({ serverId: sid, roomId: tid }));
-    if (r.status === 403) { if (msg) msg.textContent = 'You are not a member of this private forum.'; if (stream) stream.innerHTML = ''; return; }
-    if (r.status !== 200) { if (msg) msg.textContent = 'Could not load.'; return; }
-    let j = {}; try { j = JSON.parse(r.text); } catch (_) {}
-    if (msg) msg.textContent = '';
-    let html = '';
-    if (j.mode === 'topic') {
-      html += '<h1 class=""fr-title"">' + privEsc(j.title) + (j.locked ? ' <span class=""fr-lock-tag"">🔒 Locked</span>' : '') + '</h1>';
-      (j.posts || []).forEach(function (p) {
-        html += '<div class=""fr-post' + (p.isAnswer ? ' fr-answer' : '') + '"">'
-          + '<div class=""fr-post-head""><span class=""fr-author"">' + privEsc(p.author) + '</span>'
-          + (p.op ? ' <span class=""fr-op-badge"">OP</span>' : '') + (p.isAnswer ? ' <span class=""fr-answer-tag"">✓ Accepted</span>' : '')
-          + '<button type=""button"" class=""fr-solve"" data-forum-solve data-room=""' + tid + '"" data-msg=""' + p.id + '"" data-on=""' + (p.isAnswer ? '0' : '1') + '"">' + (p.isAnswer ? 'Unmark' : '✓ Mark answer') + '</button></div>'
-          + '<div class=""fr-body"">' + (p.html || '') + '</div>'
-          + '<div class=""fr-postfoot""><span class=""fr-votes""><button type=""button"" class=""fr-vote"" data-forum-vote data-msg=""' + p.id + '"" data-dir=""up"">▲</button><span class=""fr-vote-score"">' + (p.score || 0) + '</span><button type=""button"" class=""fr-vote"" data-forum-vote data-msg=""' + p.id + '"" data-dir=""down"">▼</button></span></div>'
-          + '</div>';
-      });
-      if (!j.locked) html += '<div class=""fr-reply-box""><textarea class=""fr-reply-input"" data-forum-reply-text=""' + tid + '"" rows=""3"" placeholder=""Write a reply…""></textarea><button type=""button"" class=""fr-btn fr-btn-primary"" data-forum-reply data-room=""' + tid + '"">Reply</button></div>';
-    } else {
-      const tops = j.topics || [];
-      html += '<div class=""fr-cat-head""><div><h1>' + privEsc(j.name) + '</h1><p class=""fr-cat-sub"">' + tops.length + ' topic' + (tops.length === 1 ? '' : 's') + ' · private forum</p></div><button type=""button"" class=""fr-btn fr-btn-primary"" data-forum-new data-server=""' + sid + '"">+ New topic</button></div>';
-      html += '<div class=""fr-newform"" data-forum-newform hidden><input class=""fr-newform-title"" data-forum-new-title placeholder=""Topic title"" maxlength=""160"" /><textarea class=""fr-newform-body"" data-forum-new-body rows=""4"" placeholder=""Write your post…""></textarea><div class=""fr-newform-actions""><button type=""button"" class=""fr-btn fr-btn-primary"" data-forum-new-submit data-server=""' + sid + '"">Create topic</button><button type=""button"" class=""fr-btn fr-btn-ghost"" data-forum-new-cancel>Cancel</button></div></div>';
-      if (!tops.length) html += '<div class=""fr-empty""><p>No topics yet. Be the first.</p></div>';
-      else {
-        html += '<ul class=""fr-list"">';
-        tops.forEach(function (tp) {
-          html += '<li class=""fr-row""><a class=""fr-row-main"" href=""/forum?s=' + sid + '&t=' + tp.roomId + '""><span class=""fr-row-title"">' + privEsc(tp.title) + (tp.solved ? ' ✓' : '') + '</span><span class=""fr-row-meta"">by ' + privEsc(tp.author) + '</span></a><span class=""fr-row-stat""><b>' + (tp.replies || 0) + '</b><small>replies</small></span></li>';
-        });
-        html += '</ul>';
-      }
-    }
-    if (stream) stream.innerHTML = html;
-  } catch (_) { if (msg) msg.textContent = 'Network error.'; }
-}
-async function renderPrivateFeed() {
-  const pane = document.querySelector('[data-private-feed]'); if (!pane) return;
-  const stream = document.querySelector('[data-private-feed-stream]'); const msg = document.querySelector('[data-private-feed-msg]');
-  const sid = Number(pane.getAttribute('data-server') || '0');
-  if (!signedIn()) { if (msg) msg.textContent = 'Members only — sign in with Internet Identity to view.'; return; }
-  const t = Date.now(); if (sid === lastPFeedSid && t - lastPFeedAt < 2500) return; lastPFeedSid = sid; lastPFeedAt = t;
-  try {
-    await ensureAgent();
-    const r = await signedCall('POST', '/api/feed/read', JSON.stringify({ serverId: sid }));
-    if (r.status === 403) { if (msg) msg.textContent = 'You are not a member of this private feed.'; if (stream) stream.innerHTML = ''; return; }
-    if (r.status !== 200) { if (msg) msg.textContent = 'Could not load.'; return; }
-    let j = {}; try { j = JSON.parse(r.text); } catch (_) {}
-    if (msg) msg.textContent = '';
-    const posts = j.posts || []; const roomId = j.roomId || 0;
-    let html = '';
-    if (roomId) html += '<div class=""fd-compose""><textarea class=""fd-input"" data-feed-post-text=""' + roomId + '"" rows=""2"" placeholder=""Post to this feed…""></textarea><button type=""button"" class=""fd-btn fd-btn-primary"" data-feed-post data-room=""' + roomId + '"">Post</button></div>';
-    html += posts.length ? posts.map(feedPostRow).join('') : '<div class=""fd-empty""><p>No posts yet.</p></div>';
-    if (stream) stream.innerHTML = html;
-  } catch (_) { if (msg) msg.textContent = 'Network error.'; }
-}
-
-const root = document.getElementById('wasp-root');
-if (root) { let pend = null; new MutationObserver(() => { if (pend) return; pend = requestAnimationFrame(() => { pend = null; refreshRoleUi(); renderPrivateChannel(); renderPrivateThread(); renderSettings(); feedHomeTick(); renderPrivateForum(); renderPrivateFeed(); }); }).observe(root, { childList: true, subtree: true }); }
-refreshRoleUi();
-renderPrivateChannel();
-renderPrivateThread();
-renderSettings();
-feedHomeTick();
-renderPrivateForum();
-renderPrivateFeed();
-// Deep-link/full-load recovery: a fresh load of /chat?s=<private> is served as the
-// query-stripped snapshot; SPA-re-render so the private pane/settings paint correctly.
-if (location.pathname === '/chat' && (qp('s') || qp('settings')) && !document.querySelector('[data-private-pane]') && !document.querySelector('[data-server-settings]')) {
-  spaNav(location.pathname + location.search);
-}
-// Forum/feed deep-links: the full-page GET is query-agnostic (renders the default
-// shell), so a hard-load of /forum?s=.. or /feed?s=.. must SPA-re-render to paint the
-// right category/topic/timeline (and, for private servers, the members-only pane).
-if ((location.pathname === '/forum' || location.pathname === '/feed') && location.search && location.search.length > 1) {
-  spaNav(location.pathname + location.search);
-}
 ";
 }
