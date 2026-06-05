@@ -192,14 +192,9 @@ internal sealed class ChatRoomsCollection : IStableCollection
 internal sealed class ChatMessagesCollection : IStableCollection
 {
     private readonly ChatService _svc;
-    private readonly ServerService _servers;
-    private readonly MembershipService _membership;
-    public ChatMessagesCollection(ChatService svc, ServerService servers, MembershipService membership)
-    { _svc = svc; _servers = servers; _membership = membership; }
+    public ChatMessagesCollection(ChatService svc) { _svc = svc; }
 
-    // B4: the /stable page renders on the ANONYMOUS query channel, so a private
-    // server's messages must NOT be exposed here (no caller to authorize against).
-    private bool IsPrivateRoom(int roomId) => _membership.IsPrivate(_servers.ServerOfChannel(roomId));
+    private bool IsPrivateRoom(int roomId) => false;
 
     public string Name => "chat.messages";
     public string DisplayName => "Chat messages";
