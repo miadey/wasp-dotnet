@@ -9,6 +9,7 @@
 | [Architecture](ARCHITECTURE.md) | Execution model, source map, build pipeline |
 | [Bzzz](../bzzz/README.md) | Social application, local setup, persistence, encryption limits |
 | [Testing](TESTING.md) | Executable checks, dated results, CI coverage and gaps |
+| [GitHub issue audit — 2026-11-06](ISSUE_AUDIT_2026-11-06.md) | Review of 53 open issues, closure evidence and remaining gaps |
 | [Maintenance](MAINTENANCE.md) | Cleanup choices and files intentionally retained |
 | [Runtime guide](../runtime/README.md) | Experimental track and recorded blockers |
 
