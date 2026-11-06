@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Wasp.Http</RootNamespace>
+    <AssemblyName>Wasp.Http</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>Wasp.Http</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Description>HTTP gateway adapter for Wasp.IcCdk: serve canister endpoints over the IC HTTP gateway with a tiny route table.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Wasp.IcCdk\Wasp.IcCdk.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,36 @@
+service : {
+    http_request : (record {
+        method : text;
+        url : text;
+        headers : vec record { text; text };
+        body : blob;
+    }) -> (record {
+        status_code : nat16;
+        headers : vec record { text; text };
+        body : blob;
+        upgrade : opt bool;
+    }) query;
+    http_request_update : (record {
+        method : text;
+        url : text;
+        headers : vec record { text; text };
+        body : blob;
+    }) -> (record {
+        status_code : nat16;
+        headers : vec record { text; text };
+        body : blob;
+        upgrade : opt bool;
+    });
+    // vetKeys (vetKD) for end-to-end-encrypted 1:1 DMs. vetkd_derive binds the
+    // derived key to the canonical {caller, peer} conversation id (built on the
+    // canister from msg_caller, so a caller can only derive keys for its own
+    // conversations); the key is returned ENCRYPTED to the caller's transport
+    // key — the canister never sees it.
+    // Replies are the raw key blob (the canister unwraps the management
+    // canister's single-field record and returns the bytes directly).
+    vetkd_pubkey : () -> (blob);
+    vetkd_derive : (record {
+        peer : text;
+        transport_public_key : blob;
+    }) -> (blob);
+}

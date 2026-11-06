@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Wasp.IcCdk</RootNamespace>
+    <AssemblyName>Wasp.IcCdk</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>true</IsPackable>
+    <PackageId>Wasp.IcCdk</PackageId>
+    <Version>0.1.0-alpha</Version>
+    <Description>.NET CDK for Internet Computer canisters. Compiles via NativeAOT-LLVM to a deployable canister wasm with no Rust glue.</Description>
+    <!-- The library never targets wasi-wasm itself; canister projects do. -->
+  </PropertyGroup>
+
+</Project>

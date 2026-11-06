@@ -2,8 +2,8 @@
 **/bin/
 **/obj/
 
-# extracted Bzzz repo lives in a nested git repo under bzzz/ — never track it here
-bzzz/
+# Bzzz sources are included; keep its local Git metadata out of this repo.
+bzzz/.git/
 
 # rust build artifacts
 **/target/

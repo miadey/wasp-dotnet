@@ -1,5 +1,12 @@
 # wasp-dotnet
 
+## Bzzz application
+
+The complete **Bzzz** social application (chat, forums, feed, and encrypted direct
+messages) is included in [`bzzz/`](bzzz/README.md). Its canister application lives
+in [`bzzz/aot/samples/BlazorWasp/`](bzzz/aot/samples/BlazorWasp/).
+This standalone source snapshot includes its own framework and build tools.
+
 [![status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/miadey/wasp-dotnet)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![dotnet](https://img.shields.io/badge/.NET-10-512BD4)](https://dotnet.microsoft.com)
