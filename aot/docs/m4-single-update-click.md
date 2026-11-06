@@ -1,5 +1,8 @@
 # M4 — Collapse a Blazor click from TWO consensus updates to ONE
 
+> **Historical interaction investigation.** For current onboarding and validation,
+> use the [documentation index](../../docs/README.md).
+
 **Status:** design only (no code in this doc)
 **Owner area:** `Wasp.AspNetCore.Blazor.Server` transport + client shim
 **Goal:** A single user click on an `@onclick` handler in an `InteractiveServer`

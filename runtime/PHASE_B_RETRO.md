@@ -1,5 +1,9 @@
 # Phase B retrospective — Mono boots inside the canister, exits early
 
+> **Historical research record.** Read the [runtime guide](README.md) first.
+> Observations and proposed commands below are preserved from the investigation;
+> they are not a newly verified runtime or production deployment procedure.
+
 **Status:** the infrastructure for Phase B is in place. Mono actually
 executes inside the canister but calls `exit(1)` very early because we
 haven't yet given it the runtime arguments + VFS it needs.

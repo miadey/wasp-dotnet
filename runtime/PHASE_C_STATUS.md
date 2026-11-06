@@ -1,5 +1,9 @@
 # Phase C status — asyncify chunking + Mono runtime boot
 
+> **Historical research record.** Read the [runtime guide](README.md) first.
+> Observations and proposed commands below are preserved from the investigation;
+> they are not a newly verified runtime or production deployment procedure.
+
 ## TL;DR (final state of self-paced loop)
 
 - **Asyncify chunking infrastructure**: complete and proven. Pipeline,

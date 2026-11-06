@@ -1,218 +1,164 @@
 # wasp-dotnet
 
-## Bzzz application
+> **IMPORTANT :** The complete **Bzzz (Bzz)** application is in [`bzzz/`](bzzz/README.md).
+> `aot/samples/BlazorWasp/` is a separate framework demo, not the full application.
+> Bzzz has its own framework copies; changes in the root SDK do not propagate
+> automatically. Existing production canisters hold user data: preserve their
+> stable-memory layout and use a reviewed **upgrade**, never a reinstall.
 
-The complete **Bzzz** social application (chat, forums, feed, and encrypted direct
-messages) is included in [`bzzz/`](bzzz/README.md). Its canister application lives
-in [`bzzz/aot/samples/BlazorWasp/`](bzzz/aot/samples/BlazorWasp/).
-This standalone source snapshot includes its own framework and build tools.
+**C# / .NET 10 applications compiled to Internet Computer canisters, plus the
+Bzzz social application built on that stack.** This is an alpha source repository:
+framework libraries, examples, application code, and research are kept together.
 
-[![status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/miadey/wasp-dotnet)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![dotnet](https://img.shields.io/badge/.NET-10-512BD4)](https://dotnet.microsoft.com)
-[![ic](https://img.shields.io/badge/Internet%20Computer-canister-29ABE2)](https://internetcomputer.org)
+New contributor? Read [Getting started](CONTRIBUTING.md), then
+[Architecture](docs/ARCHITECTURE.md). For the social application, go directly to
+[Bzzz](bzzz/README.md). The [documentation index](docs/README.md) distinguishes
+current guides from historical reports and proposals.
 
-The first .NET CDK for the Internet Computer. Two stories under one roof: a
-shipped, working **NativeAOT-LLVM** path that compiles your C# directly into
-canister wasm today, and an in-progress **runtime** path that re-hosts
-Microsoft's pre-built `dotnet.native.wasm` (the Blazor WebAssembly engine)
-inside an ICP canister to give you the full BCL plus reflection. Pick AOT for
-small, fast, simple canisters; pick the runtime path when you need ASP.NET
-Core, full reflection, or `Reflection.Emit`.
+## What is in this repository?
 
-> Alpha. APIs and on-disk layout will change. Pin a commit; expect breaking
-> changes between releases.
+| Area | Purpose | Start here |
+| --- | --- | --- |
+| `aot/Wasp.*` | CDK (canister development kit), HTTP, ASP.NET Core adapters, Razor rendering, persistence | [Architecture](docs/ARCHITECTURE.md) |
+| `aot/samples/` | Small examples, framework integration demos, and diagnostic reproductions | [Sample map](#samples-and-experiments) |
+| `bzzz/` | **Bzzz** (also called Bzz): chat, servers/channels, forums, social feed, direct messages | [Application guide](bzzz/README.md) |
+| `shared/tools/` | Wasm export rewriting, WASI stubs, and framework DLL rewriting | [Build pipeline](docs/ARCHITECTURE.md#build-pipeline) |
+| `runtime/` | Experimental Mono/.NET runtime hosting inside a canister | [Research status](runtime/README.md) |
+| `docs/` | Architecture, validation, historical design records, and future plans | [Index](docs/README.md) |
 
----
+### Two `BlazorWasp` projects: choose the correct one
 
-## Status
+- **`bzzz/aot/samples/BlazorWasp/` is Bzzz.** It contains the social services,
+  forum/feed pages, private messages, and browser-side vetKD encryption.
+- **`aot/samples/BlazorWasp/` is the framework demonstration.** It retains the
+  base shell, simple chat, and embedded Tetris/CRM browser applications after
+  Bzzz was extracted. It is not the full social application.
 
-| Package / sample              | Path                              | Status            |
-|------------------------------ |-----------------------------------|-------------------|
-| `Wasp.IcCdk`                  | `aot/Wasp.IcCdk/`                 | shipped (alpha)   |
-| `Wasp.IcCdk.SourceGenerator`  | `aot/Wasp.IcCdk.SourceGenerator/` | shipped (alpha)   |
-| `Wasp.Http`                   | `aot/Wasp.Http/`                  | shipped (alpha)   |
-| `Wasp.Outcalls`               | `aot/Wasp.Outcalls/`              | shipped (alpha)   |
-| `Wasp.WebSockets`             | `aot/Wasp.WebSockets/`            | shipped (alpha)   |
-| `samples/HelloWorld`          | `aot/samples/HelloWorld/`         | shipped           |
-| `samples/Counter`             | `aot/samples/Counter/`            | shipped           |
-| `samples/HelloWeb`            | `aot/samples/HelloWeb/`           | shipped           |
-| `samples/HelloFetch`          | `aot/samples/HelloFetch/`         | shipped           |
-| `samples/HelloChat`           | `aot/samples/HelloChat/`          | shipped           |
-| `samples/BlazorChat`          | `aot/samples/BlazorChat/`         | shipped           |
-| `runtime/wasp_canister`       | `runtime/wasp_canister/`          | Phase A — WIP     |
-| `runtime/WaspHost`            | `runtime/wasp_dotnet_app/`        | Phase B — planned |
-| `Wasp.Runtime.AspNetCore`     | `runtime/` (TBD)                  | Phase C — planned |
-| `shared/tools/wasi-stub`      | `shared/tools/wasi-stub/`         | shipped           |
-| `shared/tools/icp-publish`    | `shared/tools/icp-publish/`       | shipped           |
+Bzzz includes its own copies of the Wasp framework and build tools. It is a
+regular tracked directory in this repository, not a Git submodule. Updating
+`aot/Wasp.*` does **not** update `bzzz/aot/Wasp.*`; review and port shared fixes
+explicitly. Bzzz retains the assembly name `BlazorWasp` for its existing build
+and canister exports.
 
----
+## How it works
 
-## Quick-start (AOT story)
+```mermaid
+flowchart LR
+    Source["C# / Razor source"] --> AOT["NativeAOT-LLVM in Linux x64 Docker"]
+    AOT --> Wasm["Wasm post-processing"]
+    Wasm --> Canister["ICP canister"]
+    Browser["Browser + JavaScript"] -->|"queries: render/read"| Canister
+    Browser -->|"signed updates: writes"| Canister
+    Canister --> Stable["Stable memory"]
+```
 
-Prerequisites: Docker, [`dfx`](https://internetcomputer.org/docs/current/developer-docs/setup/install/),
-[`wasm-tools`](https://github.com/bytecodealliance/wasm-tools), and the
-`wasp-dotnet-build` Docker image (see `aot/docker/Dockerfile.build`).
+The AOT path compiles application code ahead of time into WebAssembly. The IC
+hosts that module as a canister. `Wasp.AspNetCore` adapts IC HTTP entrypoints to
+an ASP.NET Core pipeline; the Wasp Razor renderer returns HTML from queries and
+handles events through updates. Bzzz stores its data in stable memory rather
+than an external SQL database.
+
+ASP.NET Core and Razor adapters **are implemented in `aot/`**. This does not
+mean every ASP.NET Core feature works unchanged: filesystem, sockets, threading,
+cryptography, reflection, and asynchronous I/O have specific restrictions. Read
+[unsupported/substituted APIs](aot/Wasp.AspNetCore/UNSUPPORTED.md).
+`Wasp.OrthogonalPersistence` is a small DbContext-style persistence library,
+**not Microsoft Entity Framework Core**.
+
+The separate `runtime/` experiment tries to host the Mono runtime instead of
+AOT-compiling the application. Its recorded boot blockers remain documented;
+it is not the recommended onboarding route or a proven full-.NET alternative.
+
+## First local build
+
+Requirements: Docker with Linux x64 support, Rust/Cargo, `wasm-tools`, `ic-wasm`,
+and `dfx` for local deployment. Host .NET 10 is needed for unit tests and browser
+WASM sub-apps; Binaryen's `wasm-opt` is also needed for Bzzz.
+See [tool setup and versions](CONTRIBUTING.md#toolchain).
+
+From the repository root:
 
 ```bash
-git clone https://github.com/miadey/wasp-dotnet.git
-cd wasp-dotnet/aot
+docker build --platform linux/amd64 -t wasp-dotnet-build:latest \
+  -f aot/docker/Dockerfile.build aot/docker
+cargo build --release --manifest-path shared/tools/wasi-stub/Cargo.toml
 
-# build the Docker image once
-docker build -t wasp-dotnet-build:latest -f docker/Dockerfile.build .
+# Compile, rewrite, validate, and size-check HelloWorld; no deployment.
+SAMPLES=HelloWorld bash .github/workflows/build-canisters.sh
+```
 
-# build the wasi-stub helper
-(cd ../shared/tools/wasi-stub && cargo build --release)
+Then, for a **new local** canister:
 
-# bring up a local replica and deploy HelloWorld
-dfx start --background --clean
+```bash
+cd aot
+dfx start --background
 dfx canister create hello
-./samples/HelloWorld/build-and-deploy.sh
-
-# call the canister
+dfx canister install hello --mode install \
+  --wasm samples/HelloWorld/HelloWorld.canister.wasm
 dfx canister call hello hello
 ```
 
-You should see `("Hello from C# compiled to wasm by .NET 10")`.
+The source returns `("Hello from C# compiled to wasm by .NET 10")`.
+Use `--mode upgrade` for later installs when retaining state. The older
+HelloWorld `build-and-deploy.sh` uses `reinstall`; do not use that script on a
+canister whose data you need to keep.
 
----
+For Bzzz's build and first local install, follow [its own guide](bzzz/README.md#build-and-run-locally).
+Its build script builds only by default. Do not confuse the sample deployment
+configuration in `aot/` with the Bzzz configuration in `bzzz/aot/`.
 
-## Architecture
+## Samples and experiments
 
-```
-┌──────────────────────────┐    ┌───────────────────────────┐    ┌─────────────────────┐
-│ inputs                   │    │ build pipeline            │    │ canister            │
-├──────────────────────────┤    ├───────────────────────────┤    ├─────────────────────┤
-│                          │    │                           │    │                     │
-│ AOT story                │    │  dotnet publish           │    │                     │
-│  ─ Program.cs            │───▶│   /p:IlcLlvmTarget=       │───▶│  HelloWorld         │
-│  ─ Wasp.IcCdk            │    │   wasm32-wasi             │    │   .canister.wasm    │
-│                          │    │                           │    │                     │
-│                          │    │  icp-publish.sh           │    │  ┌──────────────┐   │
-│                          │    │   (rename exports)        │    │  │ ic0 imports  │   │
-│                          │    │                           │    │  └──────────────┘   │
-│                          │    │  wasi-stub                │    │                     │
-│                          │    │   (no-op WASI)            │    │                     │
-│                          │    │                           │    │                     │
-│                          │    │  dfx canister install     │    │                     │
-│                          │    │                           │    │                     │
-├──────────────────────────┤    ├───────────────────────────┤    ├─────────────────────┤
-│                          │    │                           │    │                     │
-│ runtime story (WIP)      │    │  cargo build              │    │                     │
-│  ─ WaspHost.dll          │    │   wasp_canister.wasm      │    │  merged.canister    │
-│  ─ MS dotnet.native.wasm │───▶│                           │───▶│   .wasm             │
-│  ─ wasp_canister (Rust)  │    │  wasm-merge               │    │                     │
-│  ─ corelib + refpack     │    │   ─ resolve dotnet's      │    │  ┌──────────────┐   │
-│                          │    │     env+wasi imports      │    │  │ Mono engine  │   │
-│                          │    │                           │    │  ├──────────────┤   │
-│                          │    │  icp-publish + wasi-stub  │    │  │ Rust shim    │   │
-│                          │    │                           │    │  ├──────────────┤   │
-│                          │    │  upload corelib + dlls    │    │  │ ic0 imports  │   │
-│                          │    │   to stable memory        │    │  └──────────────┘   │
-└──────────────────────────┘    └───────────────────────────┘    └─────────────────────┘
-```
+All paths below are under [`aot/samples/`](aot/samples/).
 
----
+| Sample(s) | What to learn |
+| --- | --- |
+| `HelloWorld`, `Counter` | Candid entrypoints, queries/updates, stable state |
+| `HelloWeb`, `HelloFetch` | HTTP responses and callback-based HTTPS outcalls |
+| `HelloChat`, `BlazorChat` | WebSocket CDK and a separate browser WASM frontend |
+| `AspNetCoreHello`, `AspNetCoreEndpoints`, `AspNetCoreApi` | ASP.NET Core canister hosting and routing |
+| `RazorOnIc`, `BlazorVanilla`, `WebApiVanilla`, `MvcVanilla` | Razor, Blazor, Web API, and MVC adaptation examples |
+| `CircuitOnIc` | Blazor Server circuit/transport experiment; distinct from Wasp render-as-query |
+| `BlazorWasp`, `TetrisWasm`, `CrmWasm` | Framework demo host and embedded browser sub-apps |
+| `TodoEf` | Wasp's own stable-memory persistence API despite the historical name |
+| `VetkdCsharpPoc` | Host-side C# vetKD test-vector reproduction |
+| `Issue80Repro`, `_AspNetSmoke` | Diagnostic/compiler reproductions; retain for regression work |
 
-## When to pick which story
+[`aot/templates/`](aot/templates/) contains starter projects. Inspect their
+project references before copying them outside this source tree.
 
-| Concern                         | `aot/`                               | `runtime/`                                       |
-|---------------------------------|--------------------------------------|--------------------------------------------------|
-| Status                          | shipped, alpha                       | Phase A in progress                              |
-| Canister wasm size              | small (~1–3 MB per canister)         | larger (~6–8 MB shared engine + uploaded dlls)   |
-| Cold start                      | fast                                 | slower (engine init + assembly load)             |
-| Hot-path instructions / call    | low                                  | higher (interp; jiterpreter disabled)            |
-| Reflection (read-only)          | very limited (trim-safe only)        | full                                             |
-| `Reflection.Emit` / dynamic IL  | not supported                        | full                                             |
-| Full BCL                        | partial (NativeAOT trimmed)          | full                                             |
-| Managed exceptions              | yes                                  | v0.1: ban / trap (Emscripten C++ EH stubbed)     |
-| ASP.NET Core minimal API        | not realistic                        | Phase C target                                   |
-| EF Core / dynamic ORMs          | no (relies on `Reflection.Emit`)     | yes (Phase C onward)                             |
-| Crypto via `System.Security.*`  | mostly `PlatformNotSupported`        | works (full BCL)                                 |
-| Best fit                        | tight, performance-sensitive logic   | porting existing .NET code, dynamic frameworks   |
+## Validation and current limits
 
----
+The repository has four host-side xUnit projects, a JavaScript decoder
+cross-check, and a local-canister HTTP acceptance harness. The current GitHub
+workflow builds five basic AOT canisters and publishes `BlazorChat`; it does
+**not** automatically validate Bzzz, all host tests, or the runtime experiment.
 
-## Known limitations of the AOT story today
+On **2026-11-06**, the four host suites produced **147 passed, 1 failed, 0 skipped**.
+The failing router test and exact reproduction commands are in
+[Testing](docs/TESTING.md). These results do not establish an end-to-end Bzzz
+build, a live deployment, or a browser acceptance result.
 
-- **No `Reflection.Emit`.** NativeAOT explicitly forbids it. Frameworks that
-  rely on runtime IL generation (EF Core, Newtonsoft.Json's reflection path,
-  many DI containers) will not work.
-- **No full BCL.** Trimming is aggressive; many APIs link out. Source-gen
-  alternatives exist for JSON (`System.Text.Json` with the source generator)
-  and similar.
-- **`System.Security.Cryptography.SHA256.HashData()` is `PlatformNotSupported`
-  under wasi-wasm.** `Wasp.IcCdk` ships a hand-rolled SHA-256 to work around
-  this. The same applies to most of `System.Security.Cryptography`.
-- **No threading.** The IC canister model is single-threaded; user code must
-  be too.
-- **macOS arm64 hosts cannot build directly.** NativeAOT-LLVM has no Mac
-  arm64 host package yet, so all wasm builds run inside the
-  `wasp-dotnet-build` Linux x64 Docker image. Linux x64 hosts can build
-  natively (see `aot/docker/Dockerfile.build` for the toolchain set).
-- **C++ exception ABI / Emscripten SJLJ** is stubbed; managed code that
-  throws will trap the canister. Catch at boundaries you control.
+Before changing persisted structures or deploying an existing canister, read
+[Bzzz's persistence/deployment notes](bzzz/README.md#persistence-and-upgrades).
+`aot/canister_ids.json` and `bzzz/aot/canister_ids.json` contain existing mainnet
+IDs; they are not an instruction to deploy to those targets.
 
----
+## Documentation and contribution
 
-## The five sample canisters + Blazor front-end
+- [Getting started and contribution workflow](CONTRIBUTING.md)
+- [Architecture and source map](docs/ARCHITECTURE.md)
+- [Bzzz application, security boundaries, and local setup](bzzz/README.md)
+- [Tests and known gaps](docs/TESTING.md)
+- [Documentation index and historical records](docs/README.md)
+- [Repository cleanup record](docs/MAINTENANCE.md)
 
-| Sample                      | Role                                                                 |
-|-----------------------------|----------------------------------------------------------------------|
-| `aot/samples/HelloWorld`    | Smallest possible canister: one query method, no state.              |
-| `aot/samples/Counter`       | `[CanisterQuery]` / `[CanisterUpdate]` + `StableCell<ulong>`.        |
-| `aot/samples/HelloWeb`      | `http_request` handler — serves HTML over the IC HTTP gateway.       |
-| `aot/samples/HelloFetch`    | Outbound HTTPS via `Wasp.Outcalls` — IC HTTPS outcalls from C#.      |
-| `aot/samples/HelloChat`     | `Wasp.WebSockets` server — IC-WebSocket protocol implementation.     |
-| `aot/samples/BlazorChat`    | Blazor WebAssembly front-end talking to `HelloChat`. Browser side.   |
+Project work is tracked in [GitHub issues](https://github.com/miadey/wasp-dotnet/issues).
+Use the source and current guides to assess implemented features; old milestone
+notes are retained as history.
 
-`BlazorChat` is also the source of the pre-built `dotnet.native.wasm` the
-runtime story re-hosts.
+## License and upstream projects
 
----
-
-## Roadmap
-
-Tracked on GitHub.
-
-- [Issues](https://github.com/miadey/wasp-dotnet/issues)
-- [Milestones](https://github.com/miadey/wasp-dotnet/milestones)
-  - **P0: Bootstrap** — repo, docs, CI for the AOT story
-  - **Phase A: Hello-world via wasm-merge** — Rust shim + `wasm-merge` spike
-  - **Phase B: Friendly C# CDK** — same `[CanisterQuery]` ergonomics, runtime-side
-  - **Phase C: ASP.NET Core integration** — `IcServer : IServer`, asyncify chunking
-  - **Phase D: Polish + mainnet** — perf table, NuGet 0.1.0-preview, mainnet IDs
-
----
-
-## Repo layout
-
-```
-wasp-dotnet/
-  aot/              # shipped CDK + samples (NativeAOT-LLVM)
-  runtime/          # in-progress runtime path (wasm-merge dotnet.native.wasm)
-  shared/tools/     # wasi-stub, icp-publish — used by both stories
-  docs/
-  .github/workflows/
-```
-
----
-
-## License
-
-[MIT](LICENSE) — copyright 2026 miadey.
-
-## Author
-
-[miadey](https://github.com/miadey)
-
-## Acknowledgements
-
-Standing on the shoulders of:
-
-- [`dotnet/runtime`](https://github.com/dotnet/runtime) — .NET 10, NativeAOT-LLVM, and Mono's WASM build
-- [`dfinity/sdk`](https://github.com/dfinity/sdk) — `dfx`, the Internet Computer SDK
-- [`omnia-network/ic-websocket-cdk-rs`](https://github.com/omnia-network/ic-websocket-cdk-rs) — the IC-WebSocket protocol that `Wasp.WebSockets` ports
-- [`bytecodealliance/wasm-tools`](https://github.com/bytecodealliance/wasm-tools) — wasm parsing, printing, component tooling
-- [`WebAssembly/binaryen`](https://github.com/WebAssembly/binaryen) — `wasm-merge`, the linker that makes the runtime story possible
-- [`walrus`](https://github.com/rustwasm/walrus) — wasm rewriter behind our `wasi-stub` tool
+[MIT](LICENSE), copyright 2026 miadey. The stack uses .NET/NativeAOT-LLVM, the
+DFINITY SDK, Bytecode Alliance wasm-tools, Binaryen, and Walrus. Vendored framework
+assemblies and JavaScript dependencies retain their upstream licensing terms.

@@ -1,131 +1,165 @@
-# Contributing to wasp-dotnet
+# Getting started and contributing
 
-Thanks for considering a contribution. wasp-dotnet is alpha; expect rough
-edges and breaking changes. This guide covers the dev environment, the
-two-story repo layout, and the PR process.
+Start from the [repository overview](README.md). This guide assumes a fresh
+clone of `miadey/wasp-dotnet` and a shell at its root unless a command changes
+directory. You do not need a production controller identity for compilation
+or host tests.
 
-## Dev environment
+## First-day route
 
-You will need:
-
-- **Docker** (Desktop on macOS / Engine on Linux). All wasm builds for the
-  AOT story run inside the `wasp-dotnet-build` image because NativeAOT-LLVM
-  has no macOS arm64 host package. Linux x64 hosts can build natively but
-  Docker keeps everyone reproducible.
-- **`dfx`** — install via `sh -ci "$(curl -fsSL https://internetcomputer.org/install.sh)"`.
-  Used to spin up a local IC replica and deploy canisters.
-- **Rust nightly** — `rustup toolchain install nightly`. The runtime story's
-  `wasp_canister` and the `shared/tools/wasi-stub` helper both build with
-  Cargo. Stable works for most things; nightly is needed for some unstable
-  attributes used by ic-cdk.
-- **Node 22** — for the Blazor front-end sample's tooling (`dfx generate`
-  produces JS bindings that target this version).
-- **`wasm-tools`** — `cargo install wasm-tools`.
-- **`binaryen`** — `brew install binaryen` (provides `wasm-merge`, used by
-  the runtime story).
-
-One-time bootstrap:
+1. Clone the repository and identify your target: framework (`aot/`), full
+   social application (`bzzz/`), or runtime research (`runtime/`).
+2. Read [Architecture](docs/ARCHITECTURE.md) and, for application work,
+   [Bzzz](bzzz/README.md).
+3. Install the toolchain below and run the [host tests](docs/TESTING.md).
+   Compare against the documented baseline, including the existing failure.
+4. Build HelloWorld without deployment, following the root README. Then test
+   it on a new local canister.
+5. For Bzzz, build its own `wasi-stub` helper and follow its local install
+   instructions. Public-page checks and authenticated/encrypted flows have
+   different prerequisites.
+6. Make a small change, run the relevant checks, and open a focused PR.
 
 ```bash
 git clone https://github.com/miadey/wasp-dotnet.git
 cd wasp-dotnet
-docker build -t wasp-dotnet-build:latest -f aot/docker/Dockerfile.build aot
-(cd shared/tools/wasi-stub && cargo build --release)
+git switch -c codex/short-description
 ```
 
-## Build & deploy a sample
+A fresh clone contains Bzzz sources directly; no submodule initialization is
+needed. The original developer's checkout may still contain a nested
+`bzzz/.git` from its earlier extraction. In that checkout, perform repository
+commits from the **outer repository root**, so changes are published to
+`wasp-dotnet`. The nested metadata is not distributed by GitHub.
 
-The AOT story has a one-shot build script per sample. See
-`aot/samples/HelloWorld/build-and-deploy.sh` as the canonical example —
-build inside Docker, post-process exports with `icp-publish.sh`, replace
-WASI imports with `wasi-stub`, then `dfx canister install`.
+## Toolchain
+
+| Tool | Used for | Version information in this repo |
+| --- | --- | --- |
+| .NET SDK 10 | Host tests, Razor/browser WASM builds | Projects target `net10.0`; host tests checked with SDK `10.0.202` |
+| Docker, Linux x64 containers | NativeAOT compilation, including on Apple Silicon | Image `wasp-dotnet-build:latest`, defined by the Dockerfile |
+| Rust/Cargo | `wasi-stub` | The current CI installs stable Rust |
+| `wasm-tools` | Wasm rewriting/validation | CI pins `1.220.0` |
+| `ic-wasm` | Shrinking/post-processing | CI pins `0.9.1` |
+| Binaryen | `wasm-opt`; `wasm-merge` for runtime research | No repository-wide version pin |
+| `dfx` | Local replica and canister management | No repository-wide version pin |
+| Node.js/npm | Decoder cross-check and HTTP acceptance harness | Use a Node version with built-in `fetch` (18+); no repo-wide pin |
+
+Install tools through their normal distribution channels. These are the
+repository's current dependency choices, not a claim about the latest releases.
+For matching host Wasm tools through Cargo:
 
 ```bash
-dfx start --background --clean
-dfx canister create hello
-./aot/samples/HelloWorld/build-and-deploy.sh
+cargo install wasm-tools --version 1.220.0 --locked
+cargo install ic-wasm --version 0.9.1 --locked
 ```
 
-## Run tests
-
-There is no automated test suite yet. Verify changes by deploying a sample
-and exercising it with `dfx canister call`:
+Verify the tools needed for your task:
 
 ```bash
-dfx canister call hello greet '("world")'
-dfx canister call counter increment
-dfx canister call counter count
+dotnet --version
+docker version
+cargo --version
+wasm-tools --version
+ic-wasm --version
+wasm-opt --version
+dfx --version
+node --version
 ```
 
-When changing a sample or a `Wasp.*` package, smoke-test the affected
-samples before opening a PR. Automated PocketIC integration tests are on
-the Phase B and Phase D milestones.
+The [Dockerfile](aot/docker/Dockerfile.build) installs .NET 10 and WASI SDK 24.0
+and wraps the linker to discard component-type arguments. The image uses the
+floating `sdk:10.0` base tag, so record the image ID when comparing builds.
+[AOT NuGet configuration](aot/NuGet.config) includes public experimental .NET
+feeds. The canister projects pin preview compiler packages; do not casually
+upgrade these or regenerate the vendored assemblies as part of unrelated work.
 
-## Two stories — where to contribute
+```bash
+docker build --platform linux/amd64 -t wasp-dotnet-build:latest \
+  -f aot/docker/Dockerfile.build aot/docker
+docker volume create wasp-nuget
+cargo build --release --manifest-path shared/tools/wasi-stub/Cargo.toml
+```
 
-- **`aot/`** — shipped CDK that compiles C# directly into canister wasm via
-  NativeAOT-LLVM. Best for: bug fixes in `Wasp.IcCdk`, source-generator
-  improvements, new samples that fit within the trim-safe / no-`Reflection.Emit`
-  constraint, IC HTTP / outcalls / WebSockets work.
-- **`runtime/`** — in-progress path that re-hosts Microsoft's pre-built
-  `dotnet.native.wasm` inside a Rust ic-cdk canister via `wasm-merge`. Best
-  for: Rust shim work (the 75 `env` + 10 `wasi` imports), Mono embedding
-  ABI, Candid-via-reflection, ASP.NET Core integration.
+Bzzz needs an additional helper at its own path:
 
-If you are unsure which story your contribution fits, file an issue first.
+```bash
+cargo build --release --manifest-path bzzz/shared/tools/wasi-stub/Cargo.toml
+```
 
-## Issue labels and milestones
+The root `aot/tools` entry is a tracked symlink to `../shared/tools`. Preserve
+symlinks when copying the tree. This setup is written for macOS/Linux shells.
 
-Labels in use (`gh label list`):
+## Working with framework copies
 
-- **Type:** `feature`, `bug`, `docs`, `chore`, `ci`, `build`, `release`,
-  `sample`, `test`, `perf`, `spike`
-- **Area:** `runtime`, `runtime-patch`
-- **Priority:** `priority/critical`
-- **Triage:** `good first issue`, `help wanted`, `question`, `duplicate`,
-  `invalid`, `wontfix`
+The root framework and Bzzz's copied framework are separate source trees.
+For a reusable fix, review both versions and explicitly port the necessary
+changes. Do not replace the whole Bzzz tree with the root demo: their application
+services and embedded assets differ.
 
-Milestones (`gh api repos/miadey/wasp-dotnet/milestones`):
+The checked-in `Vendor/*.dll` assemblies are intentional compiler workarounds.
+Their source rewriters live in `shared/tools/Wasp.RenderTreeWeaver` and
+`shared/tools/Wasp.CircuitHostWeaver`. See the [architecture guide](docs/ARCHITECTURE.md).
+They are required build inputs, not cleanup candidates.
 
-- **P0: Bootstrap** — repo, top-level docs, CI for `aot/`
-- **Phase A: Hello-world via wasm-merge** — single de-risking spike for the
-  runtime story; one managed `Console.WriteLine` reaches `dfx canister logs`
-- **Phase B: Friendly C# CDK** — `[CanisterQuery]`/`[CanisterUpdate]`
-  ergonomics on top of the runtime; reflection-driven Candid; stable structures
-- **Phase C: ASP.NET Core integration** — `IcServer : IServer`, asyncify
-  chunking, streaming responses, `WaspIcHttpClient`
-- **Phase D: Polish + mainnet** — perf table, NuGet 0.1.0-preview, mainnet
-  sample deployments
+`shared/tools/rebuild-vendor.sh` defaults to the separate image name `wasp-build`;
+set `WASP_BUILD_IMAGE=wasp-dotnet-build:latest` when using the image above. Its
+Bzzz copy still includes steps for components outside Bzzz's reduced tree; it
+is not part of the first-build instructions. Review its targets before use.
 
-New issues should pick a milestone and at least one type label.
+## Local deployment
 
-## Code style
+- Run `dfx` in the directory containing the intended `dfx.json`: `aot/` for
+  demos, `bzzz/aot/` for Bzzz, `runtime/` for research.
+- Both AOT configurations use port 4944. Reuse a suitable local replica rather
+  than starting conflicting instances. Record which project and identity you use.
+- First install of an empty canister: `--mode install`. Subsequent state-preserving
+  code replacement: `--mode upgrade`. `reinstall` is for disposable test state.
+- The original sample scripts have different deployment behavior. Bzzz builds
+  only by default; several demos deploy immediately, and HelloWorld reinstalls.
+- Do not copy mainnet credentials or a collaborator's private keys into the repo.
+  GitHub contribution access and canister-controller access are separate.
 
-- **C#** — run `dotnet format` before pushing. The repo uses standard .NET
-  conventions; the source generator emits braces-on-new-line. Prefer
-  expression-bodied members where they improve clarity, not just to save
-  lines.
-- **Rust** — default `rustfmt` (`cargo fmt`). Run `cargo clippy --all-targets`
-  and address warnings or justify them in the PR description.
-- **Shell** — `set -euo pipefail` at the top of every script; absolute paths
-  via `$(cd "$(dirname "$0")/.." && pwd)`.
-- **Markdown** — wrap at ~80 columns where comfortable; do not hard-wrap
-  fenced code blocks or tables.
+For an existing deployment, coordinate the target, identity, state compatibility,
+and recovery procedure with its maintainer. Do not use a mainnet deployment as
+an onboarding smoke test. The Bzzz guide describes the existing target and its
+stable-memory contract.
 
-## PR process
+## Validation and PR workflow
 
-1. Open or claim an issue first for anything non-trivial. Drive-by fixes
-   (typos, broken links, obvious bugs) can skip this.
-2. Branch from `main`: `git checkout -b feat/short-description`.
-3. Keep PRs focused. One logical change per PR; split mechanical
-   refactors from behavior changes.
-4. Run `dotnet format` (C#) and `cargo fmt` (Rust) on touched code.
-5. Smoke-test the affected sample(s) with `dfx canister call`.
-6. Reference the issue (`Fixes #N`) and call out anything reviewers should
-   focus on.
-7. Be responsive to review. Squash on merge.
+Use the commands in [Testing](docs/TESTING.md). Run checks appropriate to the
+changed area, and report **what ran, what passed/failed/skipped, and what was not
+validated**. Host tests do not exercise `ic0` inside a real replica.
 
-## Code of conduct
+Before pushing:
 
-Be kind. Assume good faith. If you see behavior that does not meet that bar,
-email madey@me.com.
+```bash
+git diff --check
+git status --short
+```
+
+Keep C# formatting consistent with neighboring code; use `dotnet format` with
+an explicit project if needed (there is no root solution). Use `cargo fmt` in
+the relevant Rust project. Preserve shell `set -euo pipefail` and resolve paths
+from the script, not a developer-specific home directory.
+
+A PR should describe the problem, changed behavior, validation, and any data
+migration or deployment impact. Link the relevant issue for substantial work.
+Do not describe an old test result or a skipped canister section as a new pass.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| `wasi-stub` not found | Build the helper under the same tree as the script: root or `bzzz/` |
+| `ic-wasm` / `wasm-tools` / `wasm-opt` not found | These run on the host after Docker compilation |
+| Missing framework DLL or Razor/compiler error | Check the committed Vendor assemblies, preview compiler pins, and [unsupported APIs](aot/Wasp.AspNetCore/UNSUPPORTED.md) |
+| New Bzzz canister rejects `upgrade` | Set `WASP_DEPLOY_MODE=install` for the first local install |
+| Bzzz page renders but encrypted DMs fail locally | Read the Internet Identity and vetKD configuration limits in its guide |
+| A host test fails on `BatchId` normalization | Compare with the documented existing router-test failure |
+| Root demo changes do not affect Bzzz | You edited the other framework/application copy |
+| Runtime fails during Mono boot | Read [runtime status](runtime/README.md); this is an experimental path |
+
+The RNG scan scripts currently hard-code `/Users/miadey/dev/csharp`; the Bzzz
+copy therefore scans the outer demo on the original machine. They are not a
+portable Bzzz validation gate until their source-root handling is corrected.

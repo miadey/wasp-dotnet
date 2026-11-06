@@ -5,6 +5,9 @@
 # Bzzz sources are included; keep its local Git metadata out of this repo.
 bzzz/.git/
 
+# Machine-local agent process state, not project configuration.
+.claude/scheduled_tasks.lock
+
 # rust build artifacts
 **/target/
 

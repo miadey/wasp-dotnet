@@ -1,5 +1,9 @@
 # Sample test plan
 
+> **Historical sample-validation record.** Results below have not been rerun as
+> part of the documentation refresh. Use [Testing](../../docs/TESTING.md) for
+> current commands, coverage boundaries, and the dated host-test baseline.
+
 Four samples — one per `Wasp.Templates` shape. All four build to wasm
 via the same docker pipeline (`build-and-deploy.sh` in each
 directory), deploy through `dfx`, and respond on the boundary node's

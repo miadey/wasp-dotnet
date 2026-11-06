@@ -1,5 +1,9 @@
 # M4.S2 — CircuitHost ↔ SignalR coupling spike
 
+> **Historical implementation record.** Paths, status claims, and measurements
+> below refer to that milestone. Use the [current architecture](ARCHITECTURE.md)
+> and [test commands](TESTING.md) for new work.
+
 **Session:** M4.S2 (issue #58). **Status:** research spike — no runtime behavior shipped. **Deliverable:** this doc + `aot/Wasp.AspNetCore.Blazor.Server/src/IcCircuitTransport.cs` (interface only).
 
 Goal: identify the exact API seam to replace so that S3 can land an `IcCircuitTransport` implementation that routes Blazor's CircuitHost over `Wasp.WebSockets` instead of SignalR.

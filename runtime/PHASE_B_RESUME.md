@@ -1,5 +1,9 @@
 # Phase B resume plan
 
+> **Historical research record.** Read the [runtime guide](README.md) first.
+> Observations and proposed commands below are preserved from the investigation;
+> they are not a newly verified runtime or production deployment procedure.
+
 Standalone plan to pick up Phase B work after clearing the session.
 Last commit: `12fdfc2` "Phase B: PIN-POINT trap to dn_simdhash function pointers"
 

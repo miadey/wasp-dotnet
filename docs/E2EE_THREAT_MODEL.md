@@ -1,5 +1,10 @@
 # WASP Bzzz — E2EE Threat Model (Phase 0)
 
+> **Historical Phase 0 record.** This predates the current Bzzz browser vetKD
+> implementation. Claims below about plaintext-only DMs describe that earlier
+> baseline. Read the [current Bzzz guide](../bzzz/README.md) for implemented
+> encryption, legacy-message handling, and remaining trust boundaries.
+
 Status: Phase-0 deliverable. Honest baseline. No overstatement.
 
 ## Purpose

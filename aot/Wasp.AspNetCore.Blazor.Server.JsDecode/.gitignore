@@ -1,5 +1,4 @@
 node_modules/
-package-lock.json
 vectors.json
 Emit/bin/
 Emit/obj/

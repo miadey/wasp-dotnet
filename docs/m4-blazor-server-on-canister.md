@@ -1,5 +1,9 @@
 # M4 — Blazor Server on Canister
 
+> **Historical circuit-integration design.** This is not the onboarding guide
+> for Bzzz, which uses Wasp render-as-query. See [Architecture](ARCHITECTURE.md)
+> and the [Bzzz application guide](../bzzz/README.md).
+
 Multi-session implementation plan for running Blazor's **InteractiveServer** render mode (a.k.a. "Blazor Server") on an ICP canister. The work in `main` today is **Blazor Static SSR** — server-rendered HTML, no client interactivity. M4 turns that into a real interactive Blazor Server app where the C# event handlers run on the canister and UI diffs stream back to the browser over a persistent connection.
 
 ## What "Blazor Server" actually means (vs Blazor WASM, Blazor Static SSR)

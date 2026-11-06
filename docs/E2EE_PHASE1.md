@@ -1,5 +1,10 @@
 # WASP Bzzz — E2EE Phase 1: Crypto Foundations (design + the constraint that shapes everything)
 
+> **Historical design record.** Statements below that the key directory, vetKD
+> exports, or RNG guard do not exist are superseded by the current Bzzz source.
+> The planned protocol is not a claim of full implementation. Start with the
+> [current Bzzz guide](../bzzz/README.md).
+
 Status: design record. Honest baseline, no overstatement (companion to
 `docs/E2EE_THREAT_MODEL.md`). Captures the Phase 1 design and the architectural
 constraint found while scoping it, so Phase 2 executes without re-deriving it.

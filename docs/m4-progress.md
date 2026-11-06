@@ -1,5 +1,9 @@
 # M4 progress — Blazor Server on canister
 
+> **Historical milestone record.** Preserve the original observations below.
+> For current setup, implementation boundaries, and newly executed checks, see
+> the [documentation index](README.md) and [testing guide](TESTING.md).
+
 Snapshot as of 2026-05-18 (afternoon — feature-switch trim session).
 Companion to `m4-blazor-server-on-canister.md` (plan) and
 `m4-s2-circuit-coupling.md` (spike).

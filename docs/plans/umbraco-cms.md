@@ -1,5 +1,11 @@
 # WaspCMS — Per-Site IC-Native CMS (Umbraco Clone)
 
+> **Proposal, not implemented product documentation.** Moved from
+> `umbracoClone.md` during the 2026-11-06 cleanup. This preserves the original
+> plan, estimates, paths, and assumptions; it does not establish a working CMS,
+> current platform limits, or a completed site migration. Start with the
+> [repository guide](../../README.md) for the implemented stack.
+
 ## Context
 
 Migrate ~5-ish business sites (first target: `croisieresaml.com`, ~50–75 pages, image-heavy, multi-language) off Umbraco and onto the Internet Computer. Hosting Umbraco proper inside a canister is infeasible (plugin/reflection model + EF Core AOT issues + wasm size). The answer is an **Umbraco-flavoured CMS purpose-built for this stack** — same editorial UX, fraction of the feature set, fully on-chain.

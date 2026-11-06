@@ -1,5 +1,9 @@
 # Phase A retrospective — first end-to-end attempt
 
+> **Historical research record.** Read the [runtime guide](README.md) first.
+> Observations and proposed commands below are preserved from the investigation;
+> they are not a newly verified runtime or production deployment procedure.
+
 **Status:** the build pipeline works through every step we designed, and
 surfaces one real validation issue at the final step. ICP install fails;
 all upstream stages pass.
